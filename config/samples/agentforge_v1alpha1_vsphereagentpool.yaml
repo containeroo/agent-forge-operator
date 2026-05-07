@@ -1,0 +1,48 @@
+apiVersion: agentforge.containeroo.ch/v1alpha1
+kind: VsphereAgentPool
+metadata:
+  labels:
+    app.kubernetes.io/name: agent-forge-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: demo-worker
+  namespace: demo
+spec:
+  dryRun: true
+  hostedClusterRef:
+    name: demo
+  nodePoolRef:
+    name: demo-worker
+  infraEnvRef:
+    name: demo
+  controlPlaneNamespace: demo-demo
+  vsphere:
+    credentialsSecretRef:
+      name: vsphere-credentials
+    datacenter: dc1
+    datastoreCluster: workload-datastore-cluster
+    isoDatastore: iso-datastore
+    resourcePool: cluster/Resources
+    folder: demo
+    network: VM Network
+    vmTags: []
+    guestID: rhel9_64Guest
+    scsiType: pvscsi
+    firmware: efi
+    networkAdapterType: vmxnet3
+    diskEagerlyScrub: false
+  template:
+    namePrefix: demo-worker
+    numCPUs: 4
+    memoryMiB: 16384
+    diskGiB: 100
+  agent:
+    role: worker
+    approve: true
+    labels:
+      agentclusterinstalls.extensions.hive.openshift.io/location: lab-a
+      customer: example
+      hypershift.openshift.io/nodepool-role: worker
+  scaling:
+    bufferAgents: 0
+    maxProvisioning: 3
+    deletePolicy: OwnedOnly

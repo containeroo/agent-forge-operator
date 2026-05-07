@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- agentforge_v1alpha1_vsphereagentpool.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

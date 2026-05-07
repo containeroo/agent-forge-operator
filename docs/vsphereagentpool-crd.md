@@ -1,0 +1,60 @@
+# VsphereAgentPool CRD
+
+`VsphereAgentPool` is a namespace-scoped bridge between one Hypershift Agent `NodePool` and vSphere VM inventory.
+
+The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI `MachineSet`; this operator reacts by ensuring enough matching Assisted Installer `Agent` objects exist.
+
+## Spec Fields
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `spec.dryRun` | no | When `true`, only computes planned actions, writes status, and emits Events. No VM or Agent mutation is applied. Defaults to `true`. |
+| `spec.hostedClusterRef.name` | yes | HostedCluster name in the same namespace as this CR. |
+| `spec.nodePoolRef.name` | yes | Hypershift NodePool name in the same namespace as this CR. |
+| `spec.infraEnvRef.name` | yes | Assisted Installer InfraEnv name in the same namespace. The InfraEnv must expose `status.isoDownloadURL`. |
+| `spec.controlPlaneNamespace` | yes | Hosted control plane namespace containing the CAPI MachineSet, for example `demo-demo`. |
+| `spec.machineSetName` | no | Optional explicit CAPI MachineSet name. If omitted, the operator discovers it by `hypershift.openshift.io/nodePool=<namespace>/<nodePool>`. |
+| `spec.vsphere.credentialsSecretRef.name` | yes | Secret containing vSphere `server`, `username`, and `password`. Optional key: `insecure`. |
+| `spec.vsphere.credentialsSecretRef.namespace` | no | Secret namespace. Defaults to the CR namespace. |
+| `spec.vsphere.datacenter` | no | vSphere datacenter name. Defaults to `dc1`. |
+| `spec.vsphere.datastoreCluster` | yes | Datastore cluster for VM disks, matching the existing module's `vsphere_datastore_cluster`. |
+| `spec.vsphere.isoDatastore` | yes | Datastore for the discovery ISO, matching `vsphere_iso_datastore`. |
+| `spec.vsphere.resourcePool` | yes | Resource pool path, for example `cluster/Resources`. |
+| `spec.vsphere.folder` | no | VM folder path. Defaults logically to the hosted cluster name when empty. |
+| `spec.vsphere.network` | yes | vSphere network attached to the VM NIC. |
+| `spec.vsphere.vmTags` | no | Optional vSphere tag IDs to attach to created VMs. |
+| `spec.vsphere.guestID` | no | Guest OS identifier. Defaults to `rhel9_64Guest`. |
+| `spec.vsphere.scsiType` | no | SCSI controller type. Defaults to `pvscsi`. |
+| `spec.vsphere.firmware` | no | VM firmware, `efi` or `bios`. Defaults to `efi`. |
+| `spec.vsphere.networkAdapterType` | no | NIC adapter type. Defaults to `vmxnet3`. |
+| `spec.vsphere.diskEagerlyScrub` | no | Enables eager disk scrubbing for the primary disk. Defaults to `false`. |
+| `spec.vsphere.isoPath` | no | Datastore path to the discovery ISO. Defaults logically to `iso/<infraEnvName>-discovery.iso`. |
+| `spec.template.namePrefix` | no | Prefix for operator-created VM names. Defaults logically to `<hostedCluster>-<agent.role>`. |
+| `spec.template.numCPUs` | no | VM vCPU count. Defaults to `4`. |
+| `spec.template.memoryMiB` | no | VM memory in MiB. Defaults to `16384`. |
+| `spec.template.diskGiB` | no | Primary disk size in GiB. Defaults to `100`. |
+| `spec.agent.role` | no | Value for `hypershift.openshift.io/nodepool-role`. Defaults to `worker`. |
+| `spec.agent.labels` | yes | Labels required on discovered Agents. These should match the NodePool Agent selector. |
+| `spec.agent.approve` | no | When true, patch matching Agents with `spec.approved=true`. Defaults to `true`. |
+| `spec.scaling.bufferAgents` | no | Extra unbound matching Agents to keep beyond MachineSet demand. Defaults to `0`. |
+| `spec.scaling.maxProvisioning` | no | Max VMs to create in one reconcile. Defaults to `3`. |
+| `spec.scaling.deletePolicy` | no | `OwnedOnly` destroys only VMs recorded in status; `Retain` never destroys VMs. Defaults to `OwnedOnly`. |
+
+## Status Fields
+
+| Field | Description |
+| --- | --- |
+| `status.observedGeneration` | Latest CR generation reconciled. |
+| `status.observedMachineSet` | CAPI MachineSet being followed. |
+| `status.machineSetReplicas` | Raw `MachineSet.spec.replicas`. |
+| `status.desiredReplicas` | MachineSet replicas plus `bufferAgents`. |
+| `status.matchingAgents` | Agents in the CR namespace matching `spec.agent.labels`. |
+| `status.boundAgents` | Matching Agents already bound to CAPI/HostedCluster. |
+| `status.availableAgents` | Matching Agents not yet bound. |
+| `status.ownedVMs` | VMs created or tracked by this CR, including MAC, AgentRef, MachineRef, and phase. |
+| `status.plannedActions` | Latest planned or applied `CreateVM`, `DeleteVM`, `PatchAgent`, or `Noop` actions. |
+| `status.conditions` | `Ready`, `DryRun`, `MachineSetFound`, `InfraEnvAvailable`, `CapacitySatisfied`, and `VsphereReady`. |
+
+## Current Implementation Note
+
+The controller includes the CRD, planner, status/condition/event handling, dry-run behavior, Agent patching, and an injectable vSphere provider interface with unit tests. The default provider uses `govc`, which is included in the manager image, to upload the InfraEnv ISO, create/power-on VMs, and destroy owned VMs during cleanup or scale-down. For local development outside the image, set `GOVC_PATH` if `govc` is not at `/usr/local/bin/govc`.

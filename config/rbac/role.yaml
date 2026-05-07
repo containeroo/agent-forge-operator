@@ -1,0 +1,63 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
+  - agent-install.openshift.io
+  resources:
+  - agents
+  - infraenvs
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - agentforge.containeroo.ch
+  resources:
+  - vsphereagentpools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agentforge.containeroo.ch
+  resources:
+  - vsphereagentpools/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - agentforge.containeroo.ch
+  resources:
+  - vsphereagentpools/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - machinesets
+  verbs:
+  - get
+  - list
+  - watch

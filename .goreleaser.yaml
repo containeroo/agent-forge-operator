@@ -1,0 +1,94 @@
+---
+version: 2
+project_name: agent-forge-operator
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+builds:
+  - main: ./cmd/main.go
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{ .Tag }}
+dockers:
+  - image_templates:
+      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-amd64
+      - containeroo/agent-forge-operator:{{ .Tag }}-amd64
+    use: buildx
+    dockerfile: Dockerfile
+    extra_files:
+      - go.mod
+      - go.sum
+      - cmd/main.go
+      - api
+      - internal
+    build_flag_templates:
+      - --pull
+      - --platform=linux/amd64
+      - --build-arg
+      - LDFLAGS=-s -w -X main.Version={{ .Tag }}
+      - --build-arg
+      - GOVC_VERSION=v0.49.0
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.description={{ .ProjectName }}
+      - --label=org.opencontainers.image.url=https://github.com/containeroo/agent-forge-operator
+      - --label=org.opencontainers.image.source=https://github.com/containeroo/agent-forge-operator
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+      - --label=org.opencontainers.image.licenses="Apache License 2.0"
+  - image_templates:
+      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-arm64
+      - containeroo/agent-forge-operator:{{ .Tag }}-arm64
+    use: buildx
+    dockerfile: Dockerfile
+    extra_files:
+      - go.mod
+      - go.sum
+      - cmd/main.go
+      - api
+      - internal
+    goarch: arm64
+    build_flag_templates:
+      - --pull
+      - --platform=linux/arm64
+      - --build-arg
+      - LDFLAGS=-s -w -X main.Version={{ .Tag }}
+      - --build-arg
+      - GOVC_VERSION=v0.49.0
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.description={{ .ProjectName }}
+      - --label=org.opencontainers.image.url=https://github.com/containeroo/agent-forge-operator
+      - --label=org.opencontainers.image.source=https://github.com/containeroo/agent-forge-operator
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+      - --label=org.opencontainers.image.licenses="Apache License 2.0"
+docker_manifests:
+  - name_template: containeroo/agent-forge-operator:{{ .Tag }}
+    image_templates:
+      - containeroo/agent-forge-operator:{{ .Tag }}-amd64
+      - containeroo/agent-forge-operator:{{ .Tag }}-arm64
+  - name_template: ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}
+    image_templates:
+      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-amd64
+      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-arm64
+  - name_template: containeroo/agent-forge-operator:latest
+    image_templates:
+      - containeroo/agent-forge-operator:{{ .Tag }}-amd64
+      - containeroo/agent-forge-operator:{{ .Tag }}-arm64
+  - name_template: ghcr.io/containeroo/agent-forge-operator:latest
+    image_templates:
+      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-amd64
+      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-arm64
+release:
+  extra_files:
+    - glob: ./crds.yaml
+  prerelease: auto

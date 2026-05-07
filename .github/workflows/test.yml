@@ -1,0 +1,50 @@
+---
+name: Run tests
+
+on:
+  workflow_call:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+env:
+  KUBERNETES_VERSION: "1.32.0"
+
+jobs:
+  tests:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: agent-forge-operator-tests
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+          check-latest: true
+          cache: true
+
+      - name: Set up Kind Cluster
+        run: |
+          make kind
+
+      - name: Run Unit Tests
+        run: |
+          make test
+
+      - name: Run E2E Tests
+        run: |
+          make test-e2e
