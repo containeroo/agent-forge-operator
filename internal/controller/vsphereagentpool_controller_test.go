@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
@@ -395,6 +396,63 @@ func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 	}
 }
 
+func TestRequestsForMachineSetChangeFindsMatchingPool(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	otherPool := reconcileTestPool()
+	otherPool.Name = "other-worker"
+	otherPool.Spec.NodePoolRef.Name = "other-worker"
+	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 2, "demo/demo-worker")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, otherPool).
+		WithIndex(&agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolControlPlaneNamespaceIndex, controlPlaneNamespaceIndexFunc).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+	reqs := reconciler.requestsForMachineSetChange(ctx, ms)
+	if len(reqs) != 1 {
+		t.Fatalf("requests = %#v, want one request", reqs)
+	}
+	if reqs[0].NamespacedName != (types.NamespacedName{Namespace: testNamespace, Name: testNodePool}) {
+		t.Fatalf("request = %s, want demo/demo-worker", reqs[0].NamespacedName)
+	}
+}
+
+func TestRequestsForAgentChangeFindsMatchingPool(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	otherPool := reconcileTestPool()
+	otherPool.Name = "other-worker"
+	otherPool.Spec.InfraEnvRef.Name = "other-infraenv"
+	agent := testCandidateAgent(testNamespace, "candidate-agent")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, otherPool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+	reqs := reconciler.requestsForAgentChange(ctx, agent)
+	if len(reqs) != 1 {
+		t.Fatalf("requests = %#v, want one request", reqs)
+	}
+	if reqs[0].NamespacedName != (types.NamespacedName{Namespace: testNamespace, Name: testNodePool}) {
+		t.Fatalf("request = %s, want demo/demo-worker", reqs[0].NamespacedName)
+	}
+}
+
 func TestReconcileDeletesExcessUnboundAgents(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -663,4 +721,12 @@ func findCondition(conditions []metav1.Condition, conditionType string) *metav1.
 		}
 	}
 	return nil
+}
+
+func controlPlaneNamespaceIndexFunc(o client.Object) []string {
+	pool := o.(*agentforgev1alpha1.VsphereAgentPool)
+	if pool.Spec.ControlPlaneNamespace == "" {
+		return nil
+	}
+	return []string{pool.Spec.ControlPlaneNamespace}
 }

@@ -34,9 +34,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 )
@@ -50,6 +55,8 @@ const (
 	roleLabelKey       = "hypershift.openshift.io/nodepool-role"
 	agentMachineRefKey = "agentMachineRef"
 	apiVersionV1Beta1  = "v1beta1"
+
+	vsphereAgentPoolControlPlaneNamespaceIndex = ".spec.controlPlaneNamespace"
 )
 
 var (
@@ -925,13 +932,161 @@ func removeOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, name string) []agentf
 	return result
 }
 
+func machineSetWatchObject() *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(machineSetGVK)
+	return obj
+}
+
+func agentWatchObject() *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(agentGVK)
+	return obj
+}
+
+func agentChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool {
+			return true
+		},
+		DeleteFunc: func(event.DeleteEvent) bool {
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return false
+			}
+			if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+				return true
+			}
+			if !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()) {
+				return true
+			}
+			return !reflect.DeepEqual(e.ObjectOld.GetOwnerReferences(), e.ObjectNew.GetOwnerReferences())
+		},
+	}
+}
+
+func vsphereAgentPoolChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool {
+			return true
+		},
+		DeleteFunc: func(event.DeleteEvent) bool {
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return false
+			}
+			if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+				return true
+			}
+			if !reflect.DeepEqual(e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations()) {
+				return true
+			}
+			return !reflect.DeepEqual(e.ObjectOld.GetFinalizers(), e.ObjectNew.GetFinalizers())
+		},
+	}
+}
+
+func (r *VsphereAgentPoolReconciler) requestsForMachineSetChange(ctx context.Context, o client.Object) []reconcile.Request {
+	machineSet, ok := o.(*unstructured.Unstructured)
+	if !ok {
+		err := fmt.Errorf("expected an unstructured MachineSet, got %T", o)
+		ctrl.LoggerFrom(ctx).Error(err, "failed to get requests for MachineSet change")
+		return nil
+	}
+
+	var pools agentforgev1alpha1.VsphereAgentPoolList
+	if err := r.List(ctx, &pools, client.MatchingFields{
+		vsphereAgentPoolControlPlaneNamespaceIndex: machineSet.GetNamespace(),
+	}); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "failed to list VsphereAgentPools for MachineSet change")
+		return nil
+	}
+
+	reqs := make([]reconcile.Request, 0, len(pools.Items))
+	for i := range pools.Items {
+		pool := &pools.Items[i]
+		if machineSetMatchesPool(machineSet, pool) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		}
+	}
+	return reqs
+}
+
+func (r *VsphereAgentPoolReconciler) requestsForAgentChange(ctx context.Context, o client.Object) []reconcile.Request {
+	agent, ok := o.(*unstructured.Unstructured)
+	if !ok {
+		err := fmt.Errorf("expected an unstructured Agent, got %T", o)
+		ctrl.LoggerFrom(ctx).Error(err, "failed to get requests for Agent change")
+		return nil
+	}
+
+	var pools agentforgev1alpha1.VsphereAgentPoolList
+	if err := r.List(ctx, &pools, client.InNamespace(agent.GetNamespace())); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "failed to list VsphereAgentPools for Agent change")
+		return nil
+	}
+
+	reqs := make([]reconcile.Request, 0, len(pools.Items))
+	for i := range pools.Items {
+		pool := &pools.Items[i]
+		if agentMatchesPool(agent, pool) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		}
+	}
+	return reqs
+}
+
+func machineSetMatchesPool(machineSet *unstructured.Unstructured, pool *agentforgev1alpha1.VsphereAgentPool) bool {
+	if pool.Spec.ControlPlaneNamespace != machineSet.GetNamespace() {
+		return false
+	}
+	if pool.Spec.MachineSetName != "" {
+		return pool.Spec.MachineSetName == machineSet.GetName()
+	}
+	expectedNodePool := fmt.Sprintf("%s/%s", pool.Namespace, pool.Spec.NodePoolRef.Name)
+	return machineSet.GetAnnotations()[nodePoolAnnotation] == expectedNodePool
+}
+
+func agentMatchesPool(agent *unstructured.Unstructured, pool *agentforgev1alpha1.VsphereAgentPool) bool {
+	if agent.GetNamespace() != pool.Namespace {
+		return false
+	}
+	if !agentBelongsToInfraEnv(agent, pool.Spec.InfraEnvRef.Name) {
+		return false
+	}
+	labels := agent.GetLabels()
+	for key, value := range agentCandidateLabels(pool) {
+		if labels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
 // SetupWithManager sets up the controller with the Manager.
-func (r *VsphereAgentPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *VsphereAgentPoolReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	if r.Recorder == nil {
 		r.Recorder = mgr.GetEventRecorderFor("vsphereagentpool-controller")
 	}
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolControlPlaneNamespaceIndex,
+		func(o client.Object) []string {
+			pool := o.(*agentforgev1alpha1.VsphereAgentPool)
+			if pool.Spec.ControlPlaneNamespace == "" {
+				return nil
+			}
+			return []string{pool.Spec.ControlPlaneNamespace}
+		}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&agentforgev1alpha1.VsphereAgentPool{}).
+		For(&agentforgev1alpha1.VsphereAgentPool{}, builder.WithPredicates(vsphereAgentPoolChangePredicate())).
+		Watches(machineSetWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForMachineSetChange), builder.WithPredicates(predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}))).
+		Watches(agentWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForAgentChange), builder.WithPredicates(agentChangePredicate())).
 		Named("vsphereagentpool").
 		Complete(r)
 }
