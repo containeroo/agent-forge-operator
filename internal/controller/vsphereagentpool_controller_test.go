@@ -396,6 +396,108 @@ func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 	}
 }
 
+func TestReconcileAdoptsExistingBoundAgentAsOwnedVM(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	agent := testAgent(testNamespace, "demo-worker-ab12", true, true)
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, ms, infraEnv, agent).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Status.OwnedVMs) != 1 {
+		t.Fatalf("ownedVMs = %d, want adopted existing VM", len(updated.Status.OwnedVMs))
+	}
+	vm := updated.Status.OwnedVMs[0]
+	if vm.Name != "demo-worker-ab12" || vm.Phase != "Bound" || vm.AgentRef == nil || vm.AgentRef.Name != agent.GetName() {
+		t.Fatalf("owned VM status = %#v, want adopted bound Agent", vm)
+	}
+}
+
+func TestReconcileAdoptsInventoryHostnameForCandidateAgent(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Spec.DryRun = false
+	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	agent := testCandidateAgent(testNamespace, "candidate-agent")
+	setAgentInventoryHostname(t, agent, "demo-worker-c3p0")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, ms, infraEnv, agent).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updatedAgent unstructured.Unstructured
+	updatedAgent.SetGroupVersionKind(agentGVK)
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: agent.GetName()}, &updatedAgent); err != nil {
+		t.Fatal(err)
+	}
+	hostname, _, _ := unstructured.NestedString(updatedAgent.Object, "spec", "hostname")
+	if hostname != "demo-worker-c3p0" {
+		t.Fatalf("spec.hostname = %q, want adopted inventory hostname", hostname)
+	}
+
+	var updatedPool agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updatedPool); err != nil {
+		t.Fatal(err)
+	}
+	if len(updatedPool.Status.OwnedVMs) != 1 {
+		t.Fatalf("ownedVMs = %d, want adopted VM", len(updatedPool.Status.OwnedVMs))
+	}
+	vm := updatedPool.Status.OwnedVMs[0]
+	if vm.Name != "demo-worker-c3p0" || vm.Phase != phaseAvailable || vm.AgentRef == nil || vm.AgentRef.Name != agent.GetName() {
+		t.Fatalf("owned VM status = %#v, want available adopted VM linked to Agent", vm)
+	}
+}
+
 func TestRequestsForMachineSetChangeFindsMatchingPool(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -470,10 +572,18 @@ func TestReconcileDeletesExcessUnboundAgents(t *testing.T) {
 	boundAgent := testAgent(testNamespace, "bound-agent", true, true)
 	excessAgent1 := testAgent(testNamespace, "excess-agent-1", false, true)
 	excessAgent2 := testAgent(testNamespace, "excess-agent-2", false, true)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
+		Data: map[string][]byte{
+			"server":   []byte("vcenter.example.invalid"),
+			"username": []byte("user"),
+			"password": []byte("pass"),
+		},
+	}
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, boundAgent, excessAgent1, excessAgent2).
+		WithObjects(pool, ms, infraEnv, boundAgent, excessAgent1, excessAgent2, secret).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -481,6 +591,9 @@ func TestReconcileDeletesExcessUnboundAgents(t *testing.T) {
 		Client:   k8sClient,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return &fakeVMProvider{}, nil
+		},
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -712,6 +825,13 @@ func testCandidateAgent(namespace, name string) *unstructured.Unstructured {
 		testCustomerKey:                        testCustomer,
 	})
 	return obj
+}
+
+func setAgentInventoryHostname(t *testing.T, agent *unstructured.Unstructured, hostname string) {
+	t.Helper()
+	if err := unstructured.SetNestedField(agent.Object, hostname, "status", "inventory", "hostname"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {

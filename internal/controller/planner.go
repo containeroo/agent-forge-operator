@@ -46,14 +46,15 @@ const (
 // AgentInfo is the small subset of an Assisted Installer Agent needed for
 // bridge capacity planning.
 type AgentInfo struct {
-	Name        string
-	Bound       bool
-	MachineName string
-	Approved    bool
-	SpecRole    string
-	RoleLabel   string
-	Hostname    string
-	MAC         string
+	Name              string
+	Bound             bool
+	MachineName       string
+	Approved          bool
+	SpecRole          string
+	RoleLabel         string
+	Hostname          string
+	InventoryHostname string
+	MAC               string
 }
 
 // PoolSnapshot is the observed cluster state used by the pure planner.

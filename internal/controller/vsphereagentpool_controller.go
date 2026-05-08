@@ -383,21 +383,19 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 		approved, _, _ := unstructured.NestedBool(obj.Object, "spec", "approved")
 		specRole, _, _ := unstructured.NestedString(obj.Object, "spec", "role")
 		specHostname, _, _ := unstructured.NestedString(obj.Object, "spec", "hostname")
-		hostname, _, _ := unstructured.NestedString(obj.Object, "spec", "hostname")
-		if hostname == "" {
-			hostname, _, _ = unstructured.NestedString(obj.Object, "status", "inventory", "hostname")
-		}
+		inventoryHostname, _, _ := unstructured.NestedString(obj.Object, "status", "inventory", "hostname")
 		clusterName, _, _ := unstructured.NestedString(obj.Object, "spec", "clusterDeploymentName", "name")
 		machineName := labels[agentMachineRefKey]
 		agents = append(agents, AgentInfo{
-			Name:        obj.GetName(),
-			Bound:       machineName != "" || clusterName == pool.Spec.HostedClusterRef.Name,
-			MachineName: machineName,
-			Approved:    approved,
-			SpecRole:    specRole,
-			RoleLabel:   labels[roleLabelKey],
-			Hostname:    specHostname,
-			MAC:         normalizeMAC(hostname),
+			Name:              obj.GetName(),
+			Bound:             machineName != "" || clusterName == pool.Spec.HostedClusterRef.Name,
+			MachineName:       machineName,
+			Approved:          approved,
+			SpecRole:          specRole,
+			RoleLabel:         labels[roleLabelKey],
+			Hostname:          specHostname,
+			InventoryHostname: inventoryHostname,
+			MAC:               normalizeMAC(agentPrimaryMAC(obj)),
 		})
 	}
 	return agents, nil
@@ -442,20 +440,22 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 }
 
 func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo) []agentforgev1alpha1.OwnedVMStatus {
-	if len(pool.Status.OwnedVMs) == 0 {
-		return nil
-	}
 	byHostname := map[string]AgentInfo{}
 	byName := map[string]AgentInfo{}
 	for _, agent := range agents {
 		byName[agent.Name] = agent
-		if agent.Hostname != "" {
-			byHostname[agent.Hostname] = agent
+		if hostname := agentObservedHostname(agent); hostname != "" {
+			byHostname[hostname] = agent
 		}
 	}
 
 	vms := make([]agentforgev1alpha1.OwnedVMStatus, 0, len(pool.Status.OwnedVMs))
+	matchedAgents := map[string]struct{}{}
+	knownVMNames := map[string]struct{}{}
 	for _, vm := range pool.Status.OwnedVMs {
+		if vm.Name != "" {
+			knownVMNames[vm.Name] = struct{}{}
+		}
 		agent, matched := byHostname[vm.Name]
 		if !matched && vm.AgentRef != nil && vm.AgentRef.Name != "" {
 			agent, matched = byName[vm.AgentRef.Name]
@@ -467,19 +467,26 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			vms = append(vms, vm)
 			continue
 		}
+		matchedAgents[agent.Name] = struct{}{}
 
-		vm.AgentRef = agentObjectReference(pool, agent.Name)
-		if agent.MachineName != "" {
-			vm.MachineRef = machineObjectReference(pool, agent.MachineName)
-		} else {
-			vm.MachineRef = nil
-		}
-		if agent.Bound {
-			setOwnedVMPhase(&vm, "Bound", "AgentBound")
-		} else {
-			setOwnedVMPhase(&vm, phaseAvailable, "AgentAvailable")
-		}
+		applyAgentToOwnedVMStatus(pool, &vm, agent)
 		vms = append(vms, vm)
+	}
+
+	for _, agent := range agents {
+		if _, exists := matchedAgents[agent.Name]; exists {
+			continue
+		}
+		hostname := agentObservedHostname(agent)
+		if hostname == "" {
+			continue
+		}
+		if _, exists := knownVMNames[hostname]; exists {
+			continue
+		}
+		vm := agentOwnedVMStatus(pool, agent, hostname)
+		vms = append(vms, vm)
+		knownVMNames[hostname] = struct{}{}
 	}
 	return vms
 }
@@ -522,6 +529,40 @@ func setOwnedVMPhase(vm *agentforgev1alpha1.OwnedVMStatus, phase, reason string)
 	vm.Phase = phase
 	vm.Reason = reason
 	vm.LastTransitionTime = metav1.Now()
+}
+
+func agentObservedHostname(agent AgentInfo) string {
+	if agent.Hostname != "" {
+		return agent.Hostname
+	}
+	return agent.InventoryHostname
+}
+
+func agentOwnedVMStatus(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo, hostname string) agentforgev1alpha1.OwnedVMStatus {
+	vm := agentforgev1alpha1.OwnedVMStatus{
+		Name:               hostname,
+		MACAddress:         agent.MAC,
+		LastTransitionTime: metav1.Now(),
+	}
+	applyAgentToOwnedVMStatus(pool, &vm, agent)
+	return vm
+}
+
+func applyAgentToOwnedVMStatus(pool *agentforgev1alpha1.VsphereAgentPool, vm *agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) {
+	vm.AgentRef = agentObjectReference(pool, agent.Name)
+	if agent.MAC != "" {
+		vm.MACAddress = agent.MAC
+	}
+	if agent.MachineName != "" {
+		vm.MachineRef = machineObjectReference(pool, agent.MachineName)
+	} else {
+		vm.MachineRef = nil
+	}
+	if agent.Bound {
+		setOwnedVMPhase(vm, "Bound", "AgentBound")
+	} else {
+		setOwnedVMPhase(vm, phaseAvailable, "AgentAvailable")
+	}
 }
 
 func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name, hostname string) error {
@@ -877,6 +918,26 @@ func summarizeActions(actions []agentforgev1alpha1.PlannedActionStatus) string {
 
 func normalizeMAC(value string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), ":", "-")
+}
+
+func agentPrimaryMAC(agent *unstructured.Unstructured) string {
+	interfaces, found, _ := unstructured.NestedSlice(agent.Object, "status", "inventory", "interfaces")
+	if !found {
+		return ""
+	}
+	for _, item := range interfaces {
+		iface, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"macAddress", "mac"} {
+			value, ok := iface[key].(string)
+			if ok && strings.TrimSpace(value) != "" {
+				return value
+			}
+		}
+	}
+	return ""
 }
 
 func agentCandidateLabels(pool *agentforgev1alpha1.VsphereAgentPool) map[string]string {
