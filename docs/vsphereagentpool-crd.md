@@ -17,7 +17,7 @@ The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI
 | `spec.vsphere.credentialsSecretRef.name` | yes | Secret containing vSphere `server`, `username`, and `password`. Optional key: `insecure`. |
 | `spec.vsphere.credentialsSecretRef.namespace` | no | Secret namespace. Defaults to the CR namespace. |
 | `spec.vsphere.datacenter` | no | vSphere datacenter name. Defaults to `dc1`. |
-| `spec.vsphere.datastoreCluster` | yes | Datastore cluster for VM disks, matching the existing module's `vsphere_datastore_cluster`. |
+| `spec.vsphere.datastoreCluster` | yes | Datastore cluster for VM disks, matching the existing module's `vsphere_datastore_cluster`. The operator passes this to vSphere as datastore-cluster placement, not as a concrete datastore. |
 | `spec.vsphere.isoDatastore` | yes | Datastore for the discovery ISO, matching `vsphere_iso_datastore`. |
 | `spec.vsphere.resourcePool` | yes | Resource pool path, for example `cluster/Resources`. |
 | `spec.vsphere.folder` | no | VM folder path. Defaults logically to the hosted cluster name when empty. |

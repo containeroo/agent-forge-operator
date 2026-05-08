@@ -106,7 +106,7 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 	args := []string{
 		"vm.create",
 		"-dc", pool.Spec.VSphere.Datacenter,
-		"-ds", pool.Spec.VSphere.DatastoreCluster,
+		"-datastore-cluster", pool.Spec.VSphere.DatastoreCluster,
 		"-pool", pool.Spec.VSphere.ResourcePool,
 		"-folder", vmFolder(pool),
 		"-net", pool.Spec.VSphere.Network,
