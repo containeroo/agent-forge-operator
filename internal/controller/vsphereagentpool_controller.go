@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -142,12 +144,14 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if err := r.applyPlan(ctx, &pool, plan, infraEnvISOURL); err != nil {
-		r.recordWarning(&pool, "ApplyPlanFailed", err.Error())
-		setPlanConditions(&pool, plan, false, err.Error())
+		errMessage := stableErrorMessage(err)
+		r.recordWarning(&pool, "ApplyPlanFailed", errMessage)
+		setPlanConditions(&pool, plan, false, errMessage)
 		if statusErr := r.updateStatus(ctx, &pool, plan); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+		log.Error(err, "apply plan failed", "retryAfter", 30*time.Second)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	r.recordPlan(&pool, plan, "PlanApplied")
@@ -324,13 +328,28 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 }
 
 func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan) error {
-	pool.Status.ObservedGeneration = pool.Generation
-	pool.Status.DesiredReplicas = plan.DesiredReplicas
-	pool.Status.MatchingAgents = plan.MatchingAgents
-	pool.Status.BoundAgents = plan.BoundAgents
-	pool.Status.AvailableAgents = plan.AvailableAgents
-	pool.Status.PlannedActions = plan.Actions
-	return r.Status().Update(ctx, pool)
+	desired := *pool.Status.DeepCopy()
+	desired.ObservedGeneration = pool.Generation
+	desired.DesiredReplicas = plan.DesiredReplicas
+	desired.MatchingAgents = plan.MatchingAgents
+	desired.BoundAgents = plan.BoundAgents
+	desired.AvailableAgents = plan.AvailableAgents
+	desired.PlannedActions = plan.Actions
+
+	var current agentforgev1alpha1.VsphereAgentPool
+	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current.Status, desired) {
+		pool.Status = desired
+		return nil
+	}
+	current.Status = desired
+	if err := r.Status().Update(ctx, &current); err != nil {
+		return err
+	}
+	pool.Status = desired
+	return nil
 }
 
 func (r *VsphereAgentPoolReconciler) setStatusError(pool *agentforgev1alpha1.VsphereAgentPool, conditionType, reason, message string) {
@@ -482,6 +501,12 @@ func boolMessage(value bool, trueMessage, falseMessage string) string {
 		return trueMessage
 	}
 	return falseMessage
+}
+
+var tempISOPathPattern = regexp.MustCompile(`/tmp/agent-forge-iso-[^[:space:]]+`)
+
+func stableErrorMessage(err error) string {
+	return tempISOPathPattern.ReplaceAllString(err.Error(), "<temp-iso>")
 }
 
 func summarizeActions(actions []agentforgev1alpha1.PlannedActionStatus) string {

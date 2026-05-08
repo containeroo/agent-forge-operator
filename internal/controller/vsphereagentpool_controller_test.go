@@ -130,6 +130,65 @@ func TestReconcileReportsMissingMachineSetCondition(t *testing.T) {
 	}
 }
 
+func TestReconcileApplyFailureRequeuesWithoutReturningError(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Spec.DryRun = false
+	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 2, "demo/demo-worker")
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
+		Data: map[string][]byte{
+			"server":   []byte("vcenter.example.invalid"),
+			"username": []byte("user"),
+			"password": []byte("pass"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, ms, infraEnv, secret).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return failingVMProvider{}, nil
+		},
+	}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("requeueAfter = %s, want 30s", result.RequeueAfter)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	condition := findCondition(updated.Status.Conditions, conditionReady)
+	if condition == nil {
+		t.Fatal("Ready condition was not set")
+	}
+	if condition.Status != metav1.ConditionFalse {
+		t.Fatalf("Ready status = %s, want False", condition.Status)
+	}
+}
+
 type fakeVMProvider struct{}
 
 func (fakeVMProvider) CreateVM(_ context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
@@ -137,6 +196,16 @@ func (fakeVMProvider) CreateVM(_ context.Context, pool *agentforgev1alpha1.Vsphe
 }
 
 func (fakeVMProvider) DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error {
+	return nil
+}
+
+type failingVMProvider struct{}
+
+func (failingVMProvider) CreateVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
+	return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("provider failed")
+}
+
+func (failingVMProvider) DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error {
 	return nil
 }
 
