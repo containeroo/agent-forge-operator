@@ -236,7 +236,7 @@ type VsphereAgentPoolSpec struct {
 	// new hosted cluster.
 	// +kubebuilder:default=true
 	// +optional
-	DryRun bool `json:"dryRun,omitempty"`
+	DryRun bool `json:"dryRun"`
 
 	// VSphere configures placement and VM platform settings.
 	VSphere VspherePlacementSpec `json:"vsphere"`

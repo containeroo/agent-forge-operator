@@ -96,7 +96,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	if pool.DeletionTimestamp.IsZero() {
 		if controllerutil.AddFinalizer(&pool, finalizerName) {
-			if err := r.Update(ctx, &pool); err != nil {
+			if err := r.patchFinalizer(ctx, &pool); err != nil {
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, nil
@@ -176,7 +176,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
 	if pool.Spec.DryRun || pool.Spec.Scaling.DeletePolicy == deletePolicyRetain || len(pool.Status.OwnedVMs) == 0 {
 		controllerutil.RemoveFinalizer(pool, finalizerName)
-		return ctrl.Result{}, r.Update(ctx, pool)
+		return ctrl.Result{}, r.patchFinalizer(ctx, pool)
 	}
 
 	provider, err := r.provider(ctx, pool)
@@ -189,7 +189,17 @@ func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *
 		}
 	}
 	controllerutil.RemoveFinalizer(pool, finalizerName)
-	return ctrl.Result{}, r.Update(ctx, pool)
+	return ctrl.Result{}, r.patchFinalizer(ctx, pool)
+}
+
+func (r *VsphereAgentPoolReconciler) patchFinalizer(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) error {
+	current := &agentforgev1alpha1.VsphereAgentPool{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
+		return err
+	}
+	before := current.DeepCopy()
+	current.SetFinalizers(pool.GetFinalizers())
+	return r.Patch(ctx, current, client.MergeFrom(before))
 }
 
 func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan, isoDownloadURL string) error {
