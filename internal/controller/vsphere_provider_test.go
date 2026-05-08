@@ -28,11 +28,6 @@ exit 0
 	}
 	t.Setenv("GOVC_ARG_LOG", commandLog)
 
-	isoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("iso"))
-	}))
-	defer isoServer.Close()
-
 	provider := &govcVMProvider{
 		command: govcPath,
 		config: govcConfig{
@@ -44,7 +39,7 @@ exit 0
 	}
 
 	pool := providerTestPool()
-	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{ISODownloadURL: isoServer.URL}); err != nil {
+	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err != nil {
 		t.Fatalf("CreateVM returned error: %v", err)
 	}
 
@@ -69,8 +64,118 @@ exit 0
 	if strings.Contains(createArgs, "-ds workload-datastore-cluster") {
 		t.Fatalf("vm.create args = %q, must not pass datastore cluster through -ds", createArgs)
 	}
-	if !strings.Contains(string(logBytes), "device.cdrom.insert") || !strings.Contains(string(logBytes), "-ds iso-datastore") {
+	if !strings.Contains(string(logBytes), "device.cdrom.insert") ||
+		!strings.Contains(string(logBytes), "-ds iso-datastore") ||
+		!strings.Contains(string(logBytes), "agent-forge/demo/demo-worker/cached.iso") {
 		t.Fatalf("cdrom insertion did not use iso datastore; calls:\n%s", string(logBytes))
+	}
+}
+
+func TestGovcEnsureISOUploadsContentAddressedPath(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "datastore.ls" ]; then
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	isoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("iso-v1"))
+	}))
+	defer isoServer.Close()
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	result, err := provider.EnsureISO(ctx, providerTestPool(), ISOEnsureRequest{DownloadURL: isoServer.URL})
+	if err != nil {
+		t.Fatalf("EnsureISO returned error: %v", err)
+	}
+	if !result.Uploaded {
+		t.Fatal("EnsureISO did not report upload")
+	}
+	if result.SHA256 != "9d8a03fda862703f60c30a0c83fae3cff00beb7e3d718ff78e0a791e6fe71048" {
+		t.Fatalf("sha = %s, want iso-v1 digest", result.SHA256)
+	}
+	if result.Path != "agent-forge/demo/demo-worker/"+result.SHA256+".iso" {
+		t.Fatalf("path = %s, want content-addressed path", result.Path)
+	}
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logBytes), "datastore.upload") || !strings.Contains(string(logBytes), result.Path) {
+		t.Fatalf("upload was not called for content-addressed path; calls:\n%s", string(logBytes))
+	}
+}
+
+func TestGovcEnsureISOReusesSameDigestWhenDatastoreObjectExists(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	isoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("iso-v1"))
+	}))
+	defer isoServer.Close()
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+	sha := "9d8a03fda862703f60c30a0c83fae3cff00beb7e3d718ff78e0a791e6fe71048"
+	path := "agent-forge/demo/demo-worker/" + sha + ".iso"
+
+	result, err := provider.EnsureISO(ctx, providerTestPool(), ISOEnsureRequest{
+		DownloadURL:   isoServer.URL,
+		CurrentSHA256: sha,
+		CurrentPath:   path,
+	})
+	if err != nil {
+		t.Fatalf("EnsureISO returned error: %v", err)
+	}
+	if result.Uploaded {
+		t.Fatal("EnsureISO uploaded even though digest and datastore object matched")
+	}
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logBytes), "datastore.upload") {
+		t.Fatalf("unexpected upload for reusable ISO; calls:\n%s", string(logBytes))
+	}
+	if !strings.Contains(string(logBytes), "datastore.ls") {
+		t.Fatalf("datastore object existence was not checked; calls:\n%s", string(logBytes))
 	}
 }
 
@@ -93,7 +198,6 @@ func providerTestPool() *agentforgev1alpha1.VsphereAgentPool {
 				GuestID:            "rhcos_64Guest",
 				Firmware:           "efi",
 				SCSIType:           "pvscsi",
-				ISOPath:            "agent-forge/demo.iso",
 			},
 			Template: agentforgev1alpha1.VMTemplateSpec{
 				NamePrefix: "demo-worker",

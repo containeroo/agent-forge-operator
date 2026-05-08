@@ -108,8 +108,9 @@ type VspherePlacementSpec struct {
 	// +optional
 	DiskEagerlyScrub bool `json:"diskEagerlyScrub,omitempty"`
 
-	// ISOPath is the datastore path to the InfraEnv discovery ISO. When empty,
-	// the operator derives iso/<infraEnvName>-discovery.iso.
+	// ISOPath is a legacy datastore directory prefix for content-addressed
+	// InfraEnv discovery ISO objects. Prefer spec.iso.pathPrefix for new
+	// configurations.
 	// +optional
 	ISOPath string `json:"isoPath,omitempty"`
 }
@@ -186,6 +187,27 @@ type ScalingPolicySpec struct {
 	DeletePolicy string `json:"deletePolicy,omitempty"`
 }
 
+// ISOCacheSpec controls how the InfraEnv discovery ISO is cached in vSphere.
+type ISOCacheSpec struct {
+	// CheckInterval controls how often the operator downloads and hashes the
+	// InfraEnv ISO to detect content changes when the URL remains stable.
+	// +optional
+	CheckInterval metav1.Duration `json:"checkInterval,omitempty"`
+
+	// RetainVersions controls how many content-addressed ISO objects are kept in
+	// the datastore. The current ISO is always retained.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=2
+	// +optional
+	RetainVersions int32 `json:"retainVersions,omitempty"`
+
+	// PathPrefix is the datastore directory used for content-addressed ISO
+	// objects. When empty, the operator uses
+	// agent-forge/<namespace>/<vsphereAgentPool>.
+	// +optional
+	PathPrefix string `json:"pathPrefix,omitempty"`
+}
+
 // VsphereAgentPoolSpec defines the desired state of VsphereAgentPool.
 type VsphereAgentPoolSpec struct {
 	// HostedClusterRef references the Hypershift HostedCluster this pool serves.
@@ -228,6 +250,10 @@ type VsphereAgentPoolSpec struct {
 	// Scaling configures bridge-side buffering, throttling, and deletion safety.
 	// +optional
 	Scaling ScalingPolicySpec `json:"scaling,omitempty"`
+
+	// ISO configures content-addressed caching of the InfraEnv discovery ISO.
+	// +optional
+	ISO ISOCacheSpec `json:"iso,omitempty"`
 }
 
 // OwnedVMStatus records a VM created or managed by this VsphereAgentPool.
@@ -289,6 +315,59 @@ type PlannedActionStatus struct {
 	DryRun bool `json:"dryRun"`
 }
 
+// ISOCacheHistoryEntry records one uploaded content-addressed ISO object.
+type ISOCacheHistoryEntry struct {
+	// Path is the datastore path to the ISO object.
+	Path string `json:"path"`
+
+	// SHA256 is the ISO content digest.
+	SHA256 string `json:"sha256"`
+
+	// SizeBytes is the downloaded ISO size.
+	// +optional
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+
+	// UploadedAt is when this ISO object was uploaded.
+	// +optional
+	UploadedAt metav1.Time `json:"uploadedAt,omitempty"`
+}
+
+// ISOCacheStatus records the active cached InfraEnv discovery ISO.
+type ISOCacheStatus struct {
+	// URL is the InfraEnv status.isoDownloadURL used for the last check.
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// Path is the datastore path inserted into newly created VMs.
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// SHA256 is the content digest of the active ISO.
+	// +optional
+	SHA256 string `json:"sha256,omitempty"`
+
+	// SizeBytes is the downloaded ISO size.
+	// +optional
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+
+	// CheckedAt is when the operator last downloaded and hashed the ISO.
+	// +optional
+	CheckedAt metav1.Time `json:"checkedAt,omitempty"`
+
+	// UploadedAt is when the active ISO object was uploaded.
+	// +optional
+	UploadedAt metav1.Time `json:"uploadedAt,omitempty"`
+
+	// ForceRefreshToken stores the last processed force refresh annotation
+	// value.
+	// +optional
+	ForceRefreshToken string `json:"forceRefreshToken,omitempty"`
+
+	// History records retained content-addressed ISO objects, newest first.
+	// +optional
+	History []ISOCacheHistoryEntry `json:"history,omitempty"`
+}
+
 // VsphereAgentPoolStatus defines the observed state of VsphereAgentPool.
 type VsphereAgentPoolStatus struct {
 	// ObservedGeneration is the most recent metadata.generation reconciled by
@@ -328,6 +407,10 @@ type VsphereAgentPoolStatus struct {
 	// PlannedActions records the most recent actions planned or executed.
 	// +optional
 	PlannedActions []PlannedActionStatus `json:"plannedActions,omitempty"`
+
+	// ISO records the active cached InfraEnv discovery ISO.
+	// +optional
+	ISO ISOCacheStatus `json:"iso,omitempty"`
 
 	// Conditions summarizes readiness, dry-run state, discovery, and errors.
 	// +patchMergeKey=type

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -39,8 +40,23 @@ import (
 // VMCreateRequest carries per-reconcile VM creation details. Ordinal is only
 // unique within one reconciliation; providers still create collision-safe names.
 type VMCreateRequest struct {
-	Ordinal        int32
-	ISODownloadURL string
+	Ordinal int32
+	ISOPath string
+}
+
+// ISOEnsureRequest carries the current cached ISO identity from status.
+type ISOEnsureRequest struct {
+	DownloadURL   string
+	CurrentSHA256 string
+	CurrentPath   string
+}
+
+// ISOEnsureResult records the ISO object that should be inserted into new VMs.
+type ISOEnsureResult struct {
+	Path      string
+	SHA256    string
+	SizeBytes int64
+	Uploaded  bool
 }
 
 // VMProviderFactory builds a VMProvider from a pool and credentials Secret.
@@ -49,8 +65,10 @@ type VMProviderFactory func(context.Context, *agentforgev1alpha1.VsphereAgentPoo
 // VMProvider abstracts vSphere VM lifecycle operations so reconciliation logic
 // stays testable.
 type VMProvider interface {
+	EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, ISOEnsureRequest) (ISOEnsureResult, error)
 	CreateVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error)
 	DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error
+	DeleteISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) error
 }
 
 // NewGovcVMProvider returns the default vSphere implementation. It shells out
@@ -97,10 +115,8 @@ type govcVMProvider struct {
 
 func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
 	name := fmt.Sprintf("%s-%s", vmNamePrefix(pool), randomHex(3))
-	isoPath := isoPath(pool)
-
-	if err := p.ensureISO(ctx, pool, req.ISODownloadURL, isoPath); err != nil {
-		return agentforgev1alpha1.OwnedVMStatus{}, err
+	if req.ISOPath == "" {
+		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("cached ISO path is empty")
 	}
 
 	args := []string{
@@ -126,7 +142,7 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 
 	_ = p.run(ctx, "vm.change", "-vm", name, "-e", "disk.enableUUID=TRUE")
 	_ = p.run(ctx, "device.cdrom.add", "-vm", name)
-	if err := p.run(ctx, "device.cdrom.insert", "-vm", name, "-ds", pool.Spec.VSphere.ISODatastore, isoPath); err != nil {
+	if err := p.run(ctx, "device.cdrom.insert", "-vm", name, "-ds", pool.Spec.VSphere.ISODatastore, req.ISOPath); err != nil {
 		return agentforgev1alpha1.OwnedVMStatus{}, err
 	}
 	for _, tag := range pool.Spec.VSphere.VMTags {
@@ -139,6 +155,39 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 	return newOwnedVMStatus(name), nil
 }
 
+func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req ISOEnsureRequest) (ISOEnsureResult, error) {
+	if req.DownloadURL == "" {
+		return ISOEnsureResult{}, fmt.Errorf("InfraEnv ISO download URL is empty")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "agent-forge-iso-")
+	if err != nil {
+		return ISOEnsureResult{}, err
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpDir)
+	}()
+
+	tmpFile := filepath.Join(tmpDir, "discovery.iso")
+	sha, sizeBytes, err := downloadFileWithSHA256(ctx, req.DownloadURL, tmpFile)
+	if err != nil {
+		return ISOEnsureResult{}, err
+	}
+	isoPath := isoContentPath(pool, sha)
+
+	if exists, err := p.datastorePathExists(ctx, pool, isoPath); err == nil && exists {
+		return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: false}, nil
+	}
+
+	if dir := filepath.Dir(isoPath); dir != "." && dir != "" {
+		_ = p.run(ctx, "datastore.mkdir", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, dir)
+	}
+	if err := p.run(ctx, "datastore.upload", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, tmpFile, isoPath); err != nil {
+		return ISOEnsureResult{}, err
+	}
+	return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: true}, nil
+}
+
 func (p *govcVMProvider) DeleteVM(ctx context.Context, _ *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
 	if strings.TrimSpace(vm.Name) == "" {
 		return fmt.Errorf("cannot delete VM with empty name")
@@ -146,28 +195,19 @@ func (p *govcVMProvider) DeleteVM(ctx context.Context, _ *agentforgev1alpha1.Vsp
 	return p.run(ctx, "vm.destroy", vm.Name)
 }
 
-func (p *govcVMProvider) ensureISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, isoURL, isoPath string) error {
-	if isoURL == "" {
-		return fmt.Errorf("InfraEnv ISO download URL is empty")
+func (p *govcVMProvider) DeleteISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, isoPath string) error {
+	if strings.TrimSpace(isoPath) == "" {
+		return nil
 	}
+	return p.run(ctx, "datastore.rm", "-f", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, isoPath)
+}
 
-	tmpDir, err := os.MkdirTemp("", "agent-forge-iso-")
+func (p *govcVMProvider) datastorePathExists(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, isoPath string) (bool, error) {
+	err := p.run(ctx, "datastore.ls", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, isoPath)
 	if err != nil {
-		return err
+		return false, err
 	}
-	defer func() {
-		_ = os.RemoveAll(tmpDir)
-	}()
-
-	tmpFile := filepath.Join(tmpDir, filepath.Base(isoPath))
-	if err := downloadFile(ctx, isoURL, tmpFile); err != nil {
-		return err
-	}
-	if dir := filepath.Dir(isoPath); dir != "." && dir != "" {
-		_ = p.run(ctx, "datastore.mkdir", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, dir)
-	}
-	_ = p.run(ctx, "datastore.rm", "-f", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, isoPath)
-	return p.run(ctx, "datastore.upload", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, tmpFile, isoPath)
+	return true, nil
 }
 
 func (p *govcVMProvider) run(ctx context.Context, args ...string) error {
@@ -210,30 +250,34 @@ func sanitizeCommandOutput(output string) string {
 	return strings.Join(lines, "; ")
 }
 
-func downloadFile(ctx context.Context, url, path string) error {
+func downloadFileWithSHA256(ctx context.Context, url, path string) (string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("download %s returned HTTP %d", url, resp.StatusCode)
+		return "", 0, fmt.Errorf("download %s returned HTTP %d", url, resp.StatusCode)
 	}
 	out, err := os.Create(path)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	defer func() {
 		_ = out.Close()
 	}()
-	_, err = io.Copy(out, resp.Body)
-	return err
+	hash := sha256.New()
+	sizeBytes, err := io.Copy(io.MultiWriter(out, hash), resp.Body)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), sizeBytes, nil
 }
 
 func newOwnedVMStatus(name string) agentforgev1alpha1.OwnedVMStatus {
@@ -259,11 +303,19 @@ func vmFolder(pool *agentforgev1alpha1.VsphereAgentPool) string {
 	return pool.Spec.HostedClusterRef.Name
 }
 
-func isoPath(pool *agentforgev1alpha1.VsphereAgentPool) string {
-	if pool.Spec.VSphere.ISOPath != "" {
-		return pool.Spec.VSphere.ISOPath
+func isoContentPath(pool *agentforgev1alpha1.VsphereAgentPool, sha string) string {
+	return fmt.Sprintf("%s/%s.iso", isoPathPrefix(pool), sha)
+}
+
+func isoPathPrefix(pool *agentforgev1alpha1.VsphereAgentPool) string {
+	prefix := strings.Trim(strings.TrimSpace(pool.Spec.ISO.PathPrefix), "/")
+	if prefix == "" {
+		prefix = strings.Trim(strings.TrimSpace(pool.Spec.VSphere.ISOPath), "/")
 	}
-	return fmt.Sprintf("iso/%s-discovery.iso", pool.Spec.InfraEnvRef.Name)
+	if prefix == "" {
+		prefix = fmt.Sprintf("agent-forge/%s/%s", pool.Namespace, pool.Name)
+	}
+	return prefix
 }
 
 func randomHex(bytes int) string {

@@ -127,6 +127,30 @@ spec:
                 required:
                 - name
                 type: object
+              iso:
+                description: ISO configures content-addressed caching of the InfraEnv
+                  discovery ISO.
+                properties:
+                  checkInterval:
+                    description: |-
+                      CheckInterval controls how often the operator downloads and hashes the
+                      InfraEnv ISO to detect content changes when the URL remains stable.
+                    type: string
+                  pathPrefix:
+                    description: |-
+                      PathPrefix is the datastore directory used for content-addressed ISO
+                      objects. When empty, the operator uses
+                      agent-forge/<namespace>/<vsphereAgentPool>.
+                    type: string
+                  retainVersions:
+                    default: 2
+                    description: |-
+                      RetainVersions controls how many content-addressed ISO objects are kept in
+                      the datastore. The current ISO is always retained.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
               machineSetName:
                 description: |-
                   MachineSetName optionally pins the CAPI MachineSet name. When empty, the
@@ -263,8 +287,9 @@ spec:
                     type: string
                   isoPath:
                     description: |-
-                      ISOPath is the datastore path to the InfraEnv discovery ISO. When empty,
-                      the operator derives iso/<infraEnvName>-discovery.iso.
+                      ISOPath is a legacy datastore directory prefix for content-addressed
+                      InfraEnv discovery ISO objects. Prefer spec.iso.pathPrefix for new
+                      configurations.
                     type: string
                   network:
                     description: Network is the vSphere network name attached to the
@@ -387,6 +412,65 @@ spec:
                   configured buffer.
                 format: int32
                 type: integer
+              iso:
+                description: ISO records the active cached InfraEnv discovery ISO.
+                properties:
+                  checkedAt:
+                    description: CheckedAt is when the operator last downloaded and
+                      hashed the ISO.
+                    format: date-time
+                    type: string
+                  forceRefreshToken:
+                    description: |-
+                      ForceRefreshToken stores the last processed force refresh annotation
+                      value.
+                    type: string
+                  history:
+                    description: History records retained content-addressed ISO objects,
+                      newest first.
+                    items:
+                      description: ISOCacheHistoryEntry records one uploaded content-addressed
+                        ISO object.
+                      properties:
+                        path:
+                          description: Path is the datastore path to the ISO object.
+                          type: string
+                        sha256:
+                          description: SHA256 is the ISO content digest.
+                          type: string
+                        sizeBytes:
+                          description: SizeBytes is the downloaded ISO size.
+                          format: int64
+                          type: integer
+                        uploadedAt:
+                          description: UploadedAt is when this ISO object was uploaded.
+                          format: date-time
+                          type: string
+                      required:
+                      - path
+                      - sha256
+                      type: object
+                    type: array
+                  path:
+                    description: Path is the datastore path inserted into newly created
+                      VMs.
+                    type: string
+                  sha256:
+                    description: SHA256 is the content digest of the active ISO.
+                    type: string
+                  sizeBytes:
+                    description: SizeBytes is the downloaded ISO size.
+                    format: int64
+                    type: integer
+                  uploadedAt:
+                    description: UploadedAt is when the active ISO object was uploaded.
+                    format: date-time
+                    type: string
+                  url:
+                    description: URL is the InfraEnv status.isoDownloadURL used for
+                      the last check.
+                    type: string
+                type: object
               machineSetReplicas:
                 description: MachineSetReplicas is the raw MachineSet.spec.replicas
                   value.

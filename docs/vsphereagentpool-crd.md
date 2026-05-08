@@ -28,7 +28,7 @@ The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI
 | `spec.vsphere.firmware` | no | VM firmware, `efi` or `bios`. Defaults to `efi`. |
 | `spec.vsphere.networkAdapterType` | no | NIC adapter type. Defaults to `vmxnet3`. |
 | `spec.vsphere.diskEagerlyScrub` | no | Enables eager disk scrubbing for the primary disk. Defaults to `false`. |
-| `spec.vsphere.isoPath` | no | Datastore path to the discovery ISO. Defaults logically to `iso/<infraEnvName>-discovery.iso`. |
+| `spec.vsphere.isoPath` | no | Legacy datastore directory prefix for content-addressed ISO objects. Prefer `spec.iso.pathPrefix` for new configs. |
 | `spec.template.namePrefix` | no | Prefix for operator-created VM names. Defaults logically to `<hostedCluster>-<agent.role>`. |
 | `spec.template.numCPUs` | no | VM vCPU count. Defaults to `4`. |
 | `spec.template.memoryMiB` | no | VM memory in MiB. Defaults to `16384`. |
@@ -39,6 +39,9 @@ The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI
 | `spec.scaling.bufferAgents` | no | Extra unbound matching Agents to keep beyond MachineSet demand. Defaults to `0`. |
 | `spec.scaling.maxProvisioning` | no | Max VMs to create in one reconcile. Defaults to `3`. |
 | `spec.scaling.deletePolicy` | no | `OwnedOnly` destroys only VMs recorded in status; `Retain` never destroys VMs. Defaults to `OwnedOnly`. |
+| `spec.iso.checkInterval` | no | How often to download and hash the InfraEnv ISO to detect changed bytes behind a stable URL. Defaults to `10m`. |
+| `spec.iso.retainVersions` | no | Number of content-addressed ISO objects to keep in the datastore. Defaults to `2`. |
+| `spec.iso.pathPrefix` | no | Datastore directory for cached ISO objects. Defaults to `agent-forge/<namespace>/<vsphereAgentPool>`. |
 
 ## Status Fields
 
@@ -52,9 +55,18 @@ The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI
 | `status.boundAgents` | Matching Agents already bound to CAPI/HostedCluster. |
 | `status.availableAgents` | Matching Agents not yet bound. |
 | `status.ownedVMs` | VMs created or tracked by this CR, including MAC, AgentRef, MachineRef, and phase. |
+| `status.iso` | Active cached ISO URL, path, SHA256 digest, size, timestamps, force-refresh token, and retained history. |
 | `status.plannedActions` | Latest planned or applied `CreateVM`, `DeleteVM`, `PatchAgent`, or `Noop` actions. |
-| `status.conditions` | `Ready`, `DryRun`, `MachineSetFound`, `InfraEnvAvailable`, `CapacitySatisfied`, and `VsphereReady`. |
+| `status.conditions` | `Ready`, `DryRun`, `MachineSetFound`, `InfraEnvAvailable`, `ISOReady`, `CapacitySatisfied`, and `VsphereReady`. |
+
+The ISO cache is content-addressed as `<pathPrefix>/<sha256>.iso`. The operator
+downloads and hashes the InfraEnv ISO when the cache is stale, reuses the active
+datastore object when the digest is unchanged, and uploads a new object when the
+bytes changed or the active datastore object is missing. To force an immediate
+refresh, set annotation
+`agentforge.containeroo.ch/force-iso-refresh=<unique-value>` on the
+`VsphereAgentPool`.
 
 ## Current Implementation Note
 
-The controller includes the CRD, planner, status/condition/event handling, dry-run behavior, Agent patching, and an injectable vSphere provider interface with unit tests. The default provider uses `govc`, which is included in the manager image, to upload the InfraEnv ISO, create/power-on VMs, and destroy owned VMs during cleanup or scale-down. For local development outside the image, set `GOVC_PATH` if `govc` is not at `/usr/local/bin/govc`.
+The controller includes the CRD, planner, status/condition/event handling, dry-run behavior, Agent patching, ISO cache reconciliation, and an injectable vSphere provider interface with unit tests. The default provider uses `govc`, which is included in the manager image, to upload cached InfraEnv ISOs, create/power-on VMs, destroy owned VMs during cleanup or scale-down, and prune old ISO objects. For local development outside the image, set `GOVC_PATH` if `govc` is not at `/usr/local/bin/govc`.

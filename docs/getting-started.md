@@ -166,6 +166,10 @@ spec:
     bufferAgents: 0
     maxProvisioning: 3
     deletePolicy: OwnedOnly
+  iso:
+    checkInterval: 10m
+    retainVersions: 2
+    pathPrefix: agent-forge/demo/demo-worker
 ```
 
 Apply it:
@@ -204,8 +208,11 @@ Useful status fields:
 | `status.desiredReplicas` | MachineSet replicas plus `spec.scaling.bufferAgents`. |
 | `status.matchingAgents` | Agents that already match `spec.agent.labels`. |
 | `status.availableAgents` | Matching Agents that are not yet bound to CAPI. |
+| `status.iso.path` | Active content-addressed ISO datastore path used for new VMs. |
+| `status.iso.sha256` | SHA256 digest of the active InfraEnv ISO bytes. |
+| `status.iso.checkedAt` | Last time the operator downloaded and hashed the ISO. |
 | `status.plannedActions` | Planned `CreateVM`, `DeleteVM`, `PatchAgent`, or `Noop` actions. |
-| `status.conditions` | Readiness, dry-run state, MachineSet discovery, InfraEnv availability, and capacity state. |
+| `status.conditions` | Readiness, dry-run state, MachineSet discovery, InfraEnv availability, ISO cache state, and capacity state. |
 
 Check Events:
 
@@ -223,11 +230,20 @@ kubectl -n demo patch vsphereagentpool demo-worker --type=merge -p '{"spec":{"dr
 
 The operator can now:
 
-- Upload or refresh the InfraEnv discovery ISO in the configured datastore path.
+- Download and hash the InfraEnv discovery ISO when the cache is stale.
+- Upload a content-addressed ISO object only when the bytes changed or the datastore object is missing.
 - Create VMs when MachineSet demand exceeds available matching Agents.
 - Power on created VMs.
 - Patch matching Agents with labels, role, and approval when configured.
 - Delete owned VMs during scale-down when `deletePolicy` is `OwnedOnly`.
+
+Force an immediate ISO refresh without changing the spec:
+
+```sh
+kubectl -n demo annotate vsphereagentpool demo-worker \
+  agentforge.containeroo.ch/force-iso-refresh="$(date -Iseconds)" \
+  --overwrite
+```
 
 ## 8. Tune Scaling Guardrails
 

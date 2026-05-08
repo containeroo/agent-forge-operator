@@ -44,6 +44,8 @@ import (
 const (
 	finalizerName = "agentforge.containeroo.ch/vsphere-agent-pool"
 
+	forceISORefreshAnnotation = "agentforge.containeroo.ch/force-iso-refresh"
+
 	nodePoolAnnotation = "hypershift.openshift.io/nodePool"
 	roleLabelKey       = "hypershift.openshift.io/nodepool-role"
 	agentMachineRefKey = "agentMachineRef"
@@ -196,8 +198,16 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 		if err != nil {
 			return err
 		}
+		isoPath := pool.Status.ISO.Path
+		if plan.VMsToCreate > 0 {
+			isoPath, err = r.ensureISOCache(ctx, pool, provider, isoDownloadURL)
+			if err != nil {
+				r.setStatusError(pool, conditionISOReady, "ISORefreshFailed", err.Error())
+				return err
+			}
+		}
 		for i := int32(0); i < plan.VMsToCreate; i++ {
-			vm, err := provider.CreateVM(ctx, pool, VMCreateRequest{Ordinal: i, ISODownloadURL: isoDownloadURL})
+			vm, err := provider.CreateVM(ctx, pool, VMCreateRequest{Ordinal: i, ISOPath: isoPath})
 			if err != nil {
 				return err
 			}
@@ -212,6 +222,70 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 	}
 
 	return nil
+}
+
+func (r *VsphereAgentPoolReconciler) ensureISOCache(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, provider VMProvider, isoDownloadURL string) (string, error) {
+	now := metav1.Now()
+	token := pool.GetAnnotations()[forceISORefreshAnnotation]
+	if !isoCacheDue(pool, isoDownloadURL, token, now.Time) {
+		return pool.Status.ISO.Path, nil
+	}
+
+	result, err := provider.EnsureISO(ctx, pool, ISOEnsureRequest{
+		DownloadURL:   isoDownloadURL,
+		CurrentSHA256: pool.Status.ISO.SHA256,
+		CurrentPath:   pool.Status.ISO.Path,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	previousPath := pool.Status.ISO.Path
+	previousHistory := append([]agentforgev1alpha1.ISOCacheHistoryEntry(nil), pool.Status.ISO.History...)
+	uploadedAt := pool.Status.ISO.UploadedAt
+	if result.Uploaded || uploadedAt.IsZero() || result.Path != previousPath {
+		uploadedAt = now
+	}
+
+	pool.Status.ISO.URL = isoDownloadURL
+	pool.Status.ISO.Path = result.Path
+	pool.Status.ISO.SHA256 = result.SHA256
+	pool.Status.ISO.SizeBytes = result.SizeBytes
+	pool.Status.ISO.CheckedAt = now
+	pool.Status.ISO.UploadedAt = uploadedAt
+	pool.Status.ISO.ForceRefreshToken = token
+	retainVersions := isoRetainVersions(pool)
+	pool.Status.ISO.History = updatedISOHistory(previousHistory, agentforgev1alpha1.ISOCacheHistoryEntry{
+		Path:       result.Path,
+		SHA256:     result.SHA256,
+		SizeBytes:  result.SizeBytes,
+		UploadedAt: uploadedAt,
+	}, retainVersions)
+
+	for _, stalePath := range staleISOPaths(previousHistory, previousPath, result.Path, retainVersions) {
+		if err := provider.DeleteISO(ctx, pool, stalePath); err != nil {
+			r.recordWarning(pool, "ISOPruneFailed", stableErrorMessage(err))
+		}
+	}
+
+	reason := "Reused"
+	message := fmt.Sprintf("Reused cached ISO %s", result.Path)
+	if result.Uploaded {
+		reason = "Uploaded"
+		message = fmt.Sprintf("Uploaded cached ISO %s", result.Path)
+	}
+	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+		Type:               conditionISOReady,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: pool.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+	if r.Recorder != nil {
+		r.Recorder.Event(pool, corev1.EventTypeNormal, "ISO"+reason, message)
+	}
+
+	return result.Path, nil
 }
 
 func (r *VsphereAgentPoolReconciler) provider(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (VMProvider, error) {
@@ -468,6 +542,12 @@ func applySpecDefaults(pool *agentforgev1alpha1.VsphereAgentPool) {
 	if pool.Spec.Scaling.DeletePolicy == "" {
 		pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
 	}
+	if pool.Spec.ISO.CheckInterval.Duration == 0 {
+		pool.Spec.ISO.CheckInterval.Duration = 10 * time.Minute
+	}
+	if pool.Spec.ISO.RetainVersions == 0 {
+		pool.Spec.ISO.RetainVersions = 2
+	}
 }
 
 func machineSetReplicas(machineSet *unstructured.Unstructured) int32 {
@@ -507,6 +587,92 @@ var tempISOPathPattern = regexp.MustCompile(`/tmp/agent-forge-iso-[^[:space:]]+`
 
 func stableErrorMessage(err error) string {
 	return tempISOPathPattern.ReplaceAllString(err.Error(), "<temp-iso>")
+}
+
+func isoCacheDue(pool *agentforgev1alpha1.VsphereAgentPool, isoDownloadURL, forceToken string, now time.Time) bool {
+	if pool.Status.ISO.Path == "" || pool.Status.ISO.SHA256 == "" {
+		return true
+	}
+	if pool.Status.ISO.URL != "" && pool.Status.ISO.URL != isoDownloadURL {
+		return true
+	}
+	if !strings.HasPrefix(pool.Status.ISO.Path, isoPathPrefix(pool)+"/") {
+		return true
+	}
+	if forceToken != "" && forceToken != pool.Status.ISO.ForceRefreshToken {
+		return true
+	}
+	checkedAt := pool.Status.ISO.CheckedAt.Time
+	if checkedAt.IsZero() {
+		return true
+	}
+	return !now.Before(checkedAt.Add(isoCheckInterval(pool)))
+}
+
+func isoCheckInterval(pool *agentforgev1alpha1.VsphereAgentPool) time.Duration {
+	if pool.Spec.ISO.CheckInterval.Duration > 0 {
+		return pool.Spec.ISO.CheckInterval.Duration
+	}
+	return 10 * time.Minute
+}
+
+func isoRetainVersions(pool *agentforgev1alpha1.VsphereAgentPool) int {
+	if pool.Spec.ISO.RetainVersions > 0 {
+		return int(pool.Spec.ISO.RetainVersions)
+	}
+	return 2
+}
+
+func updatedISOHistory(history []agentforgev1alpha1.ISOCacheHistoryEntry, current agentforgev1alpha1.ISOCacheHistoryEntry, retain int) []agentforgev1alpha1.ISOCacheHistoryEntry {
+	if retain < 1 {
+		retain = 1
+	}
+	result := []agentforgev1alpha1.ISOCacheHistoryEntry{current}
+	for _, entry := range history {
+		if entry.Path == "" || entry.Path == current.Path || entry.SHA256 == current.SHA256 {
+			continue
+		}
+		result = append(result, entry)
+		if len(result) >= retain {
+			break
+		}
+	}
+	return result
+}
+
+func staleISOPaths(history []agentforgev1alpha1.ISOCacheHistoryEntry, previousPath, currentPath string, retain int) []string {
+	if retain < 1 {
+		retain = 1
+	}
+	kept := map[string]struct{}{currentPath: {}}
+	keptCount := 1
+	for _, entry := range history {
+		if keptCount >= retain {
+			break
+		}
+		if entry.Path == "" || entry.Path == currentPath {
+			continue
+		}
+		kept[entry.Path] = struct{}{}
+		keptCount++
+	}
+	var stale []string
+	if previousPath != "" && previousPath != currentPath {
+		if _, ok := kept[previousPath]; !ok {
+			stale = append(stale, previousPath)
+		}
+	}
+	for _, entry := range history {
+		if entry.Path == "" || entry.Path == currentPath {
+			continue
+		}
+		if _, ok := kept[entry.Path]; ok {
+			continue
+		}
+		kept[entry.Path] = struct{}{}
+		stale = append(stale, entry.Path)
+	}
+	return stale
 }
 
 func summarizeActions(actions []agentforgev1alpha1.PlannedActionStatus) string {

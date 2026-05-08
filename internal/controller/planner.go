@@ -39,6 +39,7 @@ const (
 	conditionInfraEnvAvailable = "InfraEnvAvailable"
 	conditionCapacitySatisfied = "CapacitySatisfied"
 	conditionVsphereReady      = "VsphereReady"
+	conditionISOReady          = "ISOReady"
 )
 
 // AgentInfo is the small subset of an Assisted Installer Agent needed for

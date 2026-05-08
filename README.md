@@ -107,7 +107,18 @@ spec:
     bufferAgents: 0
     maxProvisioning: 3
     deletePolicy: OwnedOnly
+  iso:
+    checkInterval: 10m
+    retainVersions: 2
+    pathPrefix: agent-forge/demo/demo-worker
 ```
+
+The controller caches the InfraEnv discovery ISO by content digest. It downloads
+and hashes the ISO at `spec.iso.checkInterval`, uploads a new `<sha256>.iso`
+object only when the bytes changed or the datastore object is missing, and
+inserts the active `status.iso.path` into every new VM. To force an immediate
+refresh, annotate the CR with
+`agentforge.containeroo.ch/force-iso-refresh=<unique-value>`.
 
 ## Development
 

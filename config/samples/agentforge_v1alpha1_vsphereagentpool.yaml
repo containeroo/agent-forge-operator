@@ -46,3 +46,7 @@ spec:
     bufferAgents: 0
     maxProvisioning: 3
     deletePolicy: OwnedOnly
+  iso:
+    checkInterval: 10m
+    retainVersions: 2
+    pathPrefix: agent-forge/demo/demo-worker

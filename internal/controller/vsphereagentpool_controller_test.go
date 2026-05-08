@@ -58,7 +58,7 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 		Recorder: record.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			providerCalled = true
-			return fakeVMProvider{}, nil
+			return &fakeVMProvider{}, nil
 		},
 	}
 
@@ -189,23 +189,174 @@ func TestReconcileApplyFailureRequeuesWithoutReturningError(t *testing.T) {
 	}
 }
 
-type fakeVMProvider struct{}
+func TestReconcileEnsuresISOOnceForMultipleCreates(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 
-func (fakeVMProvider) CreateVM(_ context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
+	pool := reconcileTestPool()
+	pool.Spec.DryRun = false
+	pool.Spec.Scaling.MaxProvisioning = 2
+	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 5, "demo/demo-worker")
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	agent1 := testAgent(testNamespace, "agent-1", true, true)
+	agent2 := testAgent(testNamespace, "agent-2", true, true)
+	agent3 := testAgent(testNamespace, "agent-3", true, true)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
+		Data: map[string][]byte{
+			"server":   []byte("vcenter.example.invalid"),
+			"username": []byte("user"),
+			"password": []byte("pass"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, ms, infraEnv, agent1, agent2, agent3, secret).
+		WithStatusSubresource(pool).
+		Build()
+
+	provider := &fakeVMProvider{isoPath: "agent-forge/demo/demo-worker/abc.iso"}
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if provider.ensureISOCalls != 1 {
+		t.Fatalf("EnsureISO calls = %d, want 1", provider.ensureISOCalls)
+	}
+	if provider.createVMCalls != 2 {
+		t.Fatalf("CreateVM calls = %d, want 2", provider.createVMCalls)
+	}
+	for _, path := range provider.createISOPaths {
+		if path != provider.isoPath {
+			t.Fatalf("CreateVM ISO path = %s, want %s", path, provider.isoPath)
+		}
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.ISO.Path != provider.isoPath {
+		t.Fatalf("status ISO path = %s, want %s", updated.Status.ISO.Path, provider.isoPath)
+	}
+	if updated.Status.ISO.SHA256 != "abc" {
+		t.Fatalf("status ISO sha = %s, want abc", updated.Status.ISO.SHA256)
+	}
+	condition := findCondition(updated.Status.Conditions, conditionISOReady)
+	if condition == nil || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("ISOReady condition = %#v, want True", condition)
+	}
+}
+
+func TestISOCacheDueDetectsStableURLIntervalAndForceRefresh(t *testing.T) {
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	pool := reconcileTestPool()
+	pool.Spec.ISO.CheckInterval.Duration = 10 * time.Minute
+	pool.Status.ISO = agentforgev1alpha1.ISOCacheStatus{
+		URL:               "https://example.invalid/discovery.iso",
+		Path:              "agent-forge/demo/demo-worker/abc.iso",
+		SHA256:            "abc",
+		CheckedAt:         metav1.NewTime(now.Add(-5 * time.Minute)),
+		ForceRefreshToken: "old",
+	}
+
+	if isoCacheDue(pool, pool.Status.ISO.URL, "", now) {
+		t.Fatal("cache was due before check interval elapsed")
+	}
+	if !isoCacheDue(pool, pool.Status.ISO.URL, "new", now) {
+		t.Fatal("cache was not due for a new force refresh token")
+	}
+	if !isoCacheDue(pool, pool.Status.ISO.URL, "", now.Add(-5*time.Minute).Add(10*time.Minute)) {
+		t.Fatal("cache was not due once check interval elapsed")
+	}
+	pool.Spec.ISO.PathPrefix = "agent-forge/demo/other"
+	if !isoCacheDue(pool, pool.Status.ISO.URL, "", now) {
+		t.Fatal("cache was not due after path prefix changed")
+	}
+}
+
+func TestISOHistoryRetainsNewestAndPrunesStalePaths(t *testing.T) {
+	history := []agentforgev1alpha1.ISOCacheHistoryEntry{
+		{Path: "cache/old-1.iso", SHA256: "old-1"},
+		{Path: "cache/old-2.iso", SHA256: "old-2"},
+		{Path: "cache/old-3.iso", SHA256: "old-3"},
+	}
+	current := agentforgev1alpha1.ISOCacheHistoryEntry{Path: "cache/new.iso", SHA256: "new"}
+
+	updated := updatedISOHistory(history, current, 2)
+	if len(updated) != 2 {
+		t.Fatalf("history length = %d, want 2", len(updated))
+	}
+	if updated[0].Path != "cache/new.iso" || updated[1].Path != "cache/old-1.iso" {
+		t.Fatalf("history = %#v, want current plus newest old entry", updated)
+	}
+
+	stale := staleISOPaths(history, "cache/old-1.iso", "cache/new.iso", 2)
+	if len(stale) != 2 || stale[0] != "cache/old-2.iso" || stale[1] != "cache/old-3.iso" {
+		t.Fatalf("stale paths = %#v, want old-2 and old-3", stale)
+	}
+}
+
+type fakeVMProvider struct {
+	ensureISOCalls int
+	createVMCalls  int
+	createISOPaths []string
+	isoPath        string
+}
+
+func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, ISOEnsureRequest) (ISOEnsureResult, error) {
+	p.ensureISOCalls++
+	if p.isoPath == "" {
+		p.isoPath = "agent-forge/demo/demo-worker/abc.iso"
+	}
+	return ISOEnsureResult{Path: p.isoPath, SHA256: "abc", SizeBytes: 3, Uploaded: true}, nil
+}
+
+func (p *fakeVMProvider) CreateVM(_ context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
+	p.createVMCalls++
+	p.createISOPaths = append(p.createISOPaths, req.ISOPath)
 	return newOwnedVMStatus(fmt.Sprintf("%s-%s-%c", pool.Spec.Template.NamePrefix, time.Now().UTC().Format("150405"), 'a'+req.Ordinal)), nil
 }
 
-func (fakeVMProvider) DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error {
+func (*fakeVMProvider) DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error {
+	return nil
+}
+
+func (*fakeVMProvider) DeleteISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) error {
 	return nil
 }
 
 type failingVMProvider struct{}
+
+func (failingVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, ISOEnsureRequest) (ISOEnsureResult, error) {
+	return ISOEnsureResult{Path: "agent-forge/demo/demo-worker/abc.iso", SHA256: "abc", SizeBytes: 3, Uploaded: true}, nil
+}
 
 func (failingVMProvider) CreateVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
 	return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("provider failed")
 }
 
 func (failingVMProvider) DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error {
+	return nil
+}
+
+func (failingVMProvider) DeleteISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) error {
 	return nil
 }
 
