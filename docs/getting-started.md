@@ -20,12 +20,12 @@ You already have:
 
 The examples use:
 
-| Value | Meaning |
-| --- | --- |
-| `demo` | Hosted cluster namespace and HostedCluster name. |
-| `demo-worker` | NodePool name and `VsphereAgentPool` name. |
-| `demo-demo` | Hosted control plane namespace containing the CAPI MachineSet. |
-| `vsphere-credentials` | Secret with vSphere credentials. |
+| Value                 | Meaning                                                        |
+| --------------------- | -------------------------------------------------------------- |
+| `demo`                | Hosted cluster namespace and HostedCluster name.               |
+| `demo-worker`         | NodePool name and `VsphereAgentPool` name.                     |
+| `demo-demo`           | Hosted control plane namespace containing the CAPI MachineSet. |
+| `vsphere-credentials` | Secret with vSphere credentials.                               |
 
 Adjust the names for your environment.
 
@@ -34,13 +34,13 @@ Adjust the names for your environment.
 Install CRDs from a release:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.3/crds.yaml
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.4/crds.yaml
 ```
 
 Deploy the controller:
 
 ```sh
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.3
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.4
 ```
 
 Check that the manager is running:
@@ -106,11 +106,11 @@ kubectl -n demo create secret generic vsphere-credentials \
 
 Required keys:
 
-| Key | Description |
-| --- | --- |
-| `server` | vCenter server hostname or URL accepted by `govc`. |
-| `username` | vSphere username. |
-| `password` | vSphere password. |
+| Key        | Description                                                       |
+| ---------- | ----------------------------------------------------------------- |
+| `server`   | vCenter server hostname or URL accepted by `govc`.                |
+| `username` | vSphere username.                                                 |
+| `password` | vSphere password.                                                 |
 | `insecure` | Optional. Set to `true` to skip vCenter certificate verification. |
 
 To keep the Secret in another namespace, set
@@ -201,18 +201,18 @@ kubectl -n demo get vsphereagentpool demo-worker -o yaml
 
 Useful status fields:
 
-| Field | What to check |
-| --- | --- |
-| `status.observedMachineSet` | The MachineSet selected by discovery or `spec.machineSetName`. |
-| `status.machineSetReplicas` | The raw autoscaler-driven MachineSet replica count. |
-| `status.desiredReplicas` | MachineSet replicas plus `spec.scaling.bufferAgents`. |
-| `status.matchingAgents` | Agents that already match `spec.agent.labels`. |
-| `status.availableAgents` | Matching Agents that are not yet bound to CAPI. |
-| `status.iso.path` | Active content-addressed ISO datastore path used for new VMs. |
-| `status.iso.sha256` | SHA256 digest of the active InfraEnv ISO bytes. |
-| `status.iso.checkedAt` | Last time the operator downloaded and hashed the ISO. |
-| `status.plannedActions` | Planned `CreateVM`, `DeleteVM`, `PatchAgent`, or `Noop` actions. |
-| `status.conditions` | Readiness, dry-run state, MachineSet discovery, InfraEnv availability, ISO cache state, and capacity state. |
+| Field                       | What to check                                                                                               |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `status.observedMachineSet` | The MachineSet selected by discovery or `spec.machineSetName`.                                              |
+| `status.machineSetReplicas` | The raw autoscaler-driven MachineSet replica count.                                                         |
+| `status.desiredReplicas`    | MachineSet replicas plus `spec.scaling.bufferAgents`.                                                       |
+| `status.matchingAgents`     | Agents that already match `spec.agent.labels`.                                                              |
+| `status.availableAgents`    | Matching Agents that are not yet bound to CAPI.                                                             |
+| `status.iso.path`           | Active content-addressed ISO datastore path used for new VMs.                                               |
+| `status.iso.sha256`         | SHA256 digest of the active InfraEnv ISO bytes.                                                             |
+| `status.iso.checkedAt`      | Last time the operator downloaded and hashed the ISO.                                                       |
+| `status.plannedActions`     | Planned `CreateVM`, `DeleteVM`, `PatchAgent`, or `Noop` actions.                                            |
+| `status.conditions`         | Readiness, dry-run state, MachineSet discovery, InfraEnv availability, ISO cache state, and capacity state. |
 
 Check Events:
 
@@ -259,11 +259,11 @@ scaling:
 
 Fields:
 
-| Field | Guidance |
-| --- | --- |
-| `bufferAgents` | Extra unbound Agents to keep ready beyond current MachineSet demand. Use `0` for strict cost control. |
+| Field             | Guidance                                                                                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `bufferAgents`    | Extra unbound Agents to keep ready beyond current MachineSet demand. Use `0` for strict cost control.                |
 | `maxProvisioning` | Maximum VMs to create per reconcile. Lower values reduce pressure on vSphere, DHCP, storage, and Assisted Installer. |
-| `deletePolicy` | Use `OwnedOnly` for normal cleanup. Use `Retain` when testing or when VM deletion should be manual. |
+| `deletePolicy`    | Use `OwnedOnly` for normal cleanup. Use `Retain` when testing or when VM deletion should be manual.                  |
 
 ## 9. Troubleshooting
 
@@ -318,6 +318,6 @@ kubectl -n demo delete vsphereagentpool demo-worker
 Uninstall the operator:
 
 ```sh
-kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.3
-kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.3/crds.yaml
+kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.4
+kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.4/crds.yaml
 ```

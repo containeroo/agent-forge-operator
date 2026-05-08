@@ -38,15 +38,15 @@ directly. It reacts to the MachineSet demand that already exists.
 Install the latest release manifests:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.3/crds.yaml
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.3
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.4/crds.yaml
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.4
 ```
 
 The published manager images are:
 
 ```text
-ghcr.io/containeroo/agent-forge-operator:v0.0.3
-containeroo/agent-forge-operator:v0.0.3
+ghcr.io/containeroo/agent-forge-operator:v0.0.4
+containeroo/agent-forge-operator:v0.0.4
 ```
 
 For a local image build:
@@ -155,8 +155,8 @@ The controller uses `govc` for vSphere operations. The container image includes
 Releases are built by GoReleaser from pushed tags:
 
 ```sh
-git tag v0.0.3
-git push origin v0.0.3
+git tag v0.0.4
+git push origin v0.0.4
 ```
 
 The release workflow publishes multi-architecture images to GHCR and DockerHub
