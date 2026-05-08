@@ -1,142 +1,156 @@
 # agent-forge-operator
 
-Agent Forge bridges Hypershift Agent NodePool autoscaling to vSphere VM
-inventory. It watches the CAPI MachineSet rendered for a hosted cluster
-NodePool and plans vSphere VM capacity so newly discovered Assisted Installer
-Agents can be consumed by the Agent CAPI provider.
+Agent Forge Operator bridges hosted-cluster autoscaling to VM capacity for
+HyperShift Agent platform clusters on vSphere.
 
-See [docs/vsphereagentpool-crd.md](docs/vsphereagentpool-crd.md) for the CRD
-field contract and status model.
-// TODO(user): Add simple overview of use/purpose
+The hosted cluster autoscaler remains the source of truth. It scales the CAPI
+`MachineSet` rendered for a HyperShift `NodePool`; Agent Forge watches that
+`MachineSet` and ensures enough matching Assisted Installer `Agent` objects can
+exist by creating or deleting vSphere VMs.
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+## What It Does
+
+- Watches a namespace-scoped `VsphereAgentPool` custom resource.
+- Discovers or follows the CAPI `MachineSet` for one HyperShift `NodePool`.
+- Reads the `MachineSet.spec.replicas` value selected by the hosted cluster
+  autoscaler.
+- Creates vSphere VMs from an `InfraEnv` discovery ISO when more Agents are
+  needed.
+- Optionally approves matching Assisted Installer `Agent` objects.
+- Deletes only VMs recorded in the CR status when scale-down is allowed.
+- Supports dry-run mode, status conditions, planned actions, and Kubernetes
+  Events for operational visibility.
+
+## Current Scope
+
+Agent Forge is designed for OpenShift environments that use:
+
+- HyperShift hosted clusters on the Agent platform.
+- Assisted Installer `InfraEnv` and `Agent` resources.
+- CAPI `MachineSet` resources rendered for hosted cluster NodePools.
+- vSphere as the VM provider.
+
+It does not replace the hosted cluster autoscaler and does not scale NodePools
+directly. It reacts to the MachineSet demand that already exists.
+
+## Installation
+
+Install the latest release manifests:
+
+```sh
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.1/crds.yaml
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.1
+```
+
+The published manager images are:
+
+```text
+ghcr.io/containeroo/agent-forge-operator:v0.0.1
+containeroo/agent-forge-operator:v0.0.1
+```
+
+For a local image build:
+
+```sh
+make docker-build docker-push IMG=<registry>/agent-forge-operator:<tag>
+make deploy IMG=<registry>/agent-forge-operator:<tag>
+```
 
 ## Getting Started
 
-### Prerequisites
-- go version v1.24.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+Start with [docs/getting-started.md](docs/getting-started.md). It covers the
+required cluster objects, vSphere Secret, a dry-run `VsphereAgentPool`, status
+inspection, and switching from dry-run to active reconciliation.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+For the complete CRD field contract and status model, see
+[docs/vsphereagentpool-crd.md](docs/vsphereagentpool-crd.md).
 
-```sh
-make docker-build docker-push IMG=<some-registry>/agent-forge-operator:tag
+## Example
+
+```yaml
+apiVersion: agentforge.containeroo.ch/v1alpha1
+kind: VsphereAgentPool
+metadata:
+  name: demo-worker
+  namespace: demo
+spec:
+  dryRun: true
+  hostedClusterRef:
+    name: demo
+  nodePoolRef:
+    name: demo-worker
+  infraEnvRef:
+    name: demo
+  controlPlaneNamespace: demo-demo
+  vsphere:
+    credentialsSecretRef:
+      name: vsphere-credentials
+    datacenter: dc1
+    datastoreCluster: workload-datastore-cluster
+    isoDatastore: iso-datastore
+    resourcePool: cluster/Resources
+    folder: demo
+    network: VM Network
+  template:
+    namePrefix: demo-worker
+    numCPUs: 4
+    memoryMiB: 16384
+    diskGiB: 100
+  agent:
+    role: worker
+    approve: true
+    labels:
+      agentclusterinstalls.extensions.hive.openshift.io/location: lab-a
+      customer: example
+      hypershift.openshift.io/nodepool-role: worker
+  scaling:
+    bufferAgents: 0
+    maxProvisioning: 3
+    deletePolicy: OwnedOnly
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+## Development
 
-**Install the CRDs into the cluster:**
+Requirements:
+
+- Go 1.26 or newer.
+- `kubectl` or `oc`.
+- Docker or another compatible container tool.
+- Access to a Kubernetes or OpenShift cluster for deployment tests.
+
+Common commands:
+
+```sh
+make test
+make lint
+make manifests
+make crd
+make deploy IMG=<registry>/agent-forge-operator:<tag>
+```
+
+Run locally against the active kubeconfig:
 
 ```sh
 make install
+make run
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+The controller uses `govc` for vSphere operations. The container image includes
+`govc`; local `make run` expects `govc` at `/usr/local/bin/govc` unless
+`GOVC_PATH` is set.
+
+## Release
+
+Releases are built by GoReleaser from pushed tags:
 
 ```sh
-make deploy IMG=<some-registry>/agent-forge-operator:tag
+git tag v0.0.1
+git push origin v0.0.1
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
-```
-
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/agent-forge-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/agent-forge-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-operator-sdk edit --plugins=helm/v1-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+The release workflow publishes multi-architecture images to GHCR and DockerHub
+and attaches `crds.yaml` to the GitHub release.
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

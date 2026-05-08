@@ -1,0 +1,307 @@
+# Getting Started
+
+This guide walks through a first `VsphereAgentPool` in dry-run mode and then
+enables active VM reconciliation.
+
+## Assumptions
+
+You already have:
+
+- An OpenShift management cluster with HyperShift and Assisted Installer
+  resources.
+- A hosted cluster that uses the Agent platform.
+- A `NodePool` for the hosted cluster.
+- A CAPI `MachineSet` rendered for that NodePool in the hosted control plane
+  namespace.
+- An `InfraEnv` in the hosted cluster namespace with
+  `status.isoDownloadURL` populated.
+- vSphere credentials that can upload the discovery ISO, create VMs, power on
+  VMs, and destroy operator-owned VMs.
+
+The examples use:
+
+| Value | Meaning |
+| --- | --- |
+| `demo` | Hosted cluster namespace and HostedCluster name. |
+| `demo-worker` | NodePool name and `VsphereAgentPool` name. |
+| `demo-demo` | Hosted control plane namespace containing the CAPI MachineSet. |
+| `vsphere-credentials` | Secret with vSphere credentials. |
+
+Adjust the names for your environment.
+
+## 1. Install the Operator
+
+Install CRDs from a release:
+
+```sh
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.1/crds.yaml
+```
+
+Deploy the controller:
+
+```sh
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.1
+```
+
+Check that the manager is running:
+
+```sh
+kubectl -n agent-forge-operator-system get deploy,pods
+```
+
+For a locally built image, use:
+
+```sh
+make docker-build docker-push IMG=<registry>/agent-forge-operator:<tag>
+make deploy IMG=<registry>/agent-forge-operator:<tag>
+```
+
+## 2. Confirm the MachineSet
+
+The operator follows the CAPI `MachineSet` that HyperShift created for the
+NodePool. You can either set `spec.machineSetName` explicitly or let the
+operator discover the MachineSet by the HyperShift NodePool marker.
+
+List MachineSets in the hosted control plane namespace:
+
+```sh
+kubectl -n demo-demo get machinesets.cluster.x-k8s.io
+```
+
+Inspect the MachineSet that belongs to the NodePool:
+
+```sh
+kubectl -n demo-demo get machinesets.cluster.x-k8s.io -o yaml \
+  | yq '.items[] | select(.metadata.annotations."hypershift.openshift.io/nodePool" == "demo/demo-worker") | .metadata.name'
+```
+
+If you do not use `yq`, inspect the YAML manually:
+
+```sh
+kubectl -n demo-demo get machinesets.cluster.x-k8s.io -o yaml
+```
+
+## 3. Confirm the InfraEnv
+
+The `InfraEnv` must expose a discovery ISO URL:
+
+```sh
+kubectl -n demo get infraenv demo -o jsonpath='{.status.isoDownloadURL}{"\n"}'
+```
+
+If the value is empty, fix the InfraEnv before enabling active reconciliation.
+The operator cannot create bootable discovery VMs without that ISO URL.
+
+## 4. Create the vSphere Secret
+
+Create a Secret in the same namespace as the `VsphereAgentPool`:
+
+```sh
+kubectl -n demo create secret generic vsphere-credentials \
+  --from-literal=server='vcenter.example.com' \
+  --from-literal=username='administrator@example.com' \
+  --from-literal=password='<password>' \
+  --from-literal=insecure='false'
+```
+
+Required keys:
+
+| Key | Description |
+| --- | --- |
+| `server` | vCenter server hostname or URL accepted by `govc`. |
+| `username` | vSphere username. |
+| `password` | vSphere password. |
+| `insecure` | Optional. Set to `true` to skip vCenter certificate verification. |
+
+To keep the Secret in another namespace, set
+`spec.vsphere.credentialsSecretRef.namespace`.
+
+## 5. Create a Dry-Run VsphereAgentPool
+
+Start with `spec.dryRun: true`. In dry-run mode, the operator only plans
+actions, updates status, and emits Events. It does not create VMs, delete VMs,
+or patch Agents.
+
+```yaml
+apiVersion: agentforge.containeroo.ch/v1alpha1
+kind: VsphereAgentPool
+metadata:
+  name: demo-worker
+  namespace: demo
+spec:
+  dryRun: true
+  hostedClusterRef:
+    name: demo
+  nodePoolRef:
+    name: demo-worker
+  infraEnvRef:
+    name: demo
+  controlPlaneNamespace: demo-demo
+  vsphere:
+    credentialsSecretRef:
+      name: vsphere-credentials
+    datacenter: dc1
+    datastoreCluster: workload-datastore-cluster
+    isoDatastore: iso-datastore
+    resourcePool: cluster/Resources
+    folder: demo
+    network: VM Network
+    guestID: rhel9_64Guest
+    scsiType: pvscsi
+    firmware: efi
+    networkAdapterType: vmxnet3
+  template:
+    namePrefix: demo-worker
+    numCPUs: 4
+    memoryMiB: 16384
+    diskGiB: 100
+  agent:
+    role: worker
+    approve: true
+    labels:
+      agentclusterinstalls.extensions.hive.openshift.io/location: lab-a
+      customer: example
+      hypershift.openshift.io/nodepool-role: worker
+  scaling:
+    bufferAgents: 0
+    maxProvisioning: 3
+    deletePolicy: OwnedOnly
+```
+
+Apply it:
+
+```sh
+kubectl apply -f vsphereagentpool.yaml
+```
+
+You can also start from the sample:
+
+```sh
+kubectl apply -k config/samples/
+```
+
+## 6. Inspect the Plan
+
+Check the resource summary:
+
+```sh
+kubectl -n demo get vsphereagentpool
+kubectl -n demo describe vsphereagentpool demo-worker
+```
+
+Inspect status:
+
+```sh
+kubectl -n demo get vsphereagentpool demo-worker -o yaml
+```
+
+Useful status fields:
+
+| Field | What to check |
+| --- | --- |
+| `status.observedMachineSet` | The MachineSet selected by discovery or `spec.machineSetName`. |
+| `status.machineSetReplicas` | The raw autoscaler-driven MachineSet replica count. |
+| `status.desiredReplicas` | MachineSet replicas plus `spec.scaling.bufferAgents`. |
+| `status.matchingAgents` | Agents that already match `spec.agent.labels`. |
+| `status.availableAgents` | Matching Agents that are not yet bound to CAPI. |
+| `status.plannedActions` | Planned `CreateVM`, `DeleteVM`, `PatchAgent`, or `Noop` actions. |
+| `status.conditions` | Readiness, dry-run state, MachineSet discovery, InfraEnv availability, and capacity state. |
+
+Check Events:
+
+```sh
+kubectl -n demo get events --field-selector involvedObject.name=demo-worker --sort-by=.lastTimestamp
+```
+
+## 7. Enable Active Reconciliation
+
+When the dry-run plan is correct, disable dry-run:
+
+```sh
+kubectl -n demo patch vsphereagentpool demo-worker --type=merge -p '{"spec":{"dryRun":false}}'
+```
+
+The operator can now:
+
+- Upload or refresh the InfraEnv discovery ISO in the configured datastore path.
+- Create VMs when MachineSet demand exceeds available matching Agents.
+- Power on created VMs.
+- Patch matching Agents with labels, role, and approval when configured.
+- Delete owned VMs during scale-down when `deletePolicy` is `OwnedOnly`.
+
+## 8. Tune Scaling Guardrails
+
+The hosted cluster autoscaler controls the actual desired node count. The
+`spec.scaling` block only controls how aggressively Agent Forge responds.
+
+```yaml
+scaling:
+  bufferAgents: 1
+  maxProvisioning: 2
+  deletePolicy: OwnedOnly
+```
+
+Fields:
+
+| Field | Guidance |
+| --- | --- |
+| `bufferAgents` | Extra unbound Agents to keep ready beyond current MachineSet demand. Use `0` for strict cost control. |
+| `maxProvisioning` | Maximum VMs to create per reconcile. Lower values reduce pressure on vSphere, DHCP, storage, and Assisted Installer. |
+| `deletePolicy` | Use `OwnedOnly` for normal cleanup. Use `Retain` when testing or when VM deletion should be manual. |
+
+## 9. Troubleshooting
+
+MachineSet is not found:
+
+```sh
+kubectl -n demo-demo get machinesets.cluster.x-k8s.io --show-labels
+kubectl -n demo get vsphereagentpool demo-worker -o jsonpath='{.status.conditions[?(@.type=="MachineSetFound")]}{"\n"}'
+```
+
+InfraEnv ISO is unavailable:
+
+```sh
+kubectl -n demo get infraenv demo -o yaml
+kubectl -n demo get vsphereagentpool demo-worker -o jsonpath='{.status.conditions[?(@.type=="InfraEnvAvailable")]}{"\n"}'
+```
+
+No Agents match:
+
+```sh
+kubectl -n demo get agents -o yaml
+kubectl -n demo get vsphereagentpool demo-worker -o jsonpath='{.status.matchingAgents}{"\n"}'
+```
+
+vSphere errors:
+
+```sh
+kubectl -n demo describe vsphereagentpool demo-worker
+kubectl -n agent-forge-operator-system logs deploy/agent-forge-operator-controller-manager -c manager
+```
+
+Dry-run remains enabled:
+
+```sh
+kubectl -n demo get vsphereagentpool demo-worker -o jsonpath='{.spec.dryRun}{"\n"}'
+```
+
+## 10. Clean Up
+
+Pause destructive cleanup first if you want to retain VMs:
+
+```sh
+kubectl -n demo patch vsphereagentpool demo-worker --type=merge -p '{"spec":{"scaling":{"deletePolicy":"Retain"}}}'
+```
+
+Delete the bridge:
+
+```sh
+kubectl -n demo delete vsphereagentpool demo-worker
+```
+
+Uninstall the operator:
+
+```sh
+kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.1
+kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.1/crds.yaml
+```
