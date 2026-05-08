@@ -165,7 +165,8 @@ func (p *govcVMProvider) ensureISO(ctx context.Context, pool *agentforgev1alpha1
 	if dir := filepath.Dir(isoPath); dir != "." && dir != "" {
 		_ = p.run(ctx, "datastore.mkdir", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, dir)
 	}
-	return p.run(ctx, "datastore.upload", "-f", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, tmpFile, isoPath)
+	_ = p.run(ctx, "datastore.rm", "-f", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, isoPath)
+	return p.run(ctx, "datastore.upload", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, tmpFile, isoPath)
 }
 
 func (p *govcVMProvider) run(ctx context.Context, args ...string) error {

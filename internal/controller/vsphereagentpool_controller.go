@@ -57,6 +57,7 @@ var (
 // VsphereAgentPoolReconciler reconciles a VsphereAgentPool object.
 type VsphereAgentPoolReconciler struct {
 	client.Client
+	APIReader       client.Reader
 	Scheme          *runtime.Scheme
 	Recorder        record.EventRecorder
 	ProviderFactory VMProviderFactory
@@ -219,7 +220,11 @@ func (r *VsphereAgentPoolReconciler) provider(ctx context.Context, pool *agentfo
 		secretNamespace = pool.Namespace
 	}
 	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: pool.Spec.VSphere.CredentialsSecretRef.Name}, &secret); err != nil {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: pool.Spec.VSphere.CredentialsSecretRef.Name}, &secret); err != nil {
 		return nil, err
 	}
 	return factory(ctx, pool, &secret)

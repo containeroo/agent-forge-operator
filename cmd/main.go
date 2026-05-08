@@ -205,8 +205,9 @@ func main() {
 	}
 
 	if err := (&controller.VsphereAgentPoolReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VsphereAgentPool")
 		os.Exit(1)
