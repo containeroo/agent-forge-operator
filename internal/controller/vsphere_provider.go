@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -172,6 +173,8 @@ func (p *govcVMProvider) ensureISO(ctx context.Context, pool *agentforgev1alpha1
 func (p *govcVMProvider) run(ctx context.Context, args ...string) error {
 	cmd := exec.CommandContext(ctx, p.command, args...)
 	cmd.Env = append(os.Environ(),
+		"HOME=/tmp",
+		"GOVC_PERSIST_SESSION=false",
 		"GOVC_URL="+p.config.Server,
 		"GOVC_USERNAME="+p.config.Username,
 		"GOVC_PASSWORD="+p.config.Password,
@@ -179,9 +182,32 @@ func (p *govcVMProvider) run(ctx context.Context, args ...string) error {
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("govc %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("govc %s failed: %w: %s", strings.Join(args, " "), err, sanitizeCommandOutput(string(output)))
 	}
 	return nil
+}
+
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+func sanitizeCommandOutput(output string) string {
+	cleaned := ansiEscapePattern.ReplaceAllString(output, "")
+	cleaned = strings.ReplaceAll(cleaned, "\r", "\n")
+
+	var lines []string
+	for _, line := range strings.Split(cleaned, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "Uploading...") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return strings.TrimSpace(cleaned)
+	}
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+	}
+	return strings.Join(lines, "; ")
 }
 
 func downloadFile(ctx context.Context, url, path string) error {
