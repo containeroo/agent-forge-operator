@@ -325,3 +325,18 @@ func randomHex(bytes int) string {
 	}
 	return hex.EncodeToString(value)
 }
+
+func randomAlphaNumeric(length int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	if length <= 0 {
+		return ""
+	}
+	value := make([]byte, length)
+	if _, err := rand.Read(value); err != nil {
+		return strings.Repeat("x", length)
+	}
+	for i := range value {
+		value[i] = alphabet[int(value[i])%len(alphabet)]
+	}
+	return string(value)
+}

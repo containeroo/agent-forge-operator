@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 	"time"
 
@@ -27,6 +28,8 @@ const (
 	testAPIVersionKey         = "apiVersion"
 	testKindKey               = "kind"
 )
+
+var agentHostnamePattern = regexp.MustCompile(`^demo-worker-[a-z0-9]{4}$`)
 
 func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 	ctx := context.Background()
@@ -311,8 +314,8 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 		t.Fatalf("spec.role = %q, want %q", role, testWorkerRole)
 	}
 	hostname, _, _ := unstructured.NestedString(updated.Object, "spec", "hostname")
-	if hostname != "demo-worker-abcdef" {
-		t.Fatalf("spec.hostname = %q, want demo-worker-abcdef", hostname)
+	if !agentHostnamePattern.MatchString(hostname) {
+		t.Fatalf("spec.hostname = %q, want demo-worker plus 4 random lowercase alphanumeric characters", hostname)
 	}
 	labels := updated.GetLabels()
 	if labels[roleLabelKey] != testWorkerRole {

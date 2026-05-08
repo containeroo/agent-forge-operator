@@ -406,7 +406,7 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 		return err
 	}
 	if hostname, _, _ := unstructured.NestedString(agent.Object, "spec", "hostname"); hostname == "" {
-		if err := unstructured.SetNestedField(agent.Object, desiredAgentHostname(pool, agent.GetName()), "spec", "hostname"); err != nil {
+		if err := unstructured.SetNestedField(agent.Object, desiredAgentHostname(pool), "spec", "hostname"); err != nil {
 			return err
 		}
 	}
@@ -732,21 +732,9 @@ func agentBelongsToInfraEnv(agent *unstructured.Unstructured, infraEnvName strin
 	return false
 }
 
-func desiredAgentHostname(pool *agentforgev1alpha1.VsphereAgentPool, agentName string) string {
+func desiredAgentHostname(pool *agentforgev1alpha1.VsphereAgentPool) string {
 	prefix := vmNamePrefix(pool)
-	suffix := strings.ToLower(agentName)
-	suffix = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			return r
-		}
-		return -1
-	}, suffix)
-	if len(suffix) > 6 {
-		suffix = suffix[:6]
-	}
-	if suffix == "" {
-		suffix = randomHex(3)
-	}
+	suffix := randomAlphaNumeric(4)
 	maxPrefixLen := 63 - len(suffix) - 1
 	if len(prefix) > maxPrefixLen {
 		prefix = strings.TrimRight(prefix[:maxPrefixLen], "-")
