@@ -64,6 +64,11 @@ exit 0
 	if strings.Contains(createArgs, "-ds workload-datastore-cluster") {
 		t.Fatalf("vm.create args = %q, must not pass datastore cluster through -ds", createArgs)
 	}
+	createFields := strings.Fields(createArgs)
+	vmName := createFields[len(createFields)-1]
+	if !agentHostnamePattern.MatchString(vmName) {
+		t.Fatalf("vm.create name = %q, want demo-worker plus 4 random lowercase alphanumeric characters", vmName)
+	}
 	if !strings.Contains(string(logBytes), "device.cdrom.insert") ||
 		!strings.Contains(string(logBytes), "-ds iso-datastore") ||
 		!strings.Contains(string(logBytes), "agent-forge/demo/demo-worker/cached.iso") {

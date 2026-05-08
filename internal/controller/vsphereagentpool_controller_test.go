@@ -279,6 +279,9 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 
 	pool := reconcileTestPool()
 	pool.Spec.DryRun = false
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		newOwnedVMStatus("demo-worker-ab12"),
+	}
 	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testCandidateAgent(testNamespace, "abcdef12-3456-7890-abcd-ef1234567890")
@@ -314,8 +317,8 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 		t.Fatalf("spec.role = %q, want %q", role, testWorkerRole)
 	}
 	hostname, _, _ := unstructured.NestedString(updated.Object, "spec", "hostname")
-	if !agentHostnamePattern.MatchString(hostname) {
-		t.Fatalf("spec.hostname = %q, want demo-worker plus 4 random lowercase alphanumeric characters", hostname)
+	if hostname != "demo-worker-ab12" {
+		t.Fatalf("spec.hostname = %q, want matching owned VM name", hostname)
 	}
 	labels := updated.GetLabels()
 	if labels[roleLabelKey] != testWorkerRole {
@@ -323,6 +326,72 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	}
 	if labels[testCustomerKey] != testCustomer {
 		t.Fatalf("customer label = %q, want %q", labels[testCustomerKey], testCustomer)
+	}
+
+	var updatedPool agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updatedPool); err != nil {
+		t.Fatal(err)
+	}
+	if len(updatedPool.Status.OwnedVMs) != 1 {
+		t.Fatalf("ownedVMs = %d, want 1", len(updatedPool.Status.OwnedVMs))
+	}
+	vm := updatedPool.Status.OwnedVMs[0]
+	if vm.Name != "demo-worker-ab12" || vm.Phase != phaseAvailable || vm.AgentRef == nil || vm.AgentRef.Name != agent.GetName() {
+		t.Fatalf("owned VM status = %#v, want available VM linked to candidate Agent", vm)
+	}
+}
+
+func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		newOwnedVMStatus("demo-worker-ab12"),
+	}
+	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	agent := testAgent(testNamespace, "demo-worker-ab12", true, true)
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, ms, infraEnv, agent).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Status.OwnedVMs) != 1 {
+		t.Fatalf("ownedVMs = %d, want 1", len(updated.Status.OwnedVMs))
+	}
+	vm := updated.Status.OwnedVMs[0]
+	if vm.Phase != "Bound" || vm.Reason != "AgentBound" {
+		t.Fatalf("owned VM phase/reason = %s/%s, want Bound/AgentBound", vm.Phase, vm.Reason)
+	}
+	if vm.AgentRef == nil || vm.AgentRef.Name != agent.GetName() {
+		t.Fatalf("agentRef = %#v, want bound Agent ref", vm.AgentRef)
+	}
+	if vm.MachineRef == nil || vm.MachineRef.Name != agent.GetName()+"-machine" || vm.MachineRef.Namespace != testControlPlaneNamespace {
+		t.Fatalf("machineRef = %#v, want AgentMachine ref in control plane namespace", vm.MachineRef)
 	}
 }
 
@@ -443,7 +512,7 @@ func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereA
 func (p *fakeVMProvider) CreateVM(_ context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
 	p.createVMCalls++
 	p.createISOPaths = append(p.createISOPaths, req.ISOPath)
-	return newOwnedVMStatus(fmt.Sprintf("%s-%s-%c", pool.Spec.Template.NamePrefix, time.Now().UTC().Format("150405"), 'a'+req.Ordinal)), nil
+	return newOwnedVMStatus(desiredAgentHostname(pool)), nil
 }
 
 func (*fakeVMProvider) DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error {

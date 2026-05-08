@@ -124,6 +124,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		_ = r.updateStatus(ctx, &pool, PoolPlan{})
 		return ctrl.Result{}, err
 	}
+	pool.Status.OwnedVMs = refreshOwnedVMStatuses(&pool, agents)
 
 	replicas := machineSetReplicas(machineSet)
 	plan := buildPlan(&pool, PoolSnapshot{
@@ -185,11 +186,14 @@ func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *
 }
 
 func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan, isoDownloadURL string) error {
-	for _, action := range plan.Actions {
-		if action.Type == actionPatchAgent {
-			if err := r.patchAgent(ctx, pool, action.Name); err != nil {
-				return err
-			}
+	agentHostnames := assignedAgentHostnames(pool, plan.AgentsToPatch)
+	for _, agent := range plan.AgentsToPatch {
+		hostname := agentHostnames[agent.Name]
+		if err := r.patchAgent(ctx, pool, agent.Name, hostname); err != nil {
+			return err
+		}
+		if hostname != "" {
+			pool.Status.OwnedVMs = markOwnedVMAvailable(pool, pool.Status.OwnedVMs, hostname, agent.Name)
 		}
 	}
 
@@ -377,20 +381,143 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 			hostname, _, _ = unstructured.NestedString(obj.Object, "status", "inventory", "hostname")
 		}
 		clusterName, _, _ := unstructured.NestedString(obj.Object, "spec", "clusterDeploymentName", "name")
+		machineName := labels[agentMachineRefKey]
 		agents = append(agents, AgentInfo{
-			Name:      obj.GetName(),
-			Bound:     labels[agentMachineRefKey] != "" || clusterName == pool.Spec.HostedClusterRef.Name,
-			Approved:  approved,
-			SpecRole:  specRole,
-			RoleLabel: labels[roleLabelKey],
-			Hostname:  specHostname,
-			MAC:       normalizeMAC(hostname),
+			Name:        obj.GetName(),
+			Bound:       machineName != "" || clusterName == pool.Spec.HostedClusterRef.Name,
+			MachineName: machineName,
+			Approved:    approved,
+			SpecRole:    specRole,
+			RoleLabel:   labels[roleLabelKey],
+			Hostname:    specHostname,
+			MAC:         normalizeMAC(hostname),
 		})
 	}
 	return agents, nil
 }
 
-func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) error {
+func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo) map[string]string {
+	assigned := map[string]string{}
+	reserved := map[string]struct{}{}
+	for _, agent := range agents {
+		if agent.Hostname == "" {
+			continue
+		}
+		assigned[agent.Name] = agent.Hostname
+		reserved[agent.Hostname] = struct{}{}
+	}
+
+	for _, agent := range agents {
+		if assigned[agent.Name] != "" {
+			continue
+		}
+		for _, vm := range pool.Status.OwnedVMs {
+			if vm.Name == "" || vm.Phase == "Bound" {
+				continue
+			}
+			if vm.AgentRef != nil && vm.AgentRef.Name != "" && vm.AgentRef.Name != agent.Name {
+				continue
+			}
+			if _, exists := reserved[vm.Name]; exists {
+				continue
+			}
+			assigned[agent.Name] = vm.Name
+			reserved[vm.Name] = struct{}{}
+			break
+		}
+		if assigned[agent.Name] == "" {
+			hostname := desiredAgentHostname(pool)
+			assigned[agent.Name] = hostname
+			reserved[hostname] = struct{}{}
+		}
+	}
+	return assigned
+}
+
+func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo) []agentforgev1alpha1.OwnedVMStatus {
+	if len(pool.Status.OwnedVMs) == 0 {
+		return nil
+	}
+	byHostname := map[string]AgentInfo{}
+	byName := map[string]AgentInfo{}
+	for _, agent := range agents {
+		byName[agent.Name] = agent
+		if agent.Hostname != "" {
+			byHostname[agent.Hostname] = agent
+		}
+	}
+
+	vms := make([]agentforgev1alpha1.OwnedVMStatus, 0, len(pool.Status.OwnedVMs))
+	for _, vm := range pool.Status.OwnedVMs {
+		agent, matched := byHostname[vm.Name]
+		if !matched && vm.AgentRef != nil && vm.AgentRef.Name != "" {
+			agent, matched = byName[vm.AgentRef.Name]
+		}
+		if !matched {
+			vm.AgentRef = nil
+			vm.MachineRef = nil
+			setOwnedVMPhase(&vm, "Provisioning", "AgentNotDiscovered")
+			vms = append(vms, vm)
+			continue
+		}
+
+		vm.AgentRef = agentObjectReference(pool, agent.Name)
+		if agent.MachineName != "" {
+			vm.MachineRef = machineObjectReference(pool, agent.MachineName)
+		} else {
+			vm.MachineRef = nil
+		}
+		if agent.Bound {
+			setOwnedVMPhase(&vm, "Bound", "AgentBound")
+		} else {
+			setOwnedVMPhase(&vm, phaseAvailable, "AgentAvailable")
+		}
+		vms = append(vms, vm)
+	}
+	return vms
+}
+
+func markOwnedVMAvailable(pool *agentforgev1alpha1.VsphereAgentPool, vms []agentforgev1alpha1.OwnedVMStatus, hostname, agentName string) []agentforgev1alpha1.OwnedVMStatus {
+	for i := range vms {
+		if vms[i].Name != hostname {
+			continue
+		}
+		vms[i].AgentRef = agentObjectReference(pool, agentName)
+		vms[i].MachineRef = nil
+		setOwnedVMPhase(&vms[i], phaseAvailable, "AgentPrepared")
+		return vms
+	}
+	return vms
+}
+
+func agentObjectReference(pool *agentforgev1alpha1.VsphereAgentPool, name string) *corev1.ObjectReference {
+	return &corev1.ObjectReference{
+		APIVersion: agentGVK.GroupVersion().String(),
+		Kind:       agentGVK.Kind,
+		Namespace:  pool.Namespace,
+		Name:       name,
+	}
+}
+
+func machineObjectReference(pool *agentforgev1alpha1.VsphereAgentPool, name string) *corev1.ObjectReference {
+	return &corev1.ObjectReference{
+		APIVersion: machineSetGVK.GroupVersion().String(),
+		Kind:       "Machine",
+		Namespace:  pool.Spec.ControlPlaneNamespace,
+		Name:       name,
+	}
+}
+
+func setOwnedVMPhase(vm *agentforgev1alpha1.OwnedVMStatus, phase, reason string) {
+	if vm.Phase == phase && vm.Reason == reason {
+		return
+	}
+	vm.Phase = phase
+	vm.Reason = reason
+	vm.LastTransitionTime = metav1.Now()
+}
+
+func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name, hostname string) error {
 	agent := &unstructured.Unstructured{}
 	agent.SetGroupVersionKind(agentGVK)
 	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, agent); err != nil {
@@ -410,8 +537,11 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 	if err := unstructured.SetNestedField(agent.Object, pool.Spec.Agent.Role, "spec", "role"); err != nil {
 		return err
 	}
-	if hostname, _, _ := unstructured.NestedString(agent.Object, "spec", "hostname"); hostname == "" {
-		if err := unstructured.SetNestedField(agent.Object, desiredAgentHostname(pool), "spec", "hostname"); err != nil {
+	if hostname == "" {
+		hostname = desiredAgentHostname(pool)
+	}
+	if currentHostname, _, _ := unstructured.NestedString(agent.Object, "spec", "hostname"); currentHostname != hostname {
+		if err := unstructured.SetNestedField(agent.Object, hostname, "spec", "hostname"); err != nil {
 			return err
 		}
 	}

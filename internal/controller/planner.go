@@ -46,13 +46,14 @@ const (
 // AgentInfo is the small subset of an Assisted Installer Agent needed for
 // bridge capacity planning.
 type AgentInfo struct {
-	Name      string
-	Bound     bool
-	Approved  bool
-	SpecRole  string
-	RoleLabel string
-	Hostname  string
-	MAC       string
+	Name        string
+	Bound       bool
+	MachineName string
+	Approved    bool
+	SpecRole    string
+	RoleLabel   string
+	Hostname    string
+	MAC         string
 }
 
 // PoolSnapshot is the observed cluster state used by the pure planner.
@@ -73,6 +74,7 @@ type PoolPlan struct {
 	VMsToCreate        int32
 	VMsToDelete        []agentforgev1alpha1.OwnedVMStatus
 	AgentsToDelete     []AgentInfo
+	AgentsToPatch      []AgentInfo
 	Actions            []agentforgev1alpha1.PlannedActionStatus
 }
 
@@ -158,6 +160,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	for _, agent := range agentsToDelete {
 		agentsMarkedForDelete[agent.Name] = struct{}{}
 	}
+	var agentsToPatch []AgentInfo
 	for _, agent := range snapshot.MatchingAgents {
 		if agent.Bound {
 			continue
@@ -168,6 +171,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		if agent.Approved && agent.SpecRole == pool.Spec.Agent.Role && agent.RoleLabel == pool.Spec.Agent.Role && agent.Hostname != "" {
 			continue
 		}
+		agentsToPatch = append(agentsToPatch, agent)
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionPatchAgent,
 			Name:   agent.Name,
@@ -194,6 +198,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		VMsToCreate:        vmsToCreate,
 		VMsToDelete:        vmsToDelete,
 		AgentsToDelete:     agentsToDelete,
+		AgentsToPatch:      agentsToPatch,
 		Actions:            actions,
 	}
 }
@@ -208,7 +213,7 @@ func minInt32(a, b int32) int32 {
 func countPendingOwnedVMs(vms []agentforgev1alpha1.OwnedVMStatus) int32 {
 	var count int32
 	for _, vm := range vms {
-		if vm.Name == "" || vm.Phase == "Bound" {
+		if vm.Name == "" || vm.Phase != "Provisioning" {
 			continue
 		}
 		count++
