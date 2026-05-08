@@ -193,9 +193,19 @@ func (p *govcVMProvider) DeleteVM(ctx context.Context, pool *agentforgev1alpha1.
 		return fmt.Errorf("cannot delete VM with empty name")
 	}
 	if strings.TrimSpace(vm.BIOSUUID) != "" {
-		return p.run(ctx, "vm.destroy", "-dc", pool.Spec.VSphere.Datacenter, "-vm.uuid", vm.BIOSUUID)
+		err := p.run(ctx, "vm.destroy", "-dc", pool.Spec.VSphere.Datacenter, "-vm.uuid", vm.BIOSUUID)
+		if err == nil {
+			return nil
+		}
+		if !isGovcVMNotFound(err) {
+			return err
+		}
 	}
-	return p.run(ctx, "vm.destroy", "-dc", pool.Spec.VSphere.Datacenter, "-vm.ipath", vmInventoryPath(pool, vm.Name))
+	err := p.run(ctx, "vm.destroy", "-dc", pool.Spec.VSphere.Datacenter, "-vm.ipath", vmInventoryPath(pool, vm.Name))
+	if isGovcVMNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func (p *govcVMProvider) DeleteISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, isoPath string) error {
@@ -251,6 +261,14 @@ func sanitizeCommandOutput(output string) string {
 		lines = lines[len(lines)-3:]
 	}
 	return strings.Join(lines, "; ")
+}
+
+func isGovcVMNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such vm") || strings.Contains(message, "vm ") && strings.Contains(message, " not found")
 }
 
 func downloadFileWithSHA256(ctx context.Context, url, path string) (string, int64, error) {

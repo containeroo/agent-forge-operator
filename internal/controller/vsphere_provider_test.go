@@ -262,6 +262,82 @@ exit 0
 	}
 }
 
+func TestGovcDeleteVMFallsBackToInventoryPathWhenUUIDIsMissing(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$4" = "-vm.uuid" ]; then
+  echo "govc: no such VM" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	vm := newOwnedVMStatus("demo-worker-ab12")
+	vm.BIOSUUID = "423297c6-d72e-28bb-b279-1209c29ab72b"
+	if err := provider.DeleteVM(ctx, providerTestPool(), vm); err != nil {
+		t.Fatalf("DeleteVM returned error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
+	if len(calls) != 2 {
+		t.Fatalf("calls = %#v, want UUID delete and inventory path fallback", calls)
+	}
+	if calls[1] != "vm.destroy -dc dc1 -vm.ipath /dc1/vm/demo/demo-worker-ab12" {
+		t.Fatalf("fallback args = %q, want inventory path", calls[1])
+	}
+}
+
+func TestGovcDeleteVMIgnoresMissingVM(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+echo "govc: no such VM" >&2
+exit 1
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	vm := newOwnedVMStatus("demo-worker-ab12")
+	vm.BIOSUUID = "423297c6-d72e-28bb-b279-1209c29ab72b"
+	if err := provider.DeleteVM(ctx, providerTestPool(), vm); err != nil {
+		t.Fatalf("DeleteVM returned error for missing VM: %v", err)
+	}
+}
+
 func providerTestPool() *agentforgev1alpha1.VsphereAgentPool {
 	return &agentforgev1alpha1.VsphereAgentPool{
 		ObjectMeta: metav1.ObjectMeta{
