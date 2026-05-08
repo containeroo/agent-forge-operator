@@ -52,7 +52,7 @@ OPERATOR_SDK_VERSION ?= v1.42.2
 GOVC_VERSION ?= v0.53.1
 
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+IMG ?= ghcr.io/containeroo/agent-forge-operator:v$(VERSION)
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin

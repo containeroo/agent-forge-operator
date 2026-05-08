@@ -33,6 +33,11 @@ resources:
 # be able to communicate with the Webhook Server.
 #- ../network-policy
 
+images:
+- name: controller
+  newName: ghcr.io/containeroo/agent-forge-operator
+  newTag: v0.0.1
+
 # Uncomment the patches line if you enable Metrics
 patches:
 # [METRICS] The following patch will enable the metrics endpoint using HTTPS and the port :8443.
