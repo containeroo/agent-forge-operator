@@ -184,6 +184,44 @@ exit 0
 	}
 }
 
+func TestGovcDeleteVMUsesInventoryPath(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	if err := provider.DeleteVM(ctx, providerTestPool(), newOwnedVMStatus("demo-worker-ab12")); err != nil {
+		t.Fatalf("DeleteVM returned error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.TrimSpace(string(logBytes))
+	if args != "vm.destroy -dc dc1 -vm.ipath demo/demo-worker-ab12" {
+		t.Fatalf("vm.destroy args = %q, want folder-qualified inventory path", args)
+	}
+}
+
 func providerTestPool() *agentforgev1alpha1.VsphereAgentPool {
 	return &agentforgev1alpha1.VsphereAgentPool{
 		ObjectMeta: metav1.ObjectMeta{

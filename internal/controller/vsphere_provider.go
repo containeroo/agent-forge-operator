@@ -188,11 +188,11 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 	return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: true}, nil
 }
 
-func (p *govcVMProvider) DeleteVM(ctx context.Context, _ *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
+func (p *govcVMProvider) DeleteVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
 	if strings.TrimSpace(vm.Name) == "" {
 		return fmt.Errorf("cannot delete VM with empty name")
 	}
-	return p.run(ctx, "vm.destroy", vm.Name)
+	return p.run(ctx, "vm.destroy", "-dc", pool.Spec.VSphere.Datacenter, "-vm.ipath", vmInventoryPath(pool, vm.Name))
 }
 
 func (p *govcVMProvider) DeleteISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, isoPath string) error {
@@ -301,6 +301,10 @@ func vmFolder(pool *agentforgev1alpha1.VsphereAgentPool) string {
 		return pool.Spec.VSphere.Folder
 	}
 	return pool.Spec.HostedClusterRef.Name
+}
+
+func vmInventoryPath(pool *agentforgev1alpha1.VsphereAgentPool, name string) string {
+	return strings.TrimRight(vmFolder(pool), "/") + "/" + name
 }
 
 func isoContentPath(pool *agentforgev1alpha1.VsphereAgentPool, sha string) string {
