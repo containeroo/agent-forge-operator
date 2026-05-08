@@ -58,6 +58,7 @@ type AgentInfo struct {
 	Hostname          string
 	InventoryHostname string
 	MAC               string
+	BIOSUUID          string
 }
 
 // PoolSnapshot is the observed cluster state used by the pure planner.

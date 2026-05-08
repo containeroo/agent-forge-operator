@@ -192,6 +192,9 @@ func (p *govcVMProvider) DeleteVM(ctx context.Context, pool *agentforgev1alpha1.
 	if strings.TrimSpace(vm.Name) == "" {
 		return fmt.Errorf("cannot delete VM with empty name")
 	}
+	if strings.TrimSpace(vm.BIOSUUID) != "" {
+		return p.run(ctx, "vm.destroy", "-dc", pool.Spec.VSphere.Datacenter, "-vm.uuid", vm.BIOSUUID)
+	}
 	return p.run(ctx, "vm.destroy", "-dc", pool.Spec.VSphere.Datacenter, "-vm.ipath", vmInventoryPath(pool, vm.Name))
 }
 
@@ -304,7 +307,11 @@ func vmFolder(pool *agentforgev1alpha1.VsphereAgentPool) string {
 }
 
 func vmInventoryPath(pool *agentforgev1alpha1.VsphereAgentPool, name string) string {
-	return strings.TrimRight(vmFolder(pool), "/") + "/" + name
+	folder := strings.Trim(vmFolder(pool), "/")
+	if folder == "" {
+		return fmt.Sprintf("/%s/vm/%s", pool.Spec.VSphere.Datacenter, name)
+	}
+	return fmt.Sprintf("/%s/vm/%s/%s", pool.Spec.VSphere.Datacenter, folder, name)
 }
 
 func isoContentPath(pool *agentforgev1alpha1.VsphereAgentPool, sha string) string {

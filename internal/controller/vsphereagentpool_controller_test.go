@@ -494,6 +494,13 @@ func TestReconcileAdoptsExistingBoundAgentAsOwnedVM(t *testing.T) {
 	}
 }
 
+func TestNormalizeVMwareSerialUUID(t *testing.T) {
+	uuid := normalizeVMwareSerialUUID("VMware-42 32 97 c6 d7 2e 28 bb-b2 79 12 09 c2 9a b7 2b")
+	if uuid != "423297c6-d72e-28bb-b279-1209c29ab72b" {
+		t.Fatalf("uuid = %q, want normalized VMware BIOS UUID", uuid)
+	}
+}
+
 func TestReconcileAdoptsInventoryHostnameForCandidateAgent(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()

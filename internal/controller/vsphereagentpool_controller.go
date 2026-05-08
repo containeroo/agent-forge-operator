@@ -414,6 +414,7 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 		specRole, _, _ := unstructured.NestedString(obj.Object, "spec", "role")
 		specHostname, _, _ := unstructured.NestedString(obj.Object, "spec", "hostname")
 		inventoryHostname, _, _ := unstructured.NestedString(obj.Object, "status", "inventory", "hostname")
+		serialNumber, _, _ := unstructured.NestedString(obj.Object, "status", "inventory", "systemVendor", "serialNumber")
 		clusterName, _, _ := unstructured.NestedString(obj.Object, "spec", "clusterDeploymentName", "name")
 		machineName := labels[agentMachineRefKey]
 		agents = append(agents, AgentInfo{
@@ -426,6 +427,7 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 			Hostname:          specHostname,
 			InventoryHostname: inventoryHostname,
 			MAC:               normalizeMAC(agentPrimaryMAC(obj)),
+			BIOSUUID:          normalizeVMwareSerialUUID(serialNumber),
 		})
 	}
 	return agents, nil
@@ -599,6 +601,9 @@ func applyAgentToOwnedVMStatus(pool *agentforgev1alpha1.VsphereAgentPool, vm *ag
 	vm.AgentRef = agentObjectReference(pool, agent.Name)
 	if agent.MAC != "" {
 		vm.MACAddress = agent.MAC
+	}
+	if agent.BIOSUUID != "" {
+		vm.BIOSUUID = agent.BIOSUUID
 	}
 	if agent.MachineName != "" {
 		vm.MachineRef = machineObjectReference(pool, agent.MachineName)
@@ -998,6 +1003,15 @@ func summarizeActions(actions []agentforgev1alpha1.PlannedActionStatus) string {
 
 func normalizeMAC(value string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), ":", "-")
+}
+
+func normalizeVMwareSerialUUID(value string) string {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "VMware-"))
+	value = strings.NewReplacer(" ", "", "-", "").Replace(value)
+	if len(value) != 32 {
+		return ""
+	}
+	return strings.ToLower(fmt.Sprintf("%s-%s-%s-%s-%s", value[0:8], value[8:12], value[12:16], value[16:20], value[20:32]))
 }
 
 func agentPrimaryMAC(agent *unstructured.Unstructured) string {

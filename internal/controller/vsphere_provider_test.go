@@ -217,8 +217,48 @@ exit 0
 		t.Fatal(err)
 	}
 	args := strings.TrimSpace(string(logBytes))
-	if args != "vm.destroy -dc dc1 -vm.ipath demo/demo-worker-ab12" {
+	if args != "vm.destroy -dc dc1 -vm.ipath /dc1/vm/demo/demo-worker-ab12" {
 		t.Fatalf("vm.destroy args = %q, want folder-qualified inventory path", args)
+	}
+}
+
+func TestGovcDeleteVMUsesBIOSUUID(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	vm := newOwnedVMStatus("demo-worker-ab12")
+	vm.BIOSUUID = "423297c6-d72e-28bb-b279-1209c29ab72b"
+	if err := provider.DeleteVM(ctx, providerTestPool(), vm); err != nil {
+		t.Fatalf("DeleteVM returned error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.TrimSpace(string(logBytes))
+	if args != "vm.destroy -dc dc1 -vm.uuid 423297c6-d72e-28bb-b279-1209c29ab72b" {
+		t.Fatalf("vm.destroy args = %q, want BIOS UUID selector", args)
 	}
 }
 
