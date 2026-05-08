@@ -48,6 +48,7 @@ type AgentInfo struct {
 	Name      string
 	Bound     bool
 	Approved  bool
+	SpecRole  string
 	RoleLabel string
 	Hostname  string
 	MAC       string
@@ -119,13 +120,13 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		if agent.Bound {
 			continue
 		}
-		if agent.Approved && agent.RoleLabel == pool.Spec.Agent.Role {
+		if agent.Approved && agent.SpecRole == pool.Spec.Agent.Role && agent.RoleLabel == pool.Spec.Agent.Role && agent.Hostname != "" {
 			continue
 		}
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionPatchAgent,
 			Name:   agent.Name,
-			Reason: "Matching Agent is not approved or does not have the requested role label",
+			Reason: "Candidate Agent is not approved, named, or assigned to the requested role",
 			DryRun: pool.Spec.DryRun,
 		})
 	}

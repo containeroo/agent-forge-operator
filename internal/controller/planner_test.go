@@ -24,9 +24,9 @@ func TestBuildPlanCreatesVMsForMachineSetDeficit(t *testing.T) {
 	plan := buildPlan(pool, PoolSnapshot{
 		MachineSetReplicas: 5,
 		MatchingAgents: []AgentInfo{
-			{Name: testAgent1, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent2, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent3, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
 		},
 	})
 
@@ -57,9 +57,9 @@ func TestBuildPlanIncludesBufferAgents(t *testing.T) {
 	plan := buildPlan(pool, PoolSnapshot{
 		MachineSetReplicas: 3,
 		MatchingAgents: []AgentInfo{
-			{Name: testAgent1, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent2, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent3, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
 		},
 	})
 
@@ -78,9 +78,9 @@ func TestBuildPlanCountsOwnedProvisioningVMsAsPendingCapacity(t *testing.T) {
 	plan := buildPlan(pool, PoolSnapshot{
 		MachineSetReplicas: 5,
 		MatchingAgents: []AgentInfo{
-			{Name: testAgent1, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent2, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent3, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
 		},
 		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
 			{Name: "pending-vm-1", Phase: "Provisioning"},
@@ -106,9 +106,9 @@ func TestBuildPlanCreatesOnlyRemainingDeficitAfterOwnedProvisioningVMs(t *testin
 	plan := buildPlan(pool, PoolSnapshot{
 		MachineSetReplicas: 7,
 		MatchingAgents: []AgentInfo{
-			{Name: testAgent1, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent2, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent3, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
 		},
 		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
 			{Name: "pending-vm-1", Phase: "Provisioning"},
@@ -150,9 +150,9 @@ func TestBuildPlanDeletesOnlyOwnedUnboundVMs(t *testing.T) {
 	plan := buildPlan(pool, PoolSnapshot{
 		MachineSetReplicas: 1,
 		MatchingAgents: []AgentInfo{
-			{Name: testAgent1, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent2, Bound: false, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent3, Bound: false, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent3, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
 		},
 		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
 			{Name: "bound-vm", Phase: "Bound"},
@@ -178,8 +178,8 @@ func TestBuildPlanRetainPolicyDoesNotDelete(t *testing.T) {
 	plan := buildPlan(pool, PoolSnapshot{
 		MachineSetReplicas: 1,
 		MatchingAgents: []AgentInfo{
-			{Name: testAgent1, Bound: true, Approved: true, RoleLabel: testWorkerRole},
-			{Name: testAgent2, Bound: false, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
 		},
 		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{{Name: testFreeVM, Phase: testVMAvailable}},
 	})

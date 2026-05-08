@@ -264,6 +264,65 @@ func TestReconcileEnsuresISOOnceForMultipleCreates(t *testing.T) {
 	}
 }
 
+func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Spec.DryRun = false
+	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	agent := testCandidateAgent(testNamespace, "abcdef12-3456-7890-abcd-ef1234567890")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, ms, infraEnv, agent).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated unstructured.Unstructured
+	updated.SetGroupVersionKind(agentGVK)
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: agent.GetName()}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	approved, _, _ := unstructured.NestedBool(updated.Object, "spec", "approved")
+	if !approved {
+		t.Fatal("candidate Agent was not approved")
+	}
+	role, _, _ := unstructured.NestedString(updated.Object, "spec", "role")
+	if role != testWorkerRole {
+		t.Fatalf("spec.role = %q, want %q", role, testWorkerRole)
+	}
+	hostname, _, _ := unstructured.NestedString(updated.Object, "spec", "hostname")
+	if hostname != "demo-worker-abcdef" {
+		t.Fatalf("spec.hostname = %q, want demo-worker-abcdef", hostname)
+	}
+	labels := updated.GetLabels()
+	if labels[roleLabelKey] != testWorkerRole {
+		t.Fatalf("role label = %q, want %q", labels[roleLabelKey], testWorkerRole)
+	}
+	if labels[testCustomerKey] != testCustomer {
+		t.Fatalf("customer label = %q, want %q", labels[testCustomerKey], testCustomer)
+	}
+}
+
 func TestISOCacheDueDetectsStableURLIntervalAndForceRefresh(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 	pool := reconcileTestPool()
@@ -433,8 +492,9 @@ func testInfraEnv(namespace, name, isoURL string) *unstructured.Unstructured {
 
 func testAgent(namespace, name string, bound, approved bool) *unstructured.Unstructured {
 	labels := map[string]string{
-		testCustomerKey: testCustomer,
-		roleLabelKey:    testWorkerRole,
+		"infraenvs.agent-install.openshift.io": testInfraEnvName,
+		testCustomerKey:                        testCustomer,
+		roleLabelKey:                           testWorkerRole,
 	}
 	if bound {
 		labels[agentMachineRefKey] = name + "-machine"
@@ -444,12 +504,33 @@ func testAgent(namespace, name string, bound, approved bool) *unstructured.Unstr
 		testKindKey:       "Agent",
 		"spec": map[string]any{
 			"approved": approved,
+			"hostname": name,
+			"role":     testWorkerRole,
 		},
 	}}
 	obj.SetGroupVersionKind(agentGVK)
 	obj.SetNamespace(namespace)
 	obj.SetName(name)
 	obj.SetLabels(labels)
+	return obj
+}
+
+func testCandidateAgent(namespace, name string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		testAPIVersionKey: "agent-install.openshift.io/v1beta1",
+		testKindKey:       "Agent",
+		"spec": map[string]any{
+			"approved": false,
+			"role":     "",
+		},
+	}}
+	obj.SetGroupVersionKind(agentGVK)
+	obj.SetNamespace(namespace)
+	obj.SetName(name)
+	obj.SetLabels(map[string]string{
+		"infraenvs.agent-install.openshift.io": testInfraEnvName,
+		testCustomerKey:                        testCustomer,
+	})
 	return obj
 }
 

@@ -349,15 +349,24 @@ func (r *VsphereAgentPoolReconciler) infraEnvAvailable(ctx context.Context, pool
 func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]AgentInfo, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(agentGVK)
-	if err := r.List(ctx, list, client.InNamespace(pool.Namespace), client.MatchingLabels(pool.Spec.Agent.Labels)); err != nil {
+	listOpts := []client.ListOption{client.InNamespace(pool.Namespace)}
+	if labels := agentCandidateLabels(pool); len(labels) > 0 {
+		listOpts = append(listOpts, client.MatchingLabels(labels))
+	}
+	if err := r.List(ctx, list, listOpts...); err != nil {
 		return nil, err
 	}
 
 	agents := make([]AgentInfo, 0, len(list.Items))
 	for i := range list.Items {
 		obj := &list.Items[i]
+		if !agentBelongsToInfraEnv(obj, pool.Spec.InfraEnvRef.Name) {
+			continue
+		}
 		labels := obj.GetLabels()
 		approved, _, _ := unstructured.NestedBool(obj.Object, "spec", "approved")
+		specRole, _, _ := unstructured.NestedString(obj.Object, "spec", "role")
+		specHostname, _, _ := unstructured.NestedString(obj.Object, "spec", "hostname")
 		hostname, _, _ := unstructured.NestedString(obj.Object, "spec", "hostname")
 		if hostname == "" {
 			hostname, _, _ = unstructured.NestedString(obj.Object, "status", "inventory", "hostname")
@@ -367,8 +376,9 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 			Name:      obj.GetName(),
 			Bound:     labels[agentMachineRefKey] != "" || clusterName == pool.Spec.HostedClusterRef.Name,
 			Approved:  approved,
+			SpecRole:  specRole,
 			RoleLabel: labels[roleLabelKey],
-			Hostname:  hostname,
+			Hostname:  specHostname,
 			MAC:       normalizeMAC(hostname),
 		})
 	}
@@ -392,6 +402,14 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 	}
 	labels[roleLabelKey] = pool.Spec.Agent.Role
 	agent.SetLabels(labels)
+	if err := unstructured.SetNestedField(agent.Object, pool.Spec.Agent.Role, "spec", "role"); err != nil {
+		return err
+	}
+	if hostname, _, _ := unstructured.NestedString(agent.Object, "spec", "hostname"); hostname == "" {
+		if err := unstructured.SetNestedField(agent.Object, desiredAgentHostname(pool, agent.GetName()), "spec", "hostname"); err != nil {
+			return err
+		}
+	}
 	if approveAgents(pool) {
 		if err := unstructured.SetNestedField(agent.Object, true, "spec", "approved"); err != nil {
 			return err
@@ -689,6 +707,51 @@ func summarizeActions(actions []agentforgev1alpha1.PlannedActionStatus) string {
 
 func normalizeMAC(value string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), ":", "-")
+}
+
+func agentCandidateLabels(pool *agentforgev1alpha1.VsphereAgentPool) map[string]string {
+	labels := map[string]string{}
+	for key, value := range pool.Spec.Agent.Labels {
+		if key == roleLabelKey {
+			continue
+		}
+		labels[key] = value
+	}
+	return labels
+}
+
+func agentBelongsToInfraEnv(agent *unstructured.Unstructured, infraEnvName string) bool {
+	if agent.GetLabels()["infraenvs.agent-install.openshift.io"] == infraEnvName {
+		return true
+	}
+	for _, ref := range agent.GetOwnerReferences() {
+		if ref.Kind == "InfraEnv" && ref.Name == infraEnvName {
+			return true
+		}
+	}
+	return false
+}
+
+func desiredAgentHostname(pool *agentforgev1alpha1.VsphereAgentPool, agentName string) string {
+	prefix := vmNamePrefix(pool)
+	suffix := strings.ToLower(agentName)
+	suffix = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, suffix)
+	if len(suffix) > 6 {
+		suffix = suffix[:6]
+	}
+	if suffix == "" {
+		suffix = randomHex(3)
+	}
+	maxPrefixLen := 63 - len(suffix) - 1
+	if len(prefix) > maxPrefixLen {
+		prefix = strings.TrimRight(prefix[:maxPrefixLen], "-")
+	}
+	return fmt.Sprintf("%s-%s", prefix, suffix)
 }
 
 func upsertOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, vm agentforgev1alpha1.OwnedVMStatus) []agentforgev1alpha1.OwnedVMStatus {
