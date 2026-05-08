@@ -71,6 +71,57 @@ func TestBuildPlanIncludesBufferAgents(t *testing.T) {
 	}
 }
 
+func TestBuildPlanCountsOwnedProvisioningVMsAsPendingCapacity(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.MaxProvisioning = 3
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MachineSetReplicas: 5,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent3, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "pending-vm-1", Phase: "Provisioning"},
+			{Name: "pending-vm-2", Phase: "Provisioning"},
+		},
+	})
+
+	if plan.VMsToCreate != 0 {
+		t.Fatalf("VMsToCreate = %d, want 0 because owned provisioning VMs already cover the deficit", plan.VMsToCreate)
+	}
+	if plan.PendingOwnedVMs != 2 {
+		t.Fatalf("PendingOwnedVMs = %d, want 2", plan.PendingOwnedVMs)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Type != actionNoop {
+		t.Fatalf("actions = %#v, want one Noop", plan.Actions)
+	}
+}
+
+func TestBuildPlanCreatesOnlyRemainingDeficitAfterOwnedProvisioningVMs(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.MaxProvisioning = 3
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MachineSetReplicas: 7,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+			{Name: testAgent3, Bound: true, Approved: true, RoleLabel: testWorkerRole},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "pending-vm-1", Phase: "Provisioning"},
+			{Name: "pending-vm-2", Phase: "Provisioning"},
+			{Name: "bound-vm", Phase: "Bound"},
+		},
+	})
+
+	if plan.VMsToCreate != 2 {
+		t.Fatalf("VMsToCreate = %d, want remaining deficit 2", plan.VMsToCreate)
+	}
+}
+
 func TestBuildPlanPatchesUnapprovedAgents(t *testing.T) {
 	pool := testPool(true)
 

@@ -67,6 +67,7 @@ type PoolPlan struct {
 	MatchingAgents     int32
 	BoundAgents        int32
 	AvailableAgents    int32
+	PendingOwnedVMs    int32
 	VMsToCreate        int32
 	VMsToDelete        []agentforgev1alpha1.OwnedVMStatus
 	Actions            []agentforgev1alpha1.PlannedActionStatus
@@ -97,8 +98,9 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	}
 
 	matchingAgents := int32(len(snapshot.MatchingAgents)) //nolint:gosec // Kubernetes object counts fit in int32 here.
+	pendingOwnedVMs := countPendingOwnedVMs(snapshot.OwnedVMs)
 	desiredReplicas := snapshot.MachineSetReplicas + bufferAgents
-	deficit := desiredReplicas - matchingAgents
+	deficit := desiredReplicas - matchingAgents - pendingOwnedVMs
 	if deficit < 0 {
 		deficit = 0
 	}
@@ -108,7 +110,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	for i := int32(0); i < vmsToCreate; i++ {
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionCreateVM,
-			Reason: fmt.Sprintf("MachineSet requires %d replicas plus %d buffer Agents, but only %d matching Agents exist", snapshot.MachineSetReplicas, bufferAgents, matchingAgents),
+			Reason: fmt.Sprintf("MachineSet requires %d replicas plus %d buffer Agents, but only %d matching Agents and %d owned provisioning VMs exist", snapshot.MachineSetReplicas, bufferAgents, matchingAgents, pendingOwnedVMs),
 			DryRun: pool.Spec.DryRun,
 		})
 	}
@@ -162,6 +164,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		MatchingAgents:     matchingAgents,
 		BoundAgents:        boundAgents,
 		AvailableAgents:    availableAgents,
+		PendingOwnedVMs:    pendingOwnedVMs,
 		VMsToCreate:        vmsToCreate,
 		VMsToDelete:        vmsToDelete,
 		Actions:            actions,
@@ -173,4 +176,15 @@ func minInt32(a, b int32) int32 {
 		return a
 	}
 	return b
+}
+
+func countPendingOwnedVMs(vms []agentforgev1alpha1.OwnedVMStatus) int32 {
+	var count int32
+	for _, vm := range vms {
+		if vm.Name == "" || vm.Phase == "Bound" {
+			continue
+		}
+		count++
+	}
+	return count
 }
