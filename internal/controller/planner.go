@@ -23,10 +23,11 @@ import (
 )
 
 const (
-	actionCreateVM   = "CreateVM"
-	actionDeleteVM   = "DeleteVM"
-	actionPatchAgent = "PatchAgent"
-	actionNoop       = "Noop"
+	actionCreateVM    = "CreateVM"
+	actionDeleteVM    = "DeleteVM"
+	actionDeleteAgent = "DeleteAgent"
+	actionPatchAgent  = "PatchAgent"
+	actionNoop        = "Noop"
 
 	deletePolicyOwnedOnly = "OwnedOnly"
 	deletePolicyRetain    = "Retain"
@@ -71,6 +72,7 @@ type PoolPlan struct {
 	PendingOwnedVMs    int32
 	VMsToCreate        int32
 	VMsToDelete        []agentforgev1alpha1.OwnedVMStatus
+	AgentsToDelete     []AgentInfo
 	Actions            []agentforgev1alpha1.PlannedActionStatus
 }
 
@@ -116,23 +118,9 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		})
 	}
 
-	for _, agent := range snapshot.MatchingAgents {
-		if agent.Bound {
-			continue
-		}
-		if agent.Approved && agent.SpecRole == pool.Spec.Agent.Role && agent.RoleLabel == pool.Spec.Agent.Role && agent.Hostname != "" {
-			continue
-		}
-		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
-			Type:   actionPatchAgent,
-			Name:   agent.Name,
-			Reason: "Candidate Agent is not approved, named, or assigned to the requested role",
-			DryRun: pool.Spec.DryRun,
-		})
-	}
-
 	excess := matchingAgents - desiredReplicas
 	var vmsToDelete []agentforgev1alpha1.OwnedVMStatus
+	var agentsToDelete []AgentInfo
 	if excess > 0 && deletePolicy == deletePolicyOwnedOnly {
 		for _, vm := range snapshot.OwnedVMs {
 			if int32(len(vmsToDelete)) >= excess { //nolint:gosec // bounded by slice length.
@@ -149,6 +137,43 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 				DryRun: pool.Spec.DryRun,
 			})
 		}
+		for _, agent := range snapshot.MatchingAgents {
+			if int32(len(agentsToDelete)) >= excess { //nolint:gosec // bounded by slice length.
+				break
+			}
+			if agent.Bound {
+				continue
+			}
+			agentsToDelete = append(agentsToDelete, agent)
+			actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
+				Type:   actionDeleteAgent,
+				Name:   agent.Name,
+				Reason: fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess),
+				DryRun: pool.Spec.DryRun,
+			})
+		}
+	}
+
+	agentsMarkedForDelete := map[string]struct{}{}
+	for _, agent := range agentsToDelete {
+		agentsMarkedForDelete[agent.Name] = struct{}{}
+	}
+	for _, agent := range snapshot.MatchingAgents {
+		if agent.Bound {
+			continue
+		}
+		if _, deleting := agentsMarkedForDelete[agent.Name]; deleting {
+			continue
+		}
+		if agent.Approved && agent.SpecRole == pool.Spec.Agent.Role && agent.RoleLabel == pool.Spec.Agent.Role && agent.Hostname != "" {
+			continue
+		}
+		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
+			Type:   actionPatchAgent,
+			Name:   agent.Name,
+			Reason: "Candidate Agent is not approved, named, or assigned to the requested role",
+			DryRun: pool.Spec.DryRun,
+		})
 	}
 
 	if len(actions) == 0 {
@@ -168,6 +193,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		PendingOwnedVMs:    pendingOwnedVMs,
 		VMsToCreate:        vmsToCreate,
 		VMsToDelete:        vmsToDelete,
+		AgentsToDelete:     agentsToDelete,
 		Actions:            actions,
 	}
 }

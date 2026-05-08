@@ -56,7 +56,7 @@ The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI
 | `status.availableAgents` | Matching Agents not yet bound. |
 | `status.ownedVMs` | VMs created or tracked by this CR, including MAC, AgentRef, MachineRef, and phase. |
 | `status.iso` | Active cached ISO URL, path, SHA256 digest, size, timestamps, force-refresh token, and retained history. |
-| `status.plannedActions` | Latest planned or applied `CreateVM`, `DeleteVM`, `PatchAgent`, or `Noop` actions. |
+| `status.plannedActions` | Latest planned or applied `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions. |
 | `status.conditions` | `Ready`, `DryRun`, `MachineSetFound`, `InfraEnvAvailable`, `ISOReady`, `CapacitySatisfied`, and `VsphereReady`. |
 
 The ISO cache is content-addressed as `<pathPrefix>/<sha256>.iso`. The operator

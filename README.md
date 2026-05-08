@@ -17,7 +17,7 @@ exist by creating or deleting vSphere VMs.
 - Creates vSphere VMs from an `InfraEnv` discovery ISO when more Agents are
   needed.
 - Optionally approves matching Assisted Installer `Agent` objects.
-- Deletes only VMs recorded in the CR status when scale-down is allowed.
+- Deletes only owned VMs and stale unbound Agents when scale-down is allowed.
 - Supports dry-run mode, status conditions, planned actions, and Kubernetes
   Events for operational visibility.
 

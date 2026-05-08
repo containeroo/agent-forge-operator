@@ -171,6 +171,32 @@ func TestBuildPlanDeletesOnlyOwnedUnboundVMs(t *testing.T) {
 	}
 }
 
+func TestBuildPlanDeletesExcessUnboundAgents(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MachineSetReplicas: 1,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
+			{Name: testAgent3, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
+		},
+	})
+
+	if len(plan.AgentsToDelete) != 2 {
+		t.Fatalf("AgentsToDelete = %d, want 2", len(plan.AgentsToDelete))
+	}
+	if plan.AgentsToDelete[0].Name != testAgent2 || plan.AgentsToDelete[1].Name != testAgent3 {
+		t.Fatalf("AgentsToDelete = %#v, want unbound excess agents", plan.AgentsToDelete)
+	}
+	for _, action := range plan.Actions {
+		if action.Type != actionDeleteAgent {
+			t.Fatalf("action type = %s, want %s", action.Type, actionDeleteAgent)
+		}
+	}
+}
+
 func TestBuildPlanRetainPolicyDoesNotDelete(t *testing.T) {
 	pool := testPool(false)
 	pool.Spec.Scaling.DeletePolicy = deletePolicyRetain

@@ -326,6 +326,56 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	}
 }
 
+func TestReconcileDeletesExcessUnboundAgents(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Spec.DryRun = false
+	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	boundAgent := testAgent(testNamespace, "bound-agent", true, true)
+	excessAgent1 := testAgent(testNamespace, "excess-agent-1", false, true)
+	excessAgent2 := testAgent(testNamespace, "excess-agent-2", false, true)
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, ms, infraEnv, boundAgent, excessAgent1, excessAgent2).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	for _, name := range []string{excessAgent1.GetName(), excessAgent2.GetName()} {
+		var deleted unstructured.Unstructured
+		deleted.SetGroupVersionKind(agentGVK)
+		err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: name}, &deleted)
+		if err == nil {
+			t.Fatalf("excess Agent %s still exists", name)
+		}
+	}
+	var retained unstructured.Unstructured
+	retained.SetGroupVersionKind(agentGVK)
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: boundAgent.GetName()}, &retained); err != nil {
+		t.Fatalf("bound Agent should be retained: %v", err)
+	}
+}
+
 func TestISOCacheDueDetectsStableURLIntervalAndForceRefresh(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 	pool := reconcileTestPool()

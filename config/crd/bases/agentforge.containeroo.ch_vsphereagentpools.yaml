@@ -634,7 +634,8 @@ spec:
                       description: Reason explains why the action is needed.
                       type: string
                     type:
-                      description: Type is the action type, such as CreateVM, DeleteVM,
+                      description: |-
+                        Type is the action type, such as CreateVM, DeleteVM, DeleteAgent,
                         PatchAgent, or Noop.
                       type: string
                   required:

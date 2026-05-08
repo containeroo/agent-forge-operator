@@ -23,6 +23,7 @@ rules:
   - agents
   - infraenvs
   verbs:
+  - delete
   - get
   - list
   - patch

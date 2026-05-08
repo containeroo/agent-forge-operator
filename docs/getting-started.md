@@ -211,7 +211,7 @@ Useful status fields:
 | `status.iso.path`           | Active content-addressed ISO datastore path used for new VMs.                                               |
 | `status.iso.sha256`         | SHA256 digest of the active InfraEnv ISO bytes.                                                             |
 | `status.iso.checkedAt`      | Last time the operator downloaded and hashed the ISO.                                                       |
-| `status.plannedActions`     | Planned `CreateVM`, `DeleteVM`, `PatchAgent`, or `Noop` actions.                                            |
+| `status.plannedActions`     | Planned `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions.                             |
 | `status.conditions`         | Readiness, dry-run state, MachineSet discovery, InfraEnv availability, ISO cache state, and capacity state. |
 
 Check Events:
@@ -235,7 +235,7 @@ The operator can now:
 - Create VMs when MachineSet demand exceeds available matching Agents.
 - Power on created VMs.
 - Patch matching Agents with labels, role, and approval when configured.
-- Delete owned VMs during scale-down when `deletePolicy` is `OwnedOnly`.
+- Delete owned VMs and stale unbound Agents during scale-down when `deletePolicy` is `OwnedOnly`.
 
 Force an immediate ISO refresh without changing the spec:
 

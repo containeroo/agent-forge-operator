@@ -71,7 +71,7 @@ type VsphereAgentPoolReconciler struct {
 // +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinesets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=agent-install.openshift.io,resources=infraenvs;agents,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=agent-install.openshift.io,resources=infraenvs;agents,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -218,6 +218,11 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 				return err
 			}
 			pool.Status.OwnedVMs = removeOwnedVM(pool.Status.OwnedVMs, vm.Name)
+		}
+	}
+	for _, agent := range plan.AgentsToDelete {
+		if err := r.deleteAgent(ctx, pool, agent.Name); err != nil {
+			return err
 		}
 	}
 
@@ -417,6 +422,34 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 	}
 
 	return r.Patch(ctx, agent, client.MergeFrom(before))
+}
+
+func (r *VsphereAgentPoolReconciler) deleteAgent(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) error {
+	agent := &unstructured.Unstructured{}
+	agent.SetGroupVersionKind(agentGVK)
+	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if labels := agent.GetLabels(); labels[agentMachineRefKey] != "" {
+		return fmt.Errorf("refusing to delete Agent %s/%s because it is bound to AgentMachine %s", pool.Namespace, name, labels[agentMachineRefKey])
+	}
+	clusterName, _, _ := unstructured.NestedString(agent.Object, "spec", "clusterDeploymentName", "name")
+	if clusterName != "" {
+		return fmt.Errorf("refusing to delete Agent %s/%s because it is bound to ClusterDeployment %s", pool.Namespace, name, clusterName)
+	}
+	if err := r.Delete(ctx, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(pool, corev1.EventTypeNormal, "AgentDeleted", "deleted stale unbound Agent %s", name)
+	}
+	return nil
 }
 
 func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan) error {
