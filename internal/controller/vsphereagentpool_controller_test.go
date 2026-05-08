@@ -396,6 +396,59 @@ func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 	}
 }
 
+func TestReconcileMarksReturnedAgentReleased(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{
+			Name:     "demo-worker-ab12",
+			Phase:    phaseBound,
+			Reason:   "AgentBound",
+			AgentRef: &corev1.ObjectReference{Name: "demo-worker-ab12"},
+		},
+	}
+	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	agent := testAgent(testNamespace, "demo-worker-ab12", false, true)
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, ms, infraEnv, agent).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Status.OwnedVMs) != 1 {
+		t.Fatalf("ownedVMs = %d, want 1", len(updated.Status.OwnedVMs))
+	}
+	vm := updated.Status.OwnedVMs[0]
+	if vm.Phase != phaseReleased || vm.Reason != "AgentReleased" {
+		t.Fatalf("owned VM phase/reason = %s/%s, want Released/AgentReleased", vm.Phase, vm.Reason)
+	}
+}
+
 func TestReconcileAdoptsExistingBoundAgentAsOwnedVM(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()

@@ -224,16 +224,36 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 			}
 			pool.Status.OwnedVMs = upsertOwnedVM(pool.Status.OwnedVMs, vm)
 		}
+		agentsToDelete := agentDeleteSet(plan.AgentsToDelete)
+		deletedAgents := map[string]struct{}{}
 		for _, vm := range plan.VMsToDelete {
+			agentName := ownedVMAgentName(vm)
+			if _, shouldDeleteAgent := agentsToDelete[agentName]; shouldDeleteAgent {
+				safe, blocker, err := r.agentCanBeDeleted(ctx, pool, agentName)
+				if err != nil {
+					return err
+				}
+				if !safe {
+					r.recordNormal(pool, "AgentDeleteDeferred", fmt.Sprintf("waiting to delete Agent %s/%s: %s", pool.Namespace, agentName, blocker))
+					continue
+				}
+			}
 			if err := provider.DeleteVM(ctx, pool, vm); err != nil {
 				return err
 			}
 			pool.Status.OwnedVMs = removeOwnedVM(pool.Status.OwnedVMs, vm.Name)
+			if _, shouldDeleteAgent := agentsToDelete[agentName]; shouldDeleteAgent {
+				if err := r.deleteAgent(ctx, pool, agentName); err != nil {
+					return err
+				}
+				deletedAgents[agentName] = struct{}{}
+			}
 		}
-	}
-	for _, agent := range plan.AgentsToDelete {
-		if err := r.deleteAgent(ctx, pool, agent.Name); err != nil {
-			return err
+		for _, agent := range plan.AgentsToDelete {
+			if _, deleted := deletedAgents[agent.Name]; deleted {
+				continue
+			}
+			r.recordNormal(pool, "AgentDeleteDeferred", fmt.Sprintf("waiting to delete Agent %s/%s until its VM is selected and deleted", pool.Namespace, agent.Name))
 		}
 	}
 
@@ -417,7 +437,7 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			continue
 		}
 		for _, vm := range pool.Status.OwnedVMs {
-			if vm.Name == "" || vm.Phase == "Bound" {
+			if vm.Name == "" || vm.Phase == phaseBound {
 				continue
 			}
 			if vm.AgentRef != nil && vm.AgentRef.Name != "" && vm.AgentRef.Name != agent.Name {
@@ -463,7 +483,7 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		if !matched {
 			vm.AgentRef = nil
 			vm.MachineRef = nil
-			setOwnedVMPhase(&vm, "Provisioning", "AgentNotDiscovered")
+			setOwnedVMPhase(&vm, phaseProvisioning, "AgentNotDiscovered")
 			vms = append(vms, vm)
 			continue
 		}
@@ -502,6 +522,23 @@ func markOwnedVMAvailable(pool *agentforgev1alpha1.VsphereAgentPool, vms []agent
 		return vms
 	}
 	return vms
+}
+
+func ownedVMAgentName(vm agentforgev1alpha1.OwnedVMStatus) string {
+	if vm.AgentRef == nil {
+		return ""
+	}
+	return vm.AgentRef.Name
+}
+
+func agentDeleteSet(agents []AgentInfo) map[string]struct{} {
+	result := map[string]struct{}{}
+	for _, agent := range agents {
+		if agent.Name != "" {
+			result[agent.Name] = struct{}{}
+		}
+	}
+	return result
 }
 
 func agentObjectReference(pool *agentforgev1alpha1.VsphereAgentPool, name string) *corev1.ObjectReference {
@@ -559,7 +596,9 @@ func applyAgentToOwnedVMStatus(pool *agentforgev1alpha1.VsphereAgentPool, vm *ag
 		vm.MachineRef = nil
 	}
 	if agent.Bound {
-		setOwnedVMPhase(vm, "Bound", "AgentBound")
+		setOwnedVMPhase(vm, phaseBound, "AgentBound")
+	} else if vm.Phase == phaseBound || vm.Phase == phaseReleased {
+		setOwnedVMPhase(vm, phaseReleased, "AgentReleased")
 	} else {
 		setOwnedVMPhase(vm, phaseAvailable, "AgentAvailable")
 	}
@@ -611,12 +650,8 @@ func (r *VsphereAgentPoolReconciler) deleteAgent(ctx context.Context, pool *agen
 		}
 		return err
 	}
-	if labels := agent.GetLabels(); labels[agentMachineRefKey] != "" {
-		return fmt.Errorf("refusing to delete Agent %s/%s because it is bound to AgentMachine %s", pool.Namespace, name, labels[agentMachineRefKey])
-	}
-	clusterName, _, _ := unstructured.NestedString(agent.Object, "spec", "clusterDeploymentName", "name")
-	if clusterName != "" {
-		return fmt.Errorf("refusing to delete Agent %s/%s because it is bound to ClusterDeployment %s", pool.Namespace, name, clusterName)
+	if blocker := agentDeletionBlocker(agent); blocker != "" {
+		return fmt.Errorf("refusing to delete Agent %s/%s: %s", pool.Namespace, name, blocker)
 	}
 	if err := r.Delete(ctx, agent); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -628,6 +663,35 @@ func (r *VsphereAgentPoolReconciler) deleteAgent(ctx context.Context, pool *agen
 		r.Recorder.Eventf(pool, corev1.EventTypeNormal, "AgentDeleted", "deleted stale unbound Agent %s", name)
 	}
 	return nil
+}
+
+func (r *VsphereAgentPoolReconciler) agentCanBeDeleted(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) (bool, string, error) {
+	if name == "" {
+		return true, "", nil
+	}
+	agent := &unstructured.Unstructured{}
+	agent.SetGroupVersionKind(agentGVK)
+	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, "", nil
+		}
+		return false, "", err
+	}
+	if blocker := agentDeletionBlocker(agent); blocker != "" {
+		return false, blocker, nil
+	}
+	return true, "", nil
+}
+
+func agentDeletionBlocker(agent *unstructured.Unstructured) string {
+	if labels := agent.GetLabels(); labels[agentMachineRefKey] != "" {
+		return fmt.Sprintf("still bound to AgentMachine %s", labels[agentMachineRefKey])
+	}
+	clusterName, _, _ := unstructured.NestedString(agent.Object, "spec", "clusterDeploymentName", "name")
+	if clusterName != "" {
+		return fmt.Sprintf("still bound to ClusterDeployment %s", clusterName)
+	}
+	return ""
 }
 
 func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan) error {
@@ -680,6 +744,12 @@ func (r *VsphereAgentPoolReconciler) recordPlan(pool *agentforgev1alpha1.Vsphere
 func (r *VsphereAgentPoolReconciler) recordWarning(pool *agentforgev1alpha1.VsphereAgentPool, reason, message string) {
 	if r.Recorder != nil {
 		r.Recorder.Event(pool, corev1.EventTypeWarning, reason, message)
+	}
+}
+
+func (r *VsphereAgentPoolReconciler) recordNormal(pool *agentforgev1alpha1.VsphereAgentPool, reason, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(pool, corev1.EventTypeNormal, reason, message)
 	}
 }
 

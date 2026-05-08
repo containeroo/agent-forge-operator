@@ -32,6 +32,9 @@ const (
 	deletePolicyOwnedOnly = "OwnedOnly"
 	deletePolicyRetain    = "Retain"
 	phaseAvailable        = "Available"
+	phaseBound            = "Bound"
+	phaseProvisioning     = "Provisioning"
+	phaseReleased         = "Released"
 	defaultAgentRole      = "worker"
 
 	conditionReady             = "Ready"
@@ -122,39 +125,22 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	}
 
 	excess := matchingAgents - desiredReplicas
-	var vmsToDelete []agentforgev1alpha1.OwnedVMStatus
-	var agentsToDelete []AgentInfo
-	if excess > 0 && deletePolicy == deletePolicyOwnedOnly {
-		for _, vm := range snapshot.OwnedVMs {
-			if int32(len(vmsToDelete)) >= excess { //nolint:gosec // bounded by slice length.
-				break
-			}
-			if vm.Phase == "Bound" {
-				continue
-			}
-			vmsToDelete = append(vmsToDelete, vm)
-			actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
-				Type:   actionDeleteVM,
-				Name:   vm.Name,
-				Reason: fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess),
-				DryRun: pool.Spec.DryRun,
-			})
-		}
-		for _, agent := range snapshot.MatchingAgents {
-			if int32(len(agentsToDelete)) >= excess { //nolint:gosec // bounded by slice length.
-				break
-			}
-			if agent.Bound {
-				continue
-			}
-			agentsToDelete = append(agentsToDelete, agent)
-			actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
-				Type:   actionDeleteAgent,
-				Name:   agent.Name,
-				Reason: fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess),
-				DryRun: pool.Spec.DryRun,
-			})
-		}
+	vmsToDelete, agentsToDelete := deletionTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, excess, deletePolicy)
+	for _, vm := range vmsToDelete {
+		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
+			Type:   actionDeleteVM,
+			Name:   vm.Name,
+			Reason: fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess),
+			DryRun: pool.Spec.DryRun,
+		})
+	}
+	for _, agent := range agentsToDelete {
+		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
+			Type:   actionDeleteAgent,
+			Name:   agent.Name,
+			Reason: fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess),
+			DryRun: pool.Spec.DryRun,
+		})
 	}
 
 	agentsMarkedForDelete := map[string]struct{}{}
@@ -214,10 +200,78 @@ func minInt32(a, b int32) int32 {
 func countPendingOwnedVMs(vms []agentforgev1alpha1.OwnedVMStatus) int32 {
 	var count int32
 	for _, vm := range vms {
-		if vm.Name == "" || vm.Phase != "Provisioning" {
+		if vm.Name == "" || vm.Phase != phaseProvisioning {
 			continue
 		}
 		count++
 	}
 	return count
+}
+
+func deletionTargets(vms []agentforgev1alpha1.OwnedVMStatus, agents []AgentInfo, excess int32, deletePolicy string) ([]agentforgev1alpha1.OwnedVMStatus, []AgentInfo) {
+	if excess <= 0 || deletePolicy != deletePolicyOwnedOnly {
+		return nil, nil
+	}
+
+	unboundAgents := map[string]AgentInfo{}
+	for _, agent := range agents {
+		if !agent.Bound {
+			unboundAgents[agent.Name] = agent
+		}
+	}
+
+	var released []agentforgev1alpha1.OwnedVMStatus
+	var available []agentforgev1alpha1.OwnedVMStatus
+	var provisioning []agentforgev1alpha1.OwnedVMStatus
+	for _, vm := range vms {
+		if vm.Name == "" || vm.Phase == phaseBound {
+			continue
+		}
+		if vm.AgentRef == nil || vm.AgentRef.Name == "" {
+			if vm.Phase == phaseProvisioning {
+				provisioning = append(provisioning, vm)
+			}
+			continue
+		}
+		if _, ok := unboundAgents[vm.AgentRef.Name]; !ok {
+			continue
+		}
+		if vm.Phase == phaseReleased {
+			released = append(released, vm)
+			continue
+		}
+		available = append(available, vm)
+	}
+
+	ordered := append(released, available...)
+	ordered = append(ordered, provisioning...)
+	selectedVMs := make([]agentforgev1alpha1.OwnedVMStatus, 0, minInt(excess, int32(len(ordered))))
+	selectedAgents := make([]AgentInfo, 0, minInt(excess, int32(len(ordered))))
+	selectedAgentNames := map[string]struct{}{}
+	for _, vm := range ordered {
+		if int32(len(selectedVMs)) >= excess { //nolint:gosec // bounded by slice length.
+			break
+		}
+		selectedVMs = append(selectedVMs, vm)
+		if vm.AgentRef == nil || vm.AgentRef.Name == "" {
+			continue
+		}
+		agent, ok := unboundAgents[vm.AgentRef.Name]
+		if !ok {
+			continue
+		}
+		if _, exists := selectedAgentNames[agent.Name]; exists {
+			continue
+		}
+		selectedAgents = append(selectedAgents, agent)
+		selectedAgentNames[agent.Name] = struct{}{}
+	}
+	return selectedVMs, selectedAgents
+}
+
+func minInt(a int32, b int32) int {
+	if a < b {
+		return int(a)
+	}
+	return int(b)
 }

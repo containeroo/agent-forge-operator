@@ -3,6 +3,8 @@ package controller
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 )
 
@@ -156,7 +158,7 @@ func TestBuildPlanDeletesOnlyOwnedUnboundVMs(t *testing.T) {
 		},
 		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
 			{Name: "bound-vm", Phase: "Bound"},
-			{Name: testFreeVM, Phase: testVMAvailable},
+			{Name: testFreeVM, Phase: testVMAvailable, AgentRef: testAgentRef(testAgent2)},
 		},
 	})
 
@@ -168,6 +170,9 @@ func TestBuildPlanDeletesOnlyOwnedUnboundVMs(t *testing.T) {
 	}
 	if plan.Actions[0].DryRun {
 		t.Fatal("non-dry-run plan marked delete action as dry-run")
+	}
+	if len(plan.AgentsToDelete) != 1 || plan.AgentsToDelete[0].Name != testAgent2 {
+		t.Fatalf("AgentsToDelete = %#v, want Agent paired with deleted VM", plan.AgentsToDelete)
 	}
 }
 
@@ -182,6 +187,10 @@ func TestBuildPlanDeletesExcessUnboundAgents(t *testing.T) {
 			{Name: testAgent2, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
 			{Name: testAgent3, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
 		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: testAgent2, Phase: phaseReleased, AgentRef: testAgentRef(testAgent2)},
+			{Name: testAgent3, Phase: phaseReleased, AgentRef: testAgentRef(testAgent3)},
+		},
 	})
 
 	if len(plan.AgentsToDelete) != 2 {
@@ -190,10 +199,36 @@ func TestBuildPlanDeletesExcessUnboundAgents(t *testing.T) {
 	if plan.AgentsToDelete[0].Name != testAgent2 || plan.AgentsToDelete[1].Name != testAgent3 {
 		t.Fatalf("AgentsToDelete = %#v, want unbound excess agents", plan.AgentsToDelete)
 	}
-	for _, action := range plan.Actions {
-		if action.Type != actionDeleteAgent {
-			t.Fatalf("action type = %s, want %s", action.Type, actionDeleteAgent)
-		}
+	if len(plan.VMsToDelete) != 2 {
+		t.Fatalf("VMsToDelete = %d, want 2 paired VMs", len(plan.VMsToDelete))
+	}
+	if len(plan.Actions) != 4 {
+		t.Fatalf("actions = %#v, want two VM deletes and two Agent deletes", plan.Actions)
+	}
+}
+
+func TestBuildPlanPrefersReleasedVMsForDeletion(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MachineSetReplicas: 2,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
+			{Name: testAgent3, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: testAgent2, Phase: phaseAvailable, AgentRef: testAgentRef(testAgent2)},
+			{Name: testAgent3, Phase: phaseReleased, AgentRef: testAgentRef(testAgent3)},
+		},
+	})
+
+	if len(plan.VMsToDelete) != 1 {
+		t.Fatalf("VMsToDelete = %d, want 1", len(plan.VMsToDelete))
+	}
+	if plan.VMsToDelete[0].Name != testAgent3 {
+		t.Fatalf("deleted VM = %s, want released VM %s", plan.VMsToDelete[0].Name, testAgent3)
 	}
 }
 
@@ -231,4 +266,8 @@ func testPool(dryRun bool) *agentforgev1alpha1.VsphereAgentPool {
 			},
 		},
 	}
+}
+
+func testAgentRef(name string) *corev1.ObjectReference {
+	return &corev1.ObjectReference{Name: name}
 }
