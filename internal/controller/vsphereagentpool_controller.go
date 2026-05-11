@@ -511,6 +511,23 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			if vm.Name == "" || vm.Phase == phaseBound {
 				continue
 			}
+			if !vmMatchesAgentIdentity(vm, agent) {
+				continue
+			}
+			if _, exists := reserved[vm.Name]; exists {
+				continue
+			}
+			assigned[agent.Name] = vm.Name
+			reserved[vm.Name] = struct{}{}
+			break
+		}
+		if assigned[agent.Name] != "" {
+			continue
+		}
+		for _, vm := range pool.Status.OwnedVMs {
+			if vm.Name == "" || vm.Phase == phaseBound {
+				continue
+			}
 			if vm.AgentRef != nil && vm.AgentRef.Name != "" && vm.AgentRef.Name != agent.Name {
 				continue
 			}
@@ -533,10 +550,18 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo, machines []MachineInfo) []agentforgev1alpha1.OwnedVMStatus {
 	byHostname := map[string]AgentInfo{}
 	byName := map[string]AgentInfo{}
+	byBIOSUUID := map[string]AgentInfo{}
+	byMAC := map[string]AgentInfo{}
 	for _, agent := range agents {
 		byName[agent.Name] = agent
 		if hostname := agentObservedHostname(agent); hostname != "" {
 			byHostname[hostname] = agent
+		}
+		if agent.BIOSUUID != "" {
+			byBIOSUUID[agent.BIOSUUID] = agent
+		}
+		if agent.MAC != "" {
+			byMAC[agent.MAC] = agent
 		}
 	}
 	machineStates := map[string]MachineInfo{}
@@ -551,7 +576,13 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		if vm.Name != "" {
 			knownVMNames[vm.Name] = struct{}{}
 		}
-		agent, matched := byHostname[vm.Name]
+		agent, matched := byBIOSUUID[vm.BIOSUUID]
+		if !matched && vm.MACAddress != "" {
+			agent, matched = byMAC[vm.MACAddress]
+		}
+		if !matched {
+			agent, matched = byHostname[vm.Name]
+		}
 		if !matched && vm.AgentRef != nil && vm.AgentRef.Name != "" {
 			agent, matched = byName[vm.AgentRef.Name]
 		}
@@ -601,6 +632,13 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		knownVMNames[hostname] = struct{}{}
 	}
 	return vms
+}
+
+func vmMatchesAgentIdentity(vm agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) bool {
+	if vm.BIOSUUID != "" && agent.BIOSUUID != "" && vm.BIOSUUID == agent.BIOSUUID {
+		return true
+	}
+	return vm.MACAddress != "" && agent.MAC != "" && vm.MACAddress == agent.MAC
 }
 
 func applyMachineStateToOwnedVMStatus(vm *agentforgev1alpha1.OwnedVMStatus, machines map[string]MachineInfo) {

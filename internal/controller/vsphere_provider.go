@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -152,7 +153,13 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 		return agentforgev1alpha1.OwnedVMStatus{}, err
 	}
 
-	return newOwnedVMStatus(name), nil
+	vm := newOwnedVMStatus(name)
+	if discovered, err := p.vmStatus(ctx, pool, name); err == nil {
+		vm.BIOSUUID = discovered.BIOSUUID
+		vm.InstanceUUID = discovered.InstanceUUID
+		vm.MACAddress = discovered.MACAddress
+	}
+	return vm, nil
 }
 
 func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req ISOEnsureRequest) (ISOEnsureResult, error) {
@@ -224,6 +231,11 @@ func (p *govcVMProvider) datastorePathExists(ctx context.Context, pool *agentfor
 }
 
 func (p *govcVMProvider) run(ctx context.Context, args ...string) error {
+	_, err := p.runOutput(ctx, args...)
+	return err
+}
+
+func (p *govcVMProvider) runOutput(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, p.command, args...)
 	cmd.Env = append(os.Environ(),
 		"HOME=/tmp",
@@ -235,9 +247,9 @@ func (p *govcVMProvider) run(ctx context.Context, args ...string) error {
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("govc %s failed: %w: %s", strings.Join(args, " "), err, sanitizeCommandOutput(string(output)))
+		return nil, fmt.Errorf("govc %s failed: %w: %s", strings.Join(args, " "), err, sanitizeCommandOutput(string(output)))
 	}
-	return nil
+	return output, nil
 }
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -308,6 +320,54 @@ func newOwnedVMStatus(name string) agentforgev1alpha1.OwnedVMStatus {
 		Reason:             "CreateRequested",
 		LastTransitionTime: metav1.Now(),
 	}
+}
+
+func (p *govcVMProvider) vmStatus(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) (agentforgev1alpha1.OwnedVMStatus, error) {
+	output, err := p.runOutput(ctx, "vm.info", "-json", "-dc", pool.Spec.VSphere.Datacenter, "-vm.ipath", vmInventoryPath(pool, name))
+	if err != nil {
+		return agentforgev1alpha1.OwnedVMStatus{}, err
+	}
+	var info govcVMInfo
+	if err := json.Unmarshal(output, &info); err != nil {
+		return agentforgev1alpha1.OwnedVMStatus{}, err
+	}
+	if len(info.VirtualMachines) == 0 {
+		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("vm.info returned no VM for %s", name)
+	}
+	vm := info.VirtualMachines[0]
+	status := newOwnedVMStatus(name)
+	status.BIOSUUID = normalizeVMwareSerialUUID(vm.Config.UUID)
+	status.InstanceUUID = normalizeVMwareSerialUUID(vm.Config.InstanceUUID)
+	for _, device := range vm.Config.Hardware.Device {
+		if strings.TrimSpace(device.MACAddress) == "" {
+			continue
+		}
+		status.MACAddress = normalizeMAC(device.MACAddress)
+		break
+	}
+	return status, nil
+}
+
+type govcVMInfo struct {
+	VirtualMachines []govcVirtualMachine `json:"virtualMachines"`
+}
+
+type govcVirtualMachine struct {
+	Config govcVMConfig `json:"config"`
+}
+
+type govcVMConfig struct {
+	UUID         string       `json:"uuid"`
+	InstanceUUID string       `json:"instanceUuid"`
+	Hardware     govcHardware `json:"hardware"`
+}
+
+type govcHardware struct {
+	Device []govcDevice `json:"device"`
+}
+
+type govcDevice struct {
+	MACAddress string `json:"macAddress"`
 }
 
 func vmNamePrefix(pool *agentforgev1alpha1.VsphereAgentPool) string {

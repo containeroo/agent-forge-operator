@@ -76,6 +76,50 @@ exit 0
 	}
 }
 
+func TestGovcCreateVMRecordsVMIdentity(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "vm.info" ]; then
+  cat <<'JSON'
+{"virtualMachines":[{"config":{"uuid":"423297c6-d72e-28bb-b279-1209c29ab72b","instanceUuid":"503297c6-d72e-28bb-b279-1209c29ab72b","hardware":{"device":[{"macAddress":"00:50:56:aa:bb:cc"}]}}}]}
+JSON
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	vm, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{ISOPath: "agent-forge/demo/demo-worker/cached.iso"})
+	if err != nil {
+		t.Fatalf("CreateVM returned error: %v", err)
+	}
+	if vm.BIOSUUID != "423297c6-d72e-28bb-b279-1209c29ab72b" {
+		t.Fatalf("BIOSUUID = %q, want govc VM UUID", vm.BIOSUUID)
+	}
+	if vm.InstanceUUID != "503297c6-d72e-28bb-b279-1209c29ab72b" {
+		t.Fatalf("InstanceUUID = %q, want govc instance UUID", vm.InstanceUUID)
+	}
+	if vm.MACAddress != "00-50-56-aa-bb-cc" {
+		t.Fatalf("MACAddress = %q, want normalized VM MAC", vm.MACAddress)
+	}
+}
+
 func TestGovcEnsureISOUploadsContentAddressedPath(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()

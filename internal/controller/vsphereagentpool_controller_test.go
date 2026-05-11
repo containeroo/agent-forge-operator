@@ -524,6 +524,53 @@ func TestRefreshOwnedVMStatusesPreservesDeletingMachineRefUntilMachineGone(t *te
 	}
 }
 
+func TestRefreshOwnedVMStatusesMatchesAgentsByBIOSUUIDBeforeHostname(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{
+			Name:       "demo-worker-real",
+			Phase:      phaseProvisioning,
+			Reason:     "CreateRequested",
+			BIOSUUID:   "423297c6-d72e-28bb-b279-1209c29ab72b",
+			MACAddress: "00-50-56-aa-bb-cc",
+		},
+	}
+
+	vms := refreshOwnedVMStatuses(pool, []AgentInfo{
+		{
+			Name:     "agent-1",
+			Bound:    false,
+			Hostname: "demo-worker-wrong",
+			BIOSUUID: "423297c6-d72e-28bb-b279-1209c29ab72b",
+			MAC:      "00-50-56-aa-bb-cc",
+		},
+	}, nil)
+
+	if len(vms) != 1 {
+		t.Fatalf("ownedVMs = %d, want 1", len(vms))
+	}
+	if vms[0].Name != "demo-worker-real" || vms[0].AgentRef == nil || vms[0].AgentRef.Name != "agent-1" {
+		t.Fatalf("owned VM = %#v, want real VM matched to agent by BIOS UUID", vms[0])
+	}
+}
+
+func TestAssignedAgentHostnamesUsesVMIdentityBeforeFreeSlot(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{Name: "demo-worker-first", Phase: phaseProvisioning, BIOSUUID: "11111111-1111-1111-1111-111111111111"},
+		{Name: "demo-worker-match", Phase: phaseProvisioning, BIOSUUID: "22222222-2222-2222-2222-222222222222"},
+	}
+
+	hostnames := assignedAgentHostnames(pool, []AgentInfo{{
+		Name:     "agent-1",
+		BIOSUUID: "22222222-2222-2222-2222-222222222222",
+	}})
+
+	if hostnames["agent-1"] != "demo-worker-match" {
+		t.Fatalf("assigned hostname = %q, want identity-matched VM name", hostnames["agent-1"])
+	}
+}
+
 func TestRefreshOwnedVMStatusesRecoversDeletingVMWithLostMachineRef(t *testing.T) {
 	pool := reconcileTestPool()
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
