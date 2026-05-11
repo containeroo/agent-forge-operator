@@ -33,6 +33,69 @@ Agent Forge is designed for OpenShift environments that use:
 It does not replace the hosted cluster autoscaler and does not scale NodePools
 directly. It reacts to the MachineSet demand that already exists.
 
+## How It Works
+
+```mermaid
+flowchart TD
+    autoscaler["Hosted cluster autoscaler"] --> machineset["CAPI MachineSet\nspec.replicas"]
+    nodepool["HyperShift NodePool"] --> machineset
+    pool["VsphereAgentPool\nnamespace-scoped config"] --> reconcile["Agent Forge reconcile"]
+    machineset --> reconcile
+    infraenv["InfraEnv\nISO URL and Agent ownership"] --> reconcile
+    agents["Assisted Installer Agents"] --> reconcile
+
+    reconcile --> discover["Resolve inputs\nMachineSet, InfraEnv, matching Agents, owned/adopted VMs"]
+    discover --> refresh["Refresh ownedVMs status\nProvisioning, Available, Bound, Released"]
+    refresh --> plan["Build plan\nMachineSet replicas + buffer - matching Agents - provisioning VMs"]
+
+    plan -->|deficit| iso["Ensure content-addressed ISO cache\nDownload, hash, upload if changed"]
+    iso --> create["Create vSphere VM\nfolder, datastore cluster, network, CPU, memory, disk, ISO"]
+    create --> boot["VM boots InfraEnv ISO"]
+    boot --> newagent["New Agent appears"]
+    newagent --> agents
+
+    plan -->|matching unbound Agent needs prep| prep["Patch Agent\nlabels, role, approved, hostname"]
+    prep --> bind["Agent CAPI provider binds Agent to Machine"]
+    bind --> agents
+
+    plan -->|excess capacity| released{"Has MachineSet/CAPI\nreleased the Agent?"}
+    released -->|no: still bound| wait["Wait\nno VM or Agent deletion"]
+    released -->|yes: Agent is Released| deletevm["Delete paired vSphere VM\nprefer BIOS UUID, fallback inventory path"]
+    deletevm --> deleteagent{"VM gone or already missing?"}
+    deleteagent -->|yes| removeagent["Delete paired stale Agent"]
+    deleteagent -->|no| retry["Record condition/event\nretry later"]
+    removeagent --> agents
+
+    plan -->|no changes| noop["Noop\nstatus and conditions only"]
+    wait --> reconcile
+    retry --> reconcile
+    noop --> reconcile
+```
+
+The reconciliation loop is driven by watches on `VsphereAgentPool`, the rendered
+`MachineSet`, and matching `Agent` objects. That means MachineSet replica
+changes and newly discovered Agents are handled immediately instead of waiting
+only for the periodic requeue.
+
+Scale-up is demand driven. The controller reads `MachineSet.spec.replicas`, adds
+`spec.scaling.bufferAgents`, subtracts matching Agents and already-provisioning
+owned VMs, then creates at most `spec.scaling.maxProvisioning` VMs per
+reconcile. Each VM boots the active InfraEnv ISO. When the Agent appears, the
+controller applies the configured labels, role, approval, and hostname so the
+Agent CAPI provider can bind it to a Machine.
+
+Existing clusters are adopted through Agents. If a matching Agent already
+exists, the controller records it in `status.ownedVMs` using the Agent hostname,
+MAC address, and VMware BIOS UUID from inventory. Bound Agents are marked
+`Bound`; unbound prepared Agents are marked `Available`; Agents that were
+previously bound and then returned by CAPI are marked `Released`.
+
+Scale-down is deliberately conservative. The controller does not choose random
+VMs. It waits until MachineSet/CAPI has released an Agent, then deletes the VM
+paired through `status.ownedVMs[].agentRef`. VM deletion prefers the VMware BIOS
+UUID and falls back to the full inventory path. A missing VM is treated as
+already deleted so the stale released Agent can still be removed.
+
 ## Installation
 
 Install the latest release manifests:
