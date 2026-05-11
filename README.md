@@ -48,7 +48,7 @@ flowchart TD
 
     reconcile --> discover["Resolve inputs\nAgentMachines, Machines, InfraEnv, matching Agents, owned/adopted VMs"]
     discover --> refresh["Refresh ownedVMs status\nProvisioning, Available, Bound, Released"]
-    refresh --> plan["Build plan\nwaiting AgentMachines + buffer - available Agents - provisioning VMs"]
+    refresh --> plan["Build plan\nAgentMachine count, waiting demand, buffer, available Agents, provisioning VMs"]
 
     plan -->|deficit| iso["Ensure content-addressed ISO cache\nDownload, hash, upload if changed"]
     iso --> create["Create vSphere VM\nfolder, datastore cluster, network, CPU, memory, disk, ISO"]
@@ -67,6 +67,11 @@ flowchart TD
     deleteagent -->|yes| removeagent["Delete paired stale Agent"]
     deleteagent -->|no| retry["Record condition/event\nretry later"]
     removeagent --> agents
+
+    plan -->|surplus available owned Agent| surplus{"Any waiting or unready\nAgentMachines?"}
+    surplus -->|yes| wait
+    surplus -->|no| deletefree["Delete extra unbound VM and Agent\nrespect bufferAgents"]
+    deletefree --> agents
 
     plan -->|no changes| noop["Noop\nstatus and conditions only"]
     wait --> reconcile

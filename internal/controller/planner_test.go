@@ -24,6 +24,7 @@ func TestBuildPlanCreatesVMsForMachineDeficit(t *testing.T) {
 	pool.Spec.Scaling.MaxProvisioning = 2
 
 	plan := buildPlan(pool, PoolSnapshot{
+		AgentMachines:        8,
 		WaitingAgentMachines: 5,
 		MatchingAgents: []AgentInfo{
 			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
@@ -57,6 +58,7 @@ func TestBuildPlanIncludesBufferAgents(t *testing.T) {
 	pool.Spec.Scaling.MaxProvisioning = 3
 
 	plan := buildPlan(pool, PoolSnapshot{
+		AgentMachines:        3,
 		WaitingAgentMachines: 0,
 		MatchingAgents: []AgentInfo{
 			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
@@ -161,6 +163,89 @@ func TestBuildPlanDoesNotDeleteSurplusProvisioningVMs(t *testing.T) {
 	}
 	if len(plan.VMsToDelete) != 0 {
 		t.Fatalf("VMsToDelete = %#v, want no provisioning VM deletes without Machine deletion", plan.VMsToDelete)
+	}
+}
+
+func TestBuildPlanDeletesSurplusAvailableOwnedAgents(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+
+	plan := buildPlan(pool, PoolSnapshot{
+		AgentMachines:        3,
+		WaitingAgentMachines: 0,
+		UnreadyAgentMachines: 0,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
+			{Name: "extra-agent", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "extra-vm"},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "extra-vm", Phase: phaseAvailable, AgentRef: testAgentRef("extra-agent")},
+		},
+	})
+
+	if plan.DesiredReplicas != 3 {
+		t.Fatalf("desired replicas = %d, want 3 AgentMachines", plan.DesiredReplicas)
+	}
+	if len(plan.VMsToDelete) != 1 || plan.VMsToDelete[0].Name != "extra-vm" {
+		t.Fatalf("VMsToDelete = %#v, want extra-vm", plan.VMsToDelete)
+	}
+	if len(plan.AgentsToDelete) != 1 || plan.AgentsToDelete[0].Name != "extra-agent" {
+		t.Fatalf("AgentsToDelete = %#v, want extra-agent", plan.AgentsToDelete)
+	}
+}
+
+func TestBuildPlanDoesNotDeleteSurplusAvailableAgentsWhileAgentMachinesUnready(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+
+	plan := buildPlan(pool, PoolSnapshot{
+		AgentMachines:        4,
+		WaitingAgentMachines: 0,
+		UnreadyAgentMachines: 1,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
+			{Name: "candidate-agent", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "candidate-vm"},
+			{Name: "extra-agent", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "extra-vm"},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "candidate-vm", Phase: phaseAvailable, AgentRef: testAgentRef("candidate-agent")},
+			{Name: "extra-vm", Phase: phaseAvailable, AgentRef: testAgentRef("extra-agent")},
+		},
+	})
+
+	if len(plan.VMsToDelete) != 0 || len(plan.AgentsToDelete) != 0 {
+		t.Fatalf("delete targets = VMs %#v Agents %#v, want no cleanup while AgentMachines are still unready", plan.VMsToDelete, plan.AgentsToDelete)
+	}
+}
+
+func TestBuildPlanKeepsConfiguredBufferAgents(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+	pool.Spec.Scaling.BufferAgents = 1
+
+	plan := buildPlan(pool, PoolSnapshot{
+		AgentMachines:        3,
+		WaitingAgentMachines: 0,
+		UnreadyAgentMachines: 0,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
+			{Name: "buffer-agent", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "buffer-vm"},
+			{Name: "extra-agent", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "extra-vm"},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "buffer-vm", Phase: phaseAvailable, AgentRef: testAgentRef("buffer-agent")},
+			{Name: "extra-vm", Phase: phaseAvailable, AgentRef: testAgentRef("extra-agent")},
+		},
+	})
+
+	if len(plan.VMsToDelete) != 1 {
+		t.Fatalf("VMsToDelete = %#v, want exactly one surplus VM after retaining one buffer", plan.VMsToDelete)
 	}
 }
 

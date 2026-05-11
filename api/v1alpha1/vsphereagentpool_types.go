@@ -373,15 +373,26 @@ type VsphereAgentPoolStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// DesiredReplicas is the current matching Agent count plus unsatisfied
-	// AgentMachine demand and any configured buffer.
+	// DesiredReplicas is the observed AgentMachine count plus any configured
+	// buffer.
 	// +optional
 	DesiredReplicas int32 `json:"desiredReplicas,omitempty"`
+
+	// AgentMachines is the number of non-deleting AgentMachines observed for
+	// spec.nodePoolRef in spec.controlPlaneNamespace.
+	// +optional
+	AgentMachines int32 `json:"agentMachines,omitempty"`
 
 	// WaitingAgentMachines is the number of AgentMachines reporting
 	// Ready=False with reason NoSuitableAgents.
 	// +optional
 	WaitingAgentMachines int32 `json:"waitingAgentMachines,omitempty"`
+
+	// UnreadyAgentMachines is the number of observed AgentMachines whose Ready
+	// condition is not True. This includes AgentMachines waiting for suitable
+	// Agents and AgentMachines still installing.
+	// +optional
+	UnreadyAgentMachines int32 `json:"unreadyAgentMachines,omitempty"`
 
 	// MatchingAgents is the number of Agents matching spec.agent.labels.
 	// +optional

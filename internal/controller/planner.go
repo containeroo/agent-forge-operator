@@ -64,14 +64,18 @@ type AgentInfo struct {
 
 // PoolSnapshot is the observed cluster state used by the pure planner.
 type PoolSnapshot struct {
+	AgentMachines        int32
 	WaitingAgentMachines int32
+	UnreadyAgentMachines int32
 	MatchingAgents       []AgentInfo
 	OwnedVMs             []agentforgev1alpha1.OwnedVMStatus
 }
 
 // PoolPlan is the reconcile plan derived from a snapshot and CR spec.
 type PoolPlan struct {
+	AgentMachines        int32
 	WaitingAgentMachines int32
+	UnreadyAgentMachines int32
 	DesiredReplicas      int32
 	MatchingAgents       int32
 	BoundAgents          int32
@@ -110,7 +114,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 
 	matchingAgents := int32(len(snapshot.MatchingAgents)) //nolint:gosec // Kubernetes object counts fit in int32 here.
 	pendingOwnedVMs := countPendingOwnedVMs(snapshot.OwnedVMs)
-	desiredReplicas := boundAgents + availableAgents + snapshot.WaitingAgentMachines + bufferAgents
+	desiredReplicas := snapshot.AgentMachines + bufferAgents
 	deficit := snapshot.WaitingAgentMachines + bufferAgents - availableAgents - pendingOwnedVMs
 	if deficit < 0 {
 		deficit = 0
@@ -144,12 +148,20 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	}
 
 	vmsToDelete, agentsToDelete := deletedMachineTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, deletePolicy)
-	if snapshot.WaitingAgentMachines == 0 {
+	if snapshot.WaitingAgentMachines == 0 && snapshot.UnreadyAgentMachines == 0 {
+		surplusAvailable := availableAgents - bufferAgents
+		if surplusAvailable > 0 {
+			surplusVMs, surplusAgents := surplusAvailableDeletionTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, vmsToDelete, deletePolicy, surplusAvailable)
+			vmsToDelete = append(vmsToDelete, surplusVMs...)
+			agentsToDelete = append(agentsToDelete, surplusAgents...)
+		}
 		vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete, deletePolicy)...)
 	}
 	for _, vm := range vmsToDelete {
 		reason := "CAPI Machine has been deleted and deletePolicy is OwnedOnly"
 		switch vm.Phase {
+		case phaseAvailable:
+			reason = "Owned available Agent exceeds current AgentMachine demand and buffer"
 		case phaseOrphaned:
 			reason = "Owned VM no longer has a matching Agent and is eligible for cleanup"
 		}
@@ -160,11 +172,16 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 			DryRun: pool.Spec.DryRun,
 		})
 	}
+	agentDeleteReasons := agentDeletionReasonsByName(vmsToDelete)
 	for _, agent := range agentsToDelete {
+		reason := agentDeleteReasons[agent.Name]
+		if reason == "" {
+			reason = "CAPI Machine has been deleted and deletePolicy is OwnedOnly"
+		}
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionDeleteAgent,
 			Name:   agent.Name,
-			Reason: "CAPI Machine has been deleted and deletePolicy is OwnedOnly",
+			Reason: reason,
 			DryRun: pool.Spec.DryRun,
 		})
 	}
@@ -178,7 +195,9 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	}
 
 	return PoolPlan{
+		AgentMachines:        snapshot.AgentMachines,
 		WaitingAgentMachines: snapshot.WaitingAgentMachines,
+		UnreadyAgentMachines: snapshot.UnreadyAgentMachines,
 		DesiredReplicas:      desiredReplicas,
 		MatchingAgents:       matchingAgents,
 		BoundAgents:          boundAgents,
@@ -236,6 +255,62 @@ func deletedMachineTargets(vms []agentforgev1alpha1.OwnedVMStatus, agents []Agen
 		selectedAgents = append(selectedAgents, agent)
 	}
 	return selectedVMs, selectedAgents
+}
+
+func surplusAvailableDeletionTargets(vms []agentforgev1alpha1.OwnedVMStatus, agents []AgentInfo, alreadySelected []agentforgev1alpha1.OwnedVMStatus, deletePolicy string, surplus int32) ([]agentforgev1alpha1.OwnedVMStatus, []AgentInfo) {
+	if deletePolicy != deletePolicyOwnedOnly || surplus <= 0 {
+		return nil, nil
+	}
+	selected := selectedVMNames(alreadySelected)
+	unboundAgentsByName := map[string]AgentInfo{}
+	for _, agent := range agents {
+		if agent.Name == "" || agent.Bound {
+			continue
+		}
+		unboundAgentsByName[agent.Name] = agent
+	}
+
+	var selectedVMs []agentforgev1alpha1.OwnedVMStatus
+	var selectedAgents []AgentInfo
+	for _, vm := range vms {
+		if int32(len(selectedVMs)) >= surplus { //nolint:gosec // slice length is bounded by observed Kubernetes objects.
+			break
+		}
+		if vm.Name == "" || vm.Phase != phaseAvailable {
+			continue
+		}
+		if _, exists := selected[vm.Name]; exists {
+			continue
+		}
+		agentName := ownedVMAgentName(vm)
+		if agentName == "" {
+			continue
+		}
+		agent, ok := unboundAgentsByName[agentName]
+		if !ok {
+			continue
+		}
+		selectedVMs = append(selectedVMs, vm)
+		selectedAgents = append(selectedAgents, agent)
+	}
+	return selectedVMs, selectedAgents
+}
+
+func agentDeletionReasonsByName(vms []agentforgev1alpha1.OwnedVMStatus) map[string]string {
+	reasons := map[string]string{}
+	for _, vm := range vms {
+		agentName := ownedVMAgentName(vm)
+		if agentName == "" {
+			continue
+		}
+		switch vm.Phase {
+		case phaseAvailable:
+			reasons[agentName] = "Owned available Agent exceeds current AgentMachine demand and buffer"
+		default:
+			reasons[agentName] = "CAPI Machine has been deleted and deletePolicy is OwnedOnly"
+		}
+	}
+	return reasons
 }
 
 func orphanedDeletionTargets(vms, alreadySelected []agentforgev1alpha1.OwnedVMStatus, deletePolicy string) []agentforgev1alpha1.OwnedVMStatus {

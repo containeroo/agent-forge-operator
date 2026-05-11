@@ -332,6 +332,12 @@ spec:
           status:
             description: VsphereAgentPoolStatus defines the observed state of VsphereAgentPool.
             properties:
+              agentMachines:
+                description: |-
+                  AgentMachines is the number of non-deleting AgentMachines observed for
+                  spec.nodePoolRef in spec.controlPlaneNamespace.
+                format: int32
+                type: integer
               availableAgents:
                 description: AvailableAgents is the number of matching Agents not
                   yet bound to CAPI.
@@ -405,8 +411,8 @@ spec:
                 x-kubernetes-list-type: map
               desiredReplicas:
                 description: |-
-                  DesiredReplicas is the current matching Agent count plus unsatisfied
-                  AgentMachine demand and any configured buffer.
+                  DesiredReplicas is the observed AgentMachine count plus any configured
+                  buffer.
                 format: int32
                 type: integer
               iso:
@@ -633,6 +639,13 @@ spec:
                   - type
                   type: object
                 type: array
+              unreadyAgentMachines:
+                description: |-
+                  UnreadyAgentMachines is the number of observed AgentMachines whose Ready
+                  condition is not True. This includes AgentMachines waiting for suitable
+                  Agents and AgentMachines still installing.
+                format: int32
+                type: integer
               waitingAgentMachines:
                 description: |-
                   WaitingAgentMachines is the number of AgentMachines reporting

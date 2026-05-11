@@ -81,6 +81,12 @@ type MachineInfo struct {
 	Deleting bool
 }
 
+type AgentMachineDemand struct {
+	Total   int32
+	Waiting int32
+	Unready int32
+}
+
 // +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools/finalizers,verbs=update
@@ -138,7 +144,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		_ = r.updateStatus(ctx, &pool, PoolPlan{})
 		return ctrl.Result{}, err
 	}
-	waitingAgentMachines, err := r.countWaitingAgentMachines(ctx, &pool)
+	agentMachineDemand, err := r.countAgentMachineDemand(ctx, &pool)
 	if err != nil {
 		r.setStatusError(&pool, conditionReady, "AgentMachineListFailed", err.Error())
 		_ = r.updateStatus(ctx, &pool, PoolPlan{})
@@ -147,7 +153,9 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	pool.Status.OwnedVMs = refreshOwnedVMStatuses(&pool, agents, machines)
 
 	plan := buildPlan(&pool, PoolSnapshot{
-		WaitingAgentMachines: waitingAgentMachines,
+		AgentMachines:        agentMachineDemand.Total,
+		WaitingAgentMachines: agentMachineDemand.Waiting,
+		UnreadyAgentMachines: agentMachineDemand.Unready,
 		MatchingAgents:       agents,
 		OwnedVMs:             pool.Status.OwnedVMs,
 	})
@@ -368,23 +376,30 @@ func (r *VsphereAgentPoolReconciler) provider(ctx context.Context, pool *agentfo
 	return factory(ctx, pool, &secret)
 }
 
-func (r *VsphereAgentPoolReconciler) countWaitingAgentMachines(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (int32, error) {
+func (r *VsphereAgentPoolReconciler) countAgentMachineDemand(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (AgentMachineDemand, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(agentMachineGVK)
 	if err := r.List(ctx, list, client.InNamespace(pool.Spec.ControlPlaneNamespace)); err != nil {
-		return 0, err
+		return AgentMachineDemand{}, err
 	}
-	var waiting int32
+	var demand AgentMachineDemand
 	for i := range list.Items {
 		agentMachine := &list.Items[i]
+		if agentMachine.GetDeletionTimestamp() != nil {
+			continue
+		}
 		if !controlPlaneObjectMatchesPool(agentMachine, pool) {
 			continue
 		}
+		demand.Total++
+		if !agentMachineReady(agentMachine) {
+			demand.Unready++
+		}
 		if agentMachineWaitingForAgent(agentMachine) {
-			waiting++
+			demand.Waiting++
 		}
 	}
-	return waiting, nil
+	return demand, nil
 }
 
 func (r *VsphereAgentPoolReconciler) listNodePoolMachines(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]MachineInfo, error) {
@@ -794,7 +809,9 @@ func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *age
 	desired := *pool.Status.DeepCopy()
 	desired.ObservedGeneration = pool.Generation
 	desired.DesiredReplicas = plan.DesiredReplicas
+	desired.AgentMachines = plan.AgentMachines
 	desired.WaitingAgentMachines = plan.WaitingAgentMachines
+	desired.UnreadyAgentMachines = plan.UnreadyAgentMachines
 	desired.MatchingAgents = plan.MatchingAgents
 	desired.BoundAgents = plan.BoundAgents
 	desired.AvailableAgents = plan.AvailableAgents
@@ -879,7 +896,7 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: pool.Generation,
 		Reason:             "Observed",
-		Message:            fmt.Sprintf("%d AgentMachines are waiting for suitable Agents", plan.WaitingAgentMachines),
+		Message:            fmt.Sprintf("agentMachines=%d waitingForAgents=%d unready=%d", plan.AgentMachines, plan.WaitingAgentMachines, plan.UnreadyAgentMachines),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               conditionInfraEnvAvailable,
@@ -893,7 +910,7 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 		Status:             conditionStatus(plan.VMsToCreate == 0),
 		ObservedGeneration: pool.Generation,
 		Reason:             boolReason(plan.VMsToCreate == 0, "Satisfied", "Deficit"),
-		Message:            fmt.Sprintf("waitingAgentMachines=%d matchingAgents=%d pendingOwnedVMs=%d boundAgents=%d availableAgents=%d", plan.WaitingAgentMachines, plan.MatchingAgents, plan.PendingOwnedVMs, plan.BoundAgents, plan.AvailableAgents),
+		Message:            fmt.Sprintf("agentMachines=%d waitingAgentMachines=%d unreadyAgentMachines=%d matchingAgents=%d pendingOwnedVMs=%d boundAgents=%d availableAgents=%d", plan.AgentMachines, plan.WaitingAgentMachines, plan.UnreadyAgentMachines, plan.MatchingAgents, plan.PendingOwnedVMs, plan.BoundAgents, plan.AvailableAgents),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               conditionVsphereReady,
@@ -954,15 +971,32 @@ func agentMachineWaitingForAgent(agentMachine *unstructured.Unstructured) bool {
 	return objectConditionReason(agentMachine, conditionReady) == "NoSuitableAgents"
 }
 
+func agentMachineReady(agentMachine *unstructured.Unstructured) bool {
+	return objectConditionStatus(agentMachine, conditionReady) == metav1.ConditionTrue
+}
+
 func machinePhase(machine *unstructured.Unstructured) string {
 	phase, _, _ := unstructured.NestedString(machine.Object, "status", "phase")
 	return phase
 }
 
 func objectConditionReason(obj *unstructured.Unstructured, conditionType string) string {
+	status, reason := objectConditionStatusReason(obj, conditionType)
+	if status != metav1.ConditionFalse {
+		return ""
+	}
+	return reason
+}
+
+func objectConditionStatus(obj *unstructured.Unstructured, conditionType string) metav1.ConditionStatus {
+	status, _ := objectConditionStatusReason(obj, conditionType)
+	return status
+}
+
+func objectConditionStatusReason(obj *unstructured.Unstructured, conditionType string) (metav1.ConditionStatus, string) {
 	conditions, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if !found {
-		return ""
+		return metav1.ConditionUnknown, ""
 	}
 	for _, item := range conditions {
 		condition, ok := item.(map[string]any)
@@ -973,13 +1007,10 @@ func objectConditionReason(obj *unstructured.Unstructured, conditionType string)
 			continue
 		}
 		status, _ := condition["status"].(string)
-		if status != string(metav1.ConditionFalse) {
-			return ""
-		}
 		reason, _ := condition["reason"].(string)
-		return reason
+		return metav1.ConditionStatus(status), reason
 	}
-	return ""
+	return metav1.ConditionUnknown, ""
 }
 
 func conditionStatus(value bool) metav1.ConditionStatus {
@@ -1251,9 +1282,15 @@ func agentMachineChangePredicate() predicate.Predicate {
 			if !reflect.DeepEqual(oldObj.GetAnnotations(), newObj.GetAnnotations()) {
 				return true
 			}
-			return agentMachineWaitingForAgent(oldObj) != agentMachineWaitingForAgent(newObj)
+			return objectConditionStatusReasonChanged(oldObj, newObj, conditionReady)
 		},
 	}
+}
+
+func objectConditionStatusReasonChanged(oldObj, newObj *unstructured.Unstructured, conditionType string) bool {
+	oldStatus, oldReason := objectConditionStatusReason(oldObj, conditionType)
+	newStatus, newReason := objectConditionStatusReason(newObj, conditionType)
+	return oldStatus != newStatus || oldReason != newReason
 }
 
 func machineChangePredicate() predicate.Predicate {

@@ -43,7 +43,10 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+	am1 := testReadyAgentMachine(testControlPlaneNamespace, "agent-1-machine", "demo/demo-worker")
+	am2 := testReadyAgentMachine(testControlPlaneNamespace, "agent-2-machine", "demo/demo-worker")
+	am3 := testReadyAgentMachine(testControlPlaneNamespace, "agent-3-machine", "demo/demo-worker")
+	am4 := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent1 := testAgent(testNamespace, "agent-1", true, true)
 	agent2 := testAgent(testNamespace, "agent-2", true, true)
@@ -54,7 +57,7 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, am, machine1, machine2, machine3, infraEnv, agent1, agent2, agent3).
+		WithObjects(pool, am1, am2, am3, am4, machine1, machine2, machine3, infraEnv, agent1, agent2, agent3).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -83,6 +86,12 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 	}
 	if updated.Status.DesiredReplicas != 4 {
 		t.Fatalf("desired replicas = %d, want 4", updated.Status.DesiredReplicas)
+	}
+	if updated.Status.AgentMachines != 4 {
+		t.Fatalf("agentMachines = %d, want 4", updated.Status.AgentMachines)
+	}
+	if updated.Status.UnreadyAgentMachines != 1 {
+		t.Fatalf("unreadyAgentMachines = %d, want 1", updated.Status.UnreadyAgentMachines)
 	}
 	if updated.Status.MatchingAgents != 3 {
 		t.Fatalf("matching agents = %d, want 3", updated.Status.MatchingAgents)
@@ -550,7 +559,7 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 	if condition == nil {
 		t.Fatal("CapacitySatisfied condition missing")
 	}
-	if condition.Message != "waitingAgentMachines=1 matchingAgents=3 pendingOwnedVMs=2 boundAgents=3 availableAgents=0" {
+	if condition.Message != "agentMachines=1 waitingAgentMachines=1 unreadyAgentMachines=1 matchingAgents=3 pendingOwnedVMs=2 boundAgents=3 availableAgents=0" {
 		t.Fatalf("CapacitySatisfied message = %q, want retained pending VMs", condition.Message)
 	}
 }
@@ -978,12 +987,24 @@ func reconcileTestPool() *agentforgev1alpha1.VsphereAgentPool {
 }
 
 func testAgentMachine(namespace, name, nodePool string) *unstructured.Unstructured {
+	return testAgentMachineWithReadyCondition(namespace, name, nodePool, metav1.ConditionFalse, "NoSuitableAgents")
+}
+
+func testReadyAgentMachine(namespace, name, nodePool string) *unstructured.Unstructured {
+	return testAgentMachineWithReadyCondition(namespace, name, nodePool, metav1.ConditionTrue, "")
+}
+
+func testAgentMachineWithReadyCondition(namespace, name, nodePool string, status metav1.ConditionStatus, reason string) *unstructured.Unstructured {
+	condition := map[string]any{"type": conditionReady, "status": string(status)}
+	if reason != "" {
+		condition["reason"] = reason
+	}
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		testAPIVersionKey: "capi-provider.agent-install.openshift.io/v1beta1",
 		testKindKey:       "AgentMachine",
 		"status": map[string]any{
 			"conditions": []any{
-				map[string]any{"type": conditionReady, "status": string(metav1.ConditionFalse), "reason": "NoSuitableAgents"},
+				condition,
 			},
 		},
 	}}
