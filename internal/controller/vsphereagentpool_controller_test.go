@@ -93,6 +93,9 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 	if updated.Status.UnreadyAgentMachines != 1 {
 		t.Fatalf("unreadyAgentMachines = %d, want 1", updated.Status.UnreadyAgentMachines)
 	}
+	if updated.Status.AgentMachinesWithoutAgent != 1 {
+		t.Fatalf("agentMachinesWithoutAgent = %d, want 1", updated.Status.AgentMachinesWithoutAgent)
+	}
 	if updated.Status.MatchingAgents != 3 {
 		t.Fatalf("matching agents = %d, want 3", updated.Status.MatchingAgents)
 	}
@@ -559,7 +562,7 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 	if condition == nil {
 		t.Fatal("CapacitySatisfied condition missing")
 	}
-	if condition.Message != "agentMachines=1 waitingAgentMachines=1 unreadyAgentMachines=1 matchingAgents=3 pendingOwnedVMs=2 boundAgents=3 availableAgents=0" {
+	if condition.Message != "agentMachines=1 waitingAgentMachines=1 unreadyAgentMachines=1 agentMachinesWithoutAgent=1 matchingAgents=3 pendingOwnedVMs=2 boundAgents=3 availableAgents=0" {
 		t.Fatalf("CapacitySatisfied message = %q, want retained pending VMs", condition.Message)
 	}
 }

@@ -206,6 +206,7 @@ Useful status fields:
 | `status.agentMachines`        | Non-deleting AgentMachines observed for this NodePool in `spec.controlPlaneNamespace`.                     |
 | `status.waitingAgentMachines` | AgentMachines currently reporting `Ready=False` and `Reason=NoSuitableAgents`.                             |
 | `status.unreadyAgentMachines` | Observed AgentMachines whose `Ready` condition is not `True`.                                              |
+| `status.agentMachinesWithoutAgent` | Unready AgentMachines without an assigned Agent. Surplus unbound Agents are retained while this is non-zero. |
 | `status.desiredReplicas`      | Observed AgentMachine count plus `spec.scaling.bufferAgents`.                                              |
 | `status.matchingAgents`       | Agents that already match `spec.agent.labels`.                                                             |
 | `status.availableAgents`      | Matching Agents that are not yet bound to CAPI.                                                            |

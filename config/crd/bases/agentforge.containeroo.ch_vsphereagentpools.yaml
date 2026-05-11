@@ -338,6 +338,13 @@ spec:
                   spec.nodePoolRef in spec.controlPlaneNamespace.
                 format: int32
                 type: integer
+              agentMachinesWithoutAgent:
+                description: |-
+                  AgentMachinesWithoutAgent is the number of unready AgentMachines that do
+                  not yet have an assigned Agent. Surplus available Agents are retained
+                  while this is non-zero.
+                format: int32
+                type: integer
               availableAgents:
                 description: AvailableAgents is the number of matching Agents not
                   yet bound to CAPI.

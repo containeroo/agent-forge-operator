@@ -50,6 +50,7 @@ HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` 
 | `status.agentMachines` | Non-deleting AgentMachines observed for `spec.nodePoolRef` in `spec.controlPlaneNamespace`. |
 | `status.waitingAgentMachines` | AgentMachines in the hosted control plane namespace that currently report `Ready=False` and `Reason=NoSuitableAgents`. |
 | `status.unreadyAgentMachines` | Observed AgentMachines whose `Ready` condition is not `True`, including machines waiting for suitable Agents and machines still installing. |
+| `status.agentMachinesWithoutAgent` | Unready AgentMachines without an assigned Agent. Surplus unbound Agents are retained while this is non-zero. |
 | `status.desiredReplicas` | Observed AgentMachine count plus `spec.scaling.bufferAgents`. |
 | `status.matchingAgents` | Agents in the CR namespace matching `spec.agent.labels`. |
 | `status.boundAgents` | Matching Agents already bound to CAPI/HostedCluster. |

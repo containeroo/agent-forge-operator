@@ -64,28 +64,30 @@ type AgentInfo struct {
 
 // PoolSnapshot is the observed cluster state used by the pure planner.
 type PoolSnapshot struct {
-	AgentMachines        int32
-	WaitingAgentMachines int32
-	UnreadyAgentMachines int32
-	MatchingAgents       []AgentInfo
-	OwnedVMs             []agentforgev1alpha1.OwnedVMStatus
+	AgentMachines             int32
+	WaitingAgentMachines      int32
+	UnreadyAgentMachines      int32
+	AgentMachinesWithoutAgent int32
+	MatchingAgents            []AgentInfo
+	OwnedVMs                  []agentforgev1alpha1.OwnedVMStatus
 }
 
 // PoolPlan is the reconcile plan derived from a snapshot and CR spec.
 type PoolPlan struct {
-	AgentMachines        int32
-	WaitingAgentMachines int32
-	UnreadyAgentMachines int32
-	DesiredReplicas      int32
-	MatchingAgents       int32
-	BoundAgents          int32
-	AvailableAgents      int32
-	PendingOwnedVMs      int32
-	VMsToCreate          int32
-	VMsToDelete          []agentforgev1alpha1.OwnedVMStatus
-	AgentsToDelete       []AgentInfo
-	AgentsToPatch        []AgentInfo
-	Actions              []agentforgev1alpha1.PlannedActionStatus
+	AgentMachines             int32
+	WaitingAgentMachines      int32
+	UnreadyAgentMachines      int32
+	AgentMachinesWithoutAgent int32
+	DesiredReplicas           int32
+	MatchingAgents            int32
+	BoundAgents               int32
+	AvailableAgents           int32
+	PendingOwnedVMs           int32
+	VMsToCreate               int32
+	VMsToDelete               []agentforgev1alpha1.OwnedVMStatus
+	AgentsToDelete            []AgentInfo
+	AgentsToPatch             []AgentInfo
+	Actions                   []agentforgev1alpha1.PlannedActionStatus
 }
 
 func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot) PoolPlan {
@@ -148,7 +150,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	}
 
 	vmsToDelete, agentsToDelete := deletedMachineTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, deletePolicy)
-	if snapshot.WaitingAgentMachines == 0 && snapshot.UnreadyAgentMachines == 0 {
+	if snapshot.WaitingAgentMachines == 0 && snapshot.AgentMachinesWithoutAgent == 0 {
 		surplusAvailable := availableAgents - bufferAgents
 		if surplusAvailable > 0 {
 			surplusVMs, surplusAgents := surplusAvailableDeletionTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, vmsToDelete, deletePolicy, surplusAvailable)
@@ -195,19 +197,20 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	}
 
 	return PoolPlan{
-		AgentMachines:        snapshot.AgentMachines,
-		WaitingAgentMachines: snapshot.WaitingAgentMachines,
-		UnreadyAgentMachines: snapshot.UnreadyAgentMachines,
-		DesiredReplicas:      desiredReplicas,
-		MatchingAgents:       matchingAgents,
-		BoundAgents:          boundAgents,
-		AvailableAgents:      availableAgents,
-		PendingOwnedVMs:      pendingOwnedVMs,
-		VMsToCreate:          vmsToCreate,
-		VMsToDelete:          vmsToDelete,
-		AgentsToDelete:       agentsToDelete,
-		AgentsToPatch:        agentsToPatch,
-		Actions:              actions,
+		AgentMachines:             snapshot.AgentMachines,
+		WaitingAgentMachines:      snapshot.WaitingAgentMachines,
+		UnreadyAgentMachines:      snapshot.UnreadyAgentMachines,
+		AgentMachinesWithoutAgent: snapshot.AgentMachinesWithoutAgent,
+		DesiredReplicas:           desiredReplicas,
+		MatchingAgents:            matchingAgents,
+		BoundAgents:               boundAgents,
+		AvailableAgents:           availableAgents,
+		PendingOwnedVMs:           pendingOwnedVMs,
+		VMsToCreate:               vmsToCreate,
+		VMsToDelete:               vmsToDelete,
+		AgentsToDelete:            agentsToDelete,
+		AgentsToPatch:             agentsToPatch,
+		Actions:                   actions,
 	}
 }
 

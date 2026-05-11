@@ -394,6 +394,12 @@ type VsphereAgentPoolStatus struct {
 	// +optional
 	UnreadyAgentMachines int32 `json:"unreadyAgentMachines,omitempty"`
 
+	// AgentMachinesWithoutAgent is the number of unready AgentMachines that do
+	// not yet have an assigned Agent. Surplus available Agents are retained
+	// while this is non-zero.
+	// +optional
+	AgentMachinesWithoutAgent int32 `json:"agentMachinesWithoutAgent,omitempty"`
+
 	// MatchingAgents is the number of Agents matching spec.agent.labels.
 	// +optional
 	MatchingAgents int32 `json:"matchingAgents,omitempty"`

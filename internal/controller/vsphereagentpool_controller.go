@@ -82,9 +82,10 @@ type MachineInfo struct {
 }
 
 type AgentMachineDemand struct {
-	Total   int32
-	Waiting int32
-	Unready int32
+	Total        int32
+	Waiting      int32
+	Unready      int32
+	WithoutAgent int32
 }
 
 // +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch;create;update;patch;delete
@@ -103,7 +104,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	log := logf.FromContext(ctx)
 
 	var pool agentforgev1alpha1.VsphereAgentPool
-	if err := r.Get(ctx, req.NamespacedName, &pool); err != nil {
+	if err := r.apiReader().Get(ctx, req.NamespacedName, &pool); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	applySpecDefaults(&pool)
@@ -153,11 +154,12 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	pool.Status.OwnedVMs = refreshOwnedVMStatuses(&pool, agents, machines)
 
 	plan := buildPlan(&pool, PoolSnapshot{
-		AgentMachines:        agentMachineDemand.Total,
-		WaitingAgentMachines: agentMachineDemand.Waiting,
-		UnreadyAgentMachines: agentMachineDemand.Unready,
-		MatchingAgents:       agents,
-		OwnedVMs:             pool.Status.OwnedVMs,
+		AgentMachines:             agentMachineDemand.Total,
+		WaitingAgentMachines:      agentMachineDemand.Waiting,
+		UnreadyAgentMachines:      agentMachineDemand.Unready,
+		AgentMachinesWithoutAgent: agentMachineDemand.WithoutAgent,
+		MatchingAgents:            agents,
+		OwnedVMs:                  pool.Status.OwnedVMs,
 	})
 
 	if pool.Spec.DryRun {
@@ -216,7 +218,7 @@ func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *
 
 func (r *VsphereAgentPoolReconciler) patchFinalizer(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) error {
 	current := &agentforgev1alpha1.VsphereAgentPool{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
+	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, current); err != nil {
 		return err
 	}
 	before := current.DeepCopy()
@@ -376,6 +378,13 @@ func (r *VsphereAgentPoolReconciler) provider(ctx context.Context, pool *agentfo
 	return factory(ctx, pool, &secret)
 }
 
+func (r *VsphereAgentPoolReconciler) apiReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 func (r *VsphereAgentPoolReconciler) countAgentMachineDemand(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (AgentMachineDemand, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(agentMachineGVK)
@@ -392,8 +401,12 @@ func (r *VsphereAgentPoolReconciler) countAgentMachineDemand(ctx context.Context
 			continue
 		}
 		demand.Total++
-		if !agentMachineReady(agentMachine) {
+		ready := agentMachineReady(agentMachine)
+		if !ready {
 			demand.Unready++
+		}
+		if !ready && !agentMachineHasAssignedAgent(agentMachine) {
+			demand.WithoutAgent++
 		}
 		if agentMachineWaitingForAgent(agentMachine) {
 			demand.Waiting++
@@ -812,13 +825,14 @@ func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *age
 	desired.AgentMachines = plan.AgentMachines
 	desired.WaitingAgentMachines = plan.WaitingAgentMachines
 	desired.UnreadyAgentMachines = plan.UnreadyAgentMachines
+	desired.AgentMachinesWithoutAgent = plan.AgentMachinesWithoutAgent
 	desired.MatchingAgents = plan.MatchingAgents
 	desired.BoundAgents = plan.BoundAgents
 	desired.AvailableAgents = plan.AvailableAgents
 	desired.PlannedActions = plan.Actions
 
 	var current agentforgev1alpha1.VsphereAgentPool
-	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
+	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
 		return err
 	}
 	if reflect.DeepEqual(current.Status, desired) {
@@ -896,7 +910,7 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: pool.Generation,
 		Reason:             "Observed",
-		Message:            fmt.Sprintf("agentMachines=%d waitingForAgents=%d unready=%d", plan.AgentMachines, plan.WaitingAgentMachines, plan.UnreadyAgentMachines),
+		Message:            fmt.Sprintf("agentMachines=%d waitingForAgents=%d unready=%d withoutAgent=%d", plan.AgentMachines, plan.WaitingAgentMachines, plan.UnreadyAgentMachines, plan.AgentMachinesWithoutAgent),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               conditionInfraEnvAvailable,
@@ -910,7 +924,7 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 		Status:             conditionStatus(plan.VMsToCreate == 0),
 		ObservedGeneration: pool.Generation,
 		Reason:             boolReason(plan.VMsToCreate == 0, "Satisfied", "Deficit"),
-		Message:            fmt.Sprintf("agentMachines=%d waitingAgentMachines=%d unreadyAgentMachines=%d matchingAgents=%d pendingOwnedVMs=%d boundAgents=%d availableAgents=%d", plan.AgentMachines, plan.WaitingAgentMachines, plan.UnreadyAgentMachines, plan.MatchingAgents, plan.PendingOwnedVMs, plan.BoundAgents, plan.AvailableAgents),
+		Message:            fmt.Sprintf("agentMachines=%d waitingAgentMachines=%d unreadyAgentMachines=%d agentMachinesWithoutAgent=%d matchingAgents=%d pendingOwnedVMs=%d boundAgents=%d availableAgents=%d", plan.AgentMachines, plan.WaitingAgentMachines, plan.UnreadyAgentMachines, plan.AgentMachinesWithoutAgent, plan.MatchingAgents, plan.PendingOwnedVMs, plan.BoundAgents, plan.AvailableAgents),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               conditionVsphereReady,
@@ -973,6 +987,15 @@ func agentMachineWaitingForAgent(agentMachine *unstructured.Unstructured) bool {
 
 func agentMachineReady(agentMachine *unstructured.Unstructured) bool {
 	return objectConditionStatus(agentMachine, conditionReady) == metav1.ConditionTrue
+}
+
+func agentMachineHasAssignedAgent(agentMachine *unstructured.Unstructured) bool {
+	name, _, _ := unstructured.NestedString(agentMachine.Object, "status", "agentRef", "name")
+	if name != "" {
+		return true
+	}
+	providerID, _, _ := unstructured.NestedString(agentMachine.Object, "spec", "providerID")
+	return strings.HasPrefix(providerID, "agent://")
 }
 
 func machinePhase(machine *unstructured.Unstructured) string {
