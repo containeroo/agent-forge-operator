@@ -572,8 +572,12 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		matchedAgents[agent.Name] = struct{}{}
 
 		wasMachineDeleting := vm.Phase == phaseReleased && vm.Reason == "MachineDeleting"
+		previousMachineRef := vm.MachineRef
 		applyAgentToOwnedVMStatus(pool, &vm, agent)
 		if wasMachineDeleting {
+			if (vm.MachineRef == nil || vm.MachineRef.Name == "") && previousMachineRef != nil && previousMachineRef.Name != "" {
+				vm.MachineRef = previousMachineRef
+			}
 			setOwnedVMPhase(&vm, phaseReleased, "MachineDeleting")
 		}
 		applyMachineStateToOwnedVMStatus(&vm, machineStates)
@@ -601,6 +605,9 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 
 func applyMachineStateToOwnedVMStatus(vm *agentforgev1alpha1.OwnedVMStatus, machines map[string]MachineInfo) {
 	if vm.MachineRef == nil || vm.MachineRef.Name == "" {
+		if vm.Phase == phaseReleased && vm.Reason == "MachineDeleting" {
+			setOwnedVMPhase(vm, phaseReleased, "MachineDeleted")
+		}
 		return
 	}
 	machine, exists := machines[vm.MachineRef.Name]

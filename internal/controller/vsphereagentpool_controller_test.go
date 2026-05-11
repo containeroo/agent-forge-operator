@@ -500,6 +500,50 @@ func TestRefreshOwnedVMStatusesRequiresObservedMachineDeletingBeforeMachineDelet
 	}
 }
 
+func TestRefreshOwnedVMStatusesPreservesDeletingMachineRefUntilMachineGone(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{
+			Name:       "demo-worker-deleting",
+			Phase:      phaseReleased,
+			Reason:     "MachineDeleting",
+			AgentRef:   &corev1.ObjectReference{Name: "deleting-agent"},
+			MachineRef: testMachineRef("deleting-machine"),
+		},
+	}
+
+	vms := refreshOwnedVMStatuses(pool, []AgentInfo{
+		{Name: "deleting-agent", Bound: false, Hostname: "demo-worker-deleting"},
+	}, []MachineInfo{{Name: "deleting-machine", Deleting: true}})
+
+	if vms[0].MachineRef == nil || vms[0].MachineRef.Name != "deleting-machine" {
+		t.Fatalf("machineRef = %#v, want previous deleting Machine ref retained", vms[0].MachineRef)
+	}
+	if vms[0].Phase != phaseReleased || vms[0].Reason != "MachineDeleting" {
+		t.Fatalf("VM phase/reason = %s/%s, want Released/MachineDeleting", vms[0].Phase, vms[0].Reason)
+	}
+}
+
+func TestRefreshOwnedVMStatusesRecoversDeletingVMWithLostMachineRef(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{
+			Name:     "demo-worker-deleting",
+			Phase:    phaseReleased,
+			Reason:   "MachineDeleting",
+			AgentRef: &corev1.ObjectReference{Name: "deleting-agent"},
+		},
+	}
+
+	vms := refreshOwnedVMStatuses(pool, []AgentInfo{
+		{Name: "deleting-agent", Bound: false, Hostname: "demo-worker-deleting"},
+	}, nil)
+
+	if vms[0].Phase != phaseReleased || vms[0].Reason != "MachineDeleted" {
+		t.Fatalf("VM phase/reason = %s/%s, want Released/MachineDeleted", vms[0].Phase, vms[0].Reason)
+	}
+}
+
 func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
