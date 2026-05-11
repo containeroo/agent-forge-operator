@@ -152,9 +152,6 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		OwnedVMs:             pool.Status.OwnedVMs,
 	})
 
-	pool.Status.ObservedMachineSet = ""
-	pool.Status.MachineSetReplicas = 0
-
 	if pool.Spec.DryRun {
 		r.recordPlan(&pool, plan, "DryRunPlan")
 		setPlanConditions(&pool, plan, true, "")
@@ -798,8 +795,6 @@ func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *age
 	desired.ObservedGeneration = pool.Generation
 	desired.DesiredReplicas = plan.DesiredReplicas
 	desired.WaitingAgentMachines = plan.WaitingAgentMachines
-	desired.MachineSetReplicas = 0
-	desired.ObservedMachineSet = ""
 	desired.MatchingAgents = plan.MatchingAgents
 	desired.BoundAgents = plan.BoundAgents
 	desired.AvailableAgents = plan.AvailableAgents

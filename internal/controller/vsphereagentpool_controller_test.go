@@ -43,7 +43,7 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 5, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent1 := testAgent(testNamespace, "agent-1", true, true)
 	agent2 := testAgent(testNamespace, "agent-2", true, true)
@@ -54,7 +54,7 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, machine1, machine2, machine3, infraEnv, agent1, agent2, agent3).
+		WithObjects(pool, am, machine1, machine2, machine3, infraEnv, agent1, agent2, agent3).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -149,7 +149,7 @@ func TestReconcileApplyFailureRequeuesWithoutReturningError(t *testing.T) {
 
 	pool := reconcileTestPool()
 	pool.Spec.DryRun = false
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 2, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
@@ -162,7 +162,7 @@ func TestReconcileApplyFailureRequeuesWithoutReturningError(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, secret).
+		WithObjects(pool, am, infraEnv, secret).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -209,8 +209,8 @@ func TestReconcileEnsuresISOOnceForMultipleCreates(t *testing.T) {
 	pool := reconcileTestPool()
 	pool.Spec.DryRun = false
 	pool.Spec.Scaling.MaxProvisioning = 2
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 5, "demo/demo-worker")
-	ms2 := testMachineSet(testControlPlaneNamespace, testNodePool+"-2", 1, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+	am2 := testAgentMachine(testControlPlaneNamespace, testNodePool+"-2", "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent1 := testAgent(testNamespace, "agent-1", true, true)
 	agent2 := testAgent(testNamespace, "agent-2", true, true)
@@ -226,7 +226,7 @@ func TestReconcileEnsuresISOOnceForMultipleCreates(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, ms2, infraEnv, agent1, agent2, agent3, secret).
+		WithObjects(pool, am, am2, infraEnv, agent1, agent2, agent3, secret).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -287,13 +287,13 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
 		newOwnedVMStatus("demo-worker-ab12"),
 	}
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testCandidateAgent(testNamespace, "abcdef12-3456-7890-abcd-ef1234567890")
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, agent).
+		WithObjects(pool, am, infraEnv, agent).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -360,14 +360,14 @@ func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
 		newOwnedVMStatus("demo-worker-ab12"),
 	}
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	machine := testMachine(testControlPlaneNamespace, "demo-worker-ab12-machine", "demo/demo-worker", false)
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testAgent(testNamespace, "demo-worker-ab12", true, true)
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, machine, infraEnv, agent).
+		WithObjects(pool, am, machine, infraEnv, agent).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -507,7 +507,7 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 		{Name: "demo-worker-old1", Phase: phaseProvisioning, Reason: "AgentNotDiscovered", LastTransitionTime: metav1.Now()},
 		{Name: "demo-worker-old2", Phase: phaseProvisioning, Reason: "AgentNotDiscovered", LastTransitionTime: metav1.Now()},
 	}
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 3, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"}}
 	agent1 := testAgent(testNamespace, "demo-worker-one1", true, true)
@@ -516,7 +516,7 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, secret, agent1, agent2, agent3).
+		WithObjects(pool, am, infraEnv, secret, agent1, agent2, agent3).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -574,13 +574,13 @@ func TestReconcileMarksReturnedAgentReleased(t *testing.T) {
 			AgentRef: &corev1.ObjectReference{Name: "demo-worker-ab12"},
 		},
 	}
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testAgent(testNamespace, "demo-worker-ab12", false, true)
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, agent).
+		WithObjects(pool, am, infraEnv, agent).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -619,14 +619,14 @@ func TestReconcileAdoptsExistingBoundAgentAsOwnedVM(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	machine := testMachine(testControlPlaneNamespace, "demo-worker-ab12-machine", "demo/demo-worker", false)
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testAgent(testNamespace, "demo-worker-ab12", true, true)
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, machine, infraEnv, agent).
+		WithObjects(pool, am, machine, infraEnv, agent).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -673,14 +673,14 @@ func TestReconcileAdoptsInventoryHostnameForCandidateAgent(t *testing.T) {
 
 	pool := reconcileTestPool()
 	pool.Spec.DryRun = false
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testCandidateAgent(testNamespace, "candidate-agent")
 	setAgentInventoryHostname(t, agent, "demo-worker-c3p0")
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, agent).
+		WithObjects(pool, am, infraEnv, agent).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -729,7 +729,7 @@ func TestRequestsForAgentMachineChangeFindsMatchingPool(t *testing.T) {
 	otherPool := reconcileTestPool()
 	otherPool.Name = "other-worker"
 	otherPool.Spec.NodePoolRef.Name = "other-worker"
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 2, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -738,7 +738,7 @@ func TestRequestsForAgentMachineChangeFindsMatchingPool(t *testing.T) {
 		Build()
 
 	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
-	reqs := reconciler.requestsForControlPlaneObjectChange(ctx, ms)
+	reqs := reconciler.requestsForControlPlaneObjectChange(ctx, am)
 	if len(reqs) != 1 {
 		t.Fatalf("requests = %#v, want one request", reqs)
 	}
@@ -787,7 +787,7 @@ func TestReconcileKeepsUnboundAgentsWithoutDeletedMachine(t *testing.T) {
 
 	pool := reconcileTestPool()
 	pool.Spec.DryRun = false
-	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	boundAgent := testAgent(testNamespace, "bound-agent", true, true)
 	excessAgent1 := testAgent(testNamespace, "excess-agent-1", false, true)
@@ -803,7 +803,7 @@ func TestReconcileKeepsUnboundAgentsWithoutDeletedMachine(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, boundAgent, excessAgent1, excessAgent2, secret).
+		WithObjects(pool, am, infraEnv, boundAgent, excessAgent1, excessAgent2, secret).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -977,7 +977,7 @@ func reconcileTestPool() *agentforgev1alpha1.VsphereAgentPool {
 	}
 }
 
-func testMachineSet(namespace, name string, replicas int64, nodePool string) *unstructured.Unstructured {
+func testAgentMachine(namespace, name, nodePool string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		testAPIVersionKey: "capi-provider.agent-install.openshift.io/v1beta1",
 		testKindKey:       "AgentMachine",
@@ -991,7 +991,6 @@ func testMachineSet(namespace, name string, replicas int64, nodePool string) *un
 	obj.SetNamespace(namespace)
 	obj.SetName(name)
 	obj.SetAnnotations(map[string]string{nodePoolAnnotation: nodePool})
-	_ = replicas
 	return obj
 }
 

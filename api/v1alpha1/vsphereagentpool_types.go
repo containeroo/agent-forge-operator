@@ -227,11 +227,6 @@ type VsphereAgentPoolSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	ControlPlaneNamespace string `json:"controlPlaneNamespace"`
 
-	// MachineSetName is deprecated and ignored. Agent Forge now watches
-	// AgentMachine demand directly.
-	// +optional
-	MachineSetName string `json:"machineSetName,omitempty"`
-
 	// DryRun makes the operator compute and report actions without creating,
 	// patching, or deleting VMs/Agents. This is the recommended first mode for a
 	// new hosted cluster.
@@ -378,19 +373,10 @@ type VsphereAgentPoolStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// ObservedMachineSet is deprecated and no longer populated. The bridge now
-	// watches AgentMachine demand directly.
-	// +optional
-	ObservedMachineSet string `json:"observedMachineSet,omitempty"`
-
 	// DesiredReplicas is the current matching Agent count plus unsatisfied
 	// AgentMachine demand and any configured buffer.
 	// +optional
 	DesiredReplicas int32 `json:"desiredReplicas,omitempty"`
-
-	// MachineSetReplicas is deprecated and no longer populated.
-	// +optional
-	MachineSetReplicas int32 `json:"machineSetReplicas,omitempty"`
 
 	// WaitingAgentMachines is the number of AgentMachines reporting
 	// Ready=False with reason NoSuitableAgents.

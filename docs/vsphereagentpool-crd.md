@@ -13,7 +13,6 @@ HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` 
 | `spec.nodePoolRef.name` | yes | Hypershift NodePool name in the same namespace as this CR. |
 | `spec.infraEnvRef.name` | yes | Assisted Installer InfraEnv name in the same namespace. The InfraEnv must expose `status.isoDownloadURL`. |
 | `spec.controlPlaneNamespace` | yes | Hosted control plane namespace containing the CAPI `AgentMachine` and `Machine` objects, for example `demo-demo`. |
-| `spec.machineSetName` | no | Deprecated. MachineSets are no longer used for reconciliation. |
 | `spec.vsphere.credentialsSecretRef.name` | yes | Secret containing vSphere `server`, `username`, and `password`. Optional key: `insecure`. |
 | `spec.vsphere.credentialsSecretRef.namespace` | no | Secret namespace. Defaults to the CR namespace. |
 | `spec.vsphere.datacenter` | no | vSphere datacenter name. Defaults to `dc1`. |
@@ -48,8 +47,6 @@ HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` 
 | Field | Description |
 | --- | --- |
 | `status.observedGeneration` | Latest CR generation reconciled. |
-| `status.observedMachineSet` | Deprecated and no longer populated. |
-| `status.machineSetReplicas` | Deprecated and no longer populated. |
 | `status.waitingAgentMachines` | AgentMachines in the hosted control plane namespace that currently report `Ready=False` and `Reason=NoSuitableAgents`. |
 | `status.desiredReplicas` | Current matching Agent count plus unsatisfied AgentMachine demand and `bufferAgents`. |
 | `status.matchingAgents` | Agents in the CR namespace matching `spec.agent.labels`. |
