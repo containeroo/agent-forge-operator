@@ -11,8 +11,8 @@ You already have:
   resources.
 - A hosted cluster that uses the Agent platform.
 - A `NodePool` for the hosted cluster.
-- A CAPI `MachineSet` rendered for that NodePool in the hosted control plane
-  namespace.
+- CAPI `AgentMachine` and `Machine` objects rendered for that NodePool in the
+  hosted control plane namespace.
 - An `InfraEnv` in the hosted cluster namespace with
   `status.isoDownloadURL` populated.
 - vSphere credentials that can upload the discovery ISO, create VMs, power on
@@ -24,7 +24,7 @@ The examples use:
 | --------------------- | -------------------------------------------------------------- |
 | `demo`                | Hosted cluster namespace and HostedCluster name.               |
 | `demo-worker`         | NodePool name and `VsphereAgentPool` name.                     |
-| `demo-demo`           | Hosted control plane namespace containing the CAPI MachineSet. |
+| `demo-demo`           | Hosted control plane namespace containing CAPI AgentMachines and Machines. |
 | `vsphere-credentials` | Secret with vSphere credentials.                               |
 
 Adjust the names for your environment.
@@ -56,29 +56,29 @@ make docker-build docker-push IMG=<registry>/agent-forge-operator:<tag>
 make deploy IMG=<registry>/agent-forge-operator:<tag>
 ```
 
-## 2. Confirm the MachineSet
+## 2. Confirm AgentMachine Demand
 
-The operator follows the CAPI `MachineSet` that HyperShift created for the
-NodePool. You can either set `spec.machineSetName` explicitly or let the
-operator discover the MachineSet by the HyperShift NodePool marker.
+The operator watches CAPI `AgentMachine` objects that HyperShift/CAPI created
+for the NodePool. It creates VMs only when an AgentMachine reports
+`Ready=False` with `Reason=NoSuitableAgents`.
 
-List MachineSets in the hosted control plane namespace:
+List AgentMachines in the hosted control plane namespace:
 
 ```sh
-kubectl -n demo-demo get machinesets.cluster.x-k8s.io
+kubectl -n demo-demo get agentmachines.capi-provider.agent-install.openshift.io
 ```
 
-Inspect the MachineSet that belongs to the NodePool:
+Inspect AgentMachines that belong to the NodePool:
 
 ```sh
-kubectl -n demo-demo get machinesets.cluster.x-k8s.io -o yaml \
+kubectl -n demo-demo get agentmachines.capi-provider.agent-install.openshift.io -o yaml \
   | yq '.items[] | select(.metadata.annotations."hypershift.openshift.io/nodePool" == "demo/demo-worker") | .metadata.name'
 ```
 
 If you do not use `yq`, inspect the YAML manually:
 
 ```sh
-kubectl -n demo-demo get machinesets.cluster.x-k8s.io -o yaml
+kubectl -n demo-demo get agentmachines.capi-provider.agent-install.openshift.io -o yaml
 ```
 
 ## 3. Confirm the InfraEnv
@@ -203,16 +203,15 @@ Useful status fields:
 
 | Field                       | What to check                                                                                               |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `status.observedMachineSet` | The MachineSet selected by discovery or `spec.machineSetName`.                                              |
-| `status.machineSetReplicas` | The raw autoscaler-driven MachineSet replica count.                                                         |
-| `status.desiredReplicas`    | MachineSet replicas plus `spec.scaling.bufferAgents`.                                                       |
+| `status.waitingAgentMachines` | AgentMachines currently reporting `Ready=False` and `Reason=NoSuitableAgents`.                           |
+| `status.desiredReplicas`      | Current matching Agent count plus unsatisfied AgentMachine demand and `spec.scaling.bufferAgents`.        |
 | `status.matchingAgents`     | Agents that already match `spec.agent.labels`.                                                              |
 | `status.availableAgents`    | Matching Agents that are not yet bound to CAPI.                                                             |
 | `status.iso.path`           | Active content-addressed ISO datastore path used for new VMs.                                               |
 | `status.iso.sha256`         | SHA256 digest of the active InfraEnv ISO bytes.                                                             |
 | `status.iso.checkedAt`      | Last time the operator downloaded and hashed the ISO.                                                       |
 | `status.plannedActions`     | Planned `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions.                             |
-| `status.conditions`         | Readiness, dry-run state, MachineSet discovery, InfraEnv availability, ISO cache state, and capacity state. |
+| `status.conditions`         | Readiness, dry-run state, AgentMachine demand, InfraEnv availability, ISO cache state, and capacity state. |
 
 Check Events:
 
@@ -232,7 +231,8 @@ The operator can now:
 
 - Download and hash the InfraEnv discovery ISO when the cache is stale.
 - Upload a content-addressed ISO object only when the bytes changed or the datastore object is missing.
-- Create VMs when MachineSet demand exceeds available matching Agents.
+- Create VMs when AgentMachines report `NoSuitableAgents` and demand exceeds
+  available matching Agents.
 - Power on created VMs.
 - Patch matching Agents with labels, role, and approval when configured.
 - Delete owned VMs and stale unbound Agents during scale-down when `deletePolicy` is `OwnedOnly`.
@@ -261,17 +261,17 @@ Fields:
 
 | Field             | Guidance                                                                                                             |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `bufferAgents`    | Extra unbound Agents to keep ready beyond current MachineSet demand. Use `0` for strict cost control.                |
+| `bufferAgents`    | Extra unbound Agents to keep ready beyond current AgentMachine demand. Use `0` for strict cost control.              |
 | `maxProvisioning` | Maximum VMs to create per reconcile. Lower values reduce pressure on vSphere, DHCP, storage, and Assisted Installer. |
 | `deletePolicy`    | Use `OwnedOnly` for normal cleanup. Use `Retain` when testing or when VM deletion should be manual.                  |
 
 ## 9. Troubleshooting
 
-MachineSet is not found:
+AgentMachine demand is not observed:
 
 ```sh
-kubectl -n demo-demo get machinesets.cluster.x-k8s.io --show-labels
-kubectl -n demo get vsphereagentpool demo-worker -o jsonpath='{.status.conditions[?(@.type=="MachineSetFound")]}{"\n"}'
+kubectl -n demo-demo get agentmachines.capi-provider.agent-install.openshift.io -o yaml
+kubectl -n demo get vsphereagentpool demo-worker -o jsonpath='{.status.conditions[?(@.type=="AgentMachineDemandFound")]}{"\n"}'
 ```
 
 InfraEnv ISO is unavailable:

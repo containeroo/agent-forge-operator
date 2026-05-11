@@ -161,11 +161,12 @@ type AgentBindingSpec struct {
 }
 
 // ScalingPolicySpec contains bridge-side guardrails. It does not replace the
-// hosted cluster autoscaler; MachineSet.spec.replicas remains the source of
-// truth for desired node count.
+// hosted cluster autoscaler; AgentMachine demand remains the source of truth
+// for desired node count.
 type ScalingPolicySpec struct {
 	// BufferAgents is the number of extra matching, unbound Agents to keep
-	// available beyond MachineSet demand. Use 0 for strict cost control.
+	// available beyond current AgentMachine demand. Use 0 for strict cost
+	// control.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=0
 	// +optional
@@ -221,13 +222,13 @@ type VsphereAgentPoolSpec struct {
 	InfraEnvRef LocalObjectReference `json:"infraEnvRef"`
 
 	// ControlPlaneNamespace is the hosted control plane namespace that contains
-	// the CAPI MachineSet rendered by Hypershift, for example
-	// demo-demo.
+	// the CAPI AgentMachine and Machine objects rendered by Hypershift, for
+	// example demo-demo.
 	// +kubebuilder:validation:MinLength=1
 	ControlPlaneNamespace string `json:"controlPlaneNamespace"`
 
-	// MachineSetName optionally pins the CAPI MachineSet name. When empty, the
-	// operator discovers it by the hypershift.openshift.io/nodePool annotation.
+	// MachineSetName is deprecated and ignored. Agent Forge now watches
+	// AgentMachine demand directly.
 	// +optional
 	MachineSetName string `json:"machineSetName,omitempty"`
 
@@ -377,18 +378,24 @@ type VsphereAgentPoolStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// ObservedMachineSet is the CAPI MachineSet currently followed by the
-	// bridge.
+	// ObservedMachineSet is deprecated and no longer populated. The bridge now
+	// watches AgentMachine demand directly.
 	// +optional
 	ObservedMachineSet string `json:"observedMachineSet,omitempty"`
 
-	// DesiredReplicas is MachineSet.spec.replicas plus any configured buffer.
+	// DesiredReplicas is the current matching Agent count plus unsatisfied
+	// AgentMachine demand and any configured buffer.
 	// +optional
 	DesiredReplicas int32 `json:"desiredReplicas,omitempty"`
 
-	// MachineSetReplicas is the raw MachineSet.spec.replicas value.
+	// MachineSetReplicas is deprecated and no longer populated.
 	// +optional
 	MachineSetReplicas int32 `json:"machineSetReplicas,omitempty"`
+
+	// WaitingAgentMachines is the number of AgentMachines reporting
+	// Ready=False with reason NoSuitableAgents.
+	// +optional
+	WaitingAgentMachines int32 `json:"waitingAgentMachines,omitempty"`
 
 	// MatchingAgents is the number of Agents matching spec.agent.labels.
 	// +optional
@@ -426,16 +433,16 @@ type VsphereAgentPoolStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=vap
-// +kubebuilder:printcolumn:name="MachineSet",type=string,JSONPath=`.status.observedMachineSet`
+// +kubebuilder:printcolumn:name="Waiting",type=integer,JSONPath=`.status.waitingAgentMachines`
 // +kubebuilder:printcolumn:name="Desired",type=integer,JSONPath=`.status.desiredReplicas`
 // +kubebuilder:printcolumn:name="Agents",type=integer,JSONPath=`.status.matchingAgents`
 // +kubebuilder:printcolumn:name="DryRun",type=boolean,JSONPath=`.spec.dryRun`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // VsphereAgentPool is a namespace-scoped bridge between a Hypershift Agent
-// NodePool and vSphere VM inventory. It watches CAPI MachineSet demand created
-// by the hosted cluster autoscaler and ensures matching Assisted Installer
-// Agents exist for the Agent CAPI provider to consume.
+// NodePool and vSphere VM inventory. It watches CAPI AgentMachine demand and
+// ensures matching Assisted Installer Agents exist for the Agent CAPI provider
+// to consume.
 type VsphereAgentPool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

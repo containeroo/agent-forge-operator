@@ -17,9 +17,9 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.observedMachineSet
-      name: MachineSet
-      type: string
+    - jsonPath: .status.waitingAgentMachines
+      name: Waiting
+      type: integer
     - jsonPath: .status.desiredReplicas
       name: Desired
       type: integer
@@ -37,9 +37,9 @@ spec:
       openAPIV3Schema:
         description: |-
           VsphereAgentPool is a namespace-scoped bridge between a Hypershift Agent
-          NodePool and vSphere VM inventory. It watches CAPI MachineSet demand created
-          by the hosted cluster autoscaler and ensures matching Assisted Installer
-          Agents exist for the Agent CAPI provider to consume.
+          NodePool and vSphere VM inventory. It watches CAPI AgentMachine demand and
+          ensures matching Assisted Installer Agents exist for the Agent CAPI provider
+          to consume.
         properties:
           apiVersion:
             description: |-
@@ -93,8 +93,8 @@ spec:
               controlPlaneNamespace:
                 description: |-
                   ControlPlaneNamespace is the hosted control plane namespace that contains
-                  the CAPI MachineSet rendered by Hypershift, for example
-                  demo-demo.
+                  the CAPI AgentMachine and Machine objects rendered by Hypershift, for
+                  example demo-demo.
                 minLength: 1
                 type: string
               dryRun:
@@ -153,8 +153,8 @@ spec:
                 type: object
               machineSetName:
                 description: |-
-                  MachineSetName optionally pins the CAPI MachineSet name. When empty, the
-                  operator discovers it by the hypershift.openshift.io/nodePool annotation.
+                  MachineSetName is deprecated and ignored. Agent Forge now watches
+                  AgentMachine demand directly.
                 type: string
               nodePoolRef:
                 description: NodePoolRef references the Hypershift NodePool this bridge
@@ -175,7 +175,8 @@ spec:
                     default: 0
                     description: |-
                       BufferAgents is the number of extra matching, unbound Agents to keep
-                      available beyond MachineSet demand. Use 0 for strict cost control.
+                      available beyond current AgentMachine demand. Use 0 for strict cost
+                      control.
                     format: int32
                     minimum: 0
                     type: integer
@@ -408,8 +409,9 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               desiredReplicas:
-                description: DesiredReplicas is MachineSet.spec.replicas plus any
-                  configured buffer.
+                description: |-
+                  DesiredReplicas is the current matching Agent count plus unsatisfied
+                  AgentMachine demand and any configured buffer.
                 format: int32
                 type: integer
               iso:
@@ -472,8 +474,7 @@ spec:
                     type: string
                 type: object
               machineSetReplicas:
-                description: MachineSetReplicas is the raw MachineSet.spec.replicas
-                  value.
+                description: MachineSetReplicas is deprecated and no longer populated.
                 format: int32
                 type: integer
               matchingAgents:
@@ -488,8 +489,8 @@ spec:
                 type: integer
               observedMachineSet:
                 description: |-
-                  ObservedMachineSet is the CAPI MachineSet currently followed by the
-                  bridge.
+                  ObservedMachineSet is deprecated and no longer populated. The bridge now
+                  watches AgentMachine demand directly.
                 type: string
               ownedVMs:
                 description: OwnedVMs records VMs created or tracked by this bridge.
@@ -646,6 +647,12 @@ spec:
                   - type
                   type: object
                 type: array
+              waitingAgentMachines:
+                description: |-
+                  WaitingAgentMachines is the number of AgentMachines reporting
+                  Ready=False with reason NoSuitableAgents.
+                format: int32
+                type: integer
             type: object
         type: object
     served: true

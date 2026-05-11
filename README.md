@@ -3,17 +3,17 @@
 Agent Forge Operator bridges hosted-cluster autoscaling to VM capacity for
 HyperShift Agent platform clusters on vSphere.
 
-The hosted cluster autoscaler remains the source of truth. It scales the CAPI
-`MachineSet` rendered for a HyperShift `NodePool`; Agent Forge watches that
-`MachineSet` and ensures enough matching Assisted Installer `Agent` objects can
-exist by creating or deleting vSphere VMs.
+HyperShift and CAPI remain the source of truth. Agent Forge watches the
+`AgentMachine` objects rendered for a HyperShift `NodePool`; when they report
+`Ready=False` with `Reason=NoSuitableAgents`, it creates vSphere VMs so matching
+Assisted Installer `Agent` objects can appear.
 
 ## What It Does
 
 - Watches a namespace-scoped `VsphereAgentPool` custom resource.
-- Discovers or follows the CAPI `MachineSet` for one HyperShift `NodePool`.
-- Reads the `MachineSet.spec.replicas` value selected by the hosted cluster
-  autoscaler.
+- Watches CAPI `AgentMachine` demand for one HyperShift `NodePool`.
+- Creates capacity only for `AgentMachine` objects waiting on
+  `NoSuitableAgents`.
 - Creates vSphere VMs from an `InfraEnv` discovery ISO when more Agents are
   needed.
 - Optionally approves matching Assisted Installer `Agent` objects.
@@ -27,26 +27,28 @@ Agent Forge is designed for OpenShift environments that use:
 
 - HyperShift hosted clusters on the Agent platform.
 - Assisted Installer `InfraEnv` and `Agent` resources.
-- CAPI `MachineSet` resources rendered for hosted cluster NodePools.
+- CAPI `AgentMachine` and `Machine` resources rendered for hosted cluster NodePools.
 - vSphere as the VM provider.
 
 It does not replace the hosted cluster autoscaler and does not scale NodePools
-directly. It reacts to the MachineSet demand that already exists.
+directly. It reacts to AgentMachine demand that already exists.
 
 ## How It Works
 
 ```mermaid
 flowchart TD
-    autoscaler["Hosted cluster autoscaler"] --> machineset["CAPI MachineSet\nspec.replicas"]
-    nodepool["HyperShift NodePool"] --> machineset
+    autoscaler["Hosted cluster autoscaler"] --> nodepool["HyperShift NodePool"]
+    nodepool --> agentmachine["CAPI AgentMachines\nReady=False / NoSuitableAgents"]
+    nodepool --> machine["CAPI Machines"]
     pool["VsphereAgentPool\nnamespace-scoped config"] --> reconcile["Agent Forge reconcile"]
-    machineset --> reconcile
+    agentmachine --> reconcile
+    machine --> reconcile
     infraenv["InfraEnv\nISO URL and Agent ownership"] --> reconcile
     agents["Assisted Installer Agents"] --> reconcile
 
-    reconcile --> discover["Resolve inputs\nMachineSet, InfraEnv, matching Agents, owned/adopted VMs"]
+    reconcile --> discover["Resolve inputs\nAgentMachines, Machines, InfraEnv, matching Agents, owned/adopted VMs"]
     discover --> refresh["Refresh ownedVMs status\nProvisioning, Available, Bound, Released"]
-    refresh --> plan["Build plan\nMachineSet replicas + buffer - matching Agents - provisioning VMs"]
+    refresh --> plan["Build plan\nwaiting AgentMachines + buffer - available Agents - provisioning VMs"]
 
     plan -->|deficit| iso["Ensure content-addressed ISO cache\nDownload, hash, upload if changed"]
     iso --> create["Create vSphere VM\nfolder, datastore cluster, network, CPU, memory, disk, ISO"]
@@ -58,9 +60,9 @@ flowchart TD
     prep --> bind["Agent CAPI provider binds Agent to Machine"]
     bind --> agents
 
-    plan -->|excess capacity| released{"Has MachineSet/CAPI\nreleased the Agent?"}
-    released -->|no: still bound| wait["Wait\nno VM or Agent deletion"]
-    released -->|yes: Agent is Released| deletevm["Delete paired vSphere VM\nprefer BIOS UUID, fallback inventory path"]
+    plan -->|scale-down| deleting{"Was the CAPI Machine\nobserved deleting and then gone?"}
+    deleting -->|no| wait["Wait\nno VM or Agent deletion"]
+    deleting -->|yes| deletevm["Delete paired vSphere VM\nprefer BIOS UUID, fallback inventory path"]
     deletevm --> deleteagent{"VM gone or already missing?"}
     deleteagent -->|yes| removeagent["Delete paired stale Agent"]
     deleteagent -->|no| retry["Record condition/event\nretry later"]
@@ -72,17 +74,19 @@ flowchart TD
     noop --> reconcile
 ```
 
-The reconciliation loop is driven by watches on `VsphereAgentPool`, the rendered
-`MachineSet`, and matching `Agent` objects. That means MachineSet replica
-changes and newly discovered Agents are handled immediately instead of waiting
-only for the periodic requeue.
+The reconciliation loop is driven by watches on `VsphereAgentPool`,
+`AgentMachine`, `Machine`, and matching `Agent` objects. That means new
+NoSuitableAgents demand, Machine deletion, and newly discovered Agents are
+handled immediately instead of waiting only for the periodic requeue.
 
-Scale-up is demand driven. The controller reads `MachineSet.spec.replicas`, adds
-`spec.scaling.bufferAgents`, subtracts matching Agents and already-provisioning
-owned VMs, then creates at most `spec.scaling.maxProvisioning` VMs per
-reconcile. Each VM boots the active InfraEnv ISO. When the Agent appears, the
-controller applies the configured labels, role, approval, and hostname so the
-Agent CAPI provider can bind it to a Machine.
+Scale-up is demand driven. The controller counts `AgentMachine` objects for the
+NodePool that report `Ready=False` with `Reason=NoSuitableAgents`, adds
+`spec.scaling.bufferAgents`, subtracts available matching Agents and
+already-provisioning owned VMs, then creates at most
+`spec.scaling.maxProvisioning` VMs per reconcile. Each VM boots the active
+InfraEnv ISO. When the Agent appears, the controller applies the configured
+labels, role, approval, and hostname so the Agent CAPI provider can bind it to a
+Machine.
 
 Existing clusters are adopted through Agents. If a matching Agent already
 exists, the controller records it in `status.ownedVMs` using the Agent hostname,
@@ -91,10 +95,11 @@ MAC address, and VMware BIOS UUID from inventory. Bound Agents are marked
 previously bound and then returned by CAPI are marked `Released`.
 
 Scale-down is deliberately conservative. The controller does not choose random
-VMs. It waits until MachineSet/CAPI has released an Agent, then deletes the VM
-paired through `status.ownedVMs[].agentRef`. VM deletion prefers the VMware BIOS
-UUID and falls back to the full inventory path. A missing VM is treated as
-already deleted so the stale released Agent can still be removed.
+VMs. It first observes a paired CAPI `Machine` entering deletion, waits until
+that Machine has disappeared, and only then deletes the paired VM and stale
+Agent. VM deletion prefers the VMware BIOS UUID and falls back to the full
+inventory path. A missing VM is treated as already deleted so the stale Agent can
+still be removed.
 
 ## Installation
 

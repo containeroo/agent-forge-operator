@@ -61,9 +61,10 @@ const (
 )
 
 var (
-	machineSetGVK = schema.GroupVersionKind{Group: "cluster.x-k8s.io", Version: apiVersionV1Beta1, Kind: "MachineSet"}
-	infraEnvGVK   = schema.GroupVersionKind{Group: "agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: "InfraEnv"}
-	agentGVK      = schema.GroupVersionKind{Group: "agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: "Agent"}
+	machineGVK      = schema.GroupVersionKind{Group: "cluster.x-k8s.io", Version: apiVersionV1Beta1, Kind: "Machine"}
+	agentMachineGVK = schema.GroupVersionKind{Group: "capi-provider.agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: "AgentMachine"}
+	infraEnvGVK     = schema.GroupVersionKind{Group: "agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: "InfraEnv"}
+	agentGVK        = schema.GroupVersionKind{Group: "agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: "Agent"}
 )
 
 // VsphereAgentPoolReconciler reconciles a VsphereAgentPool object.
@@ -75,17 +76,23 @@ type VsphereAgentPoolReconciler struct {
 	ProviderFactory VMProviderFactory
 }
 
+type MachineInfo struct {
+	Name     string
+	Deleting bool
+}
+
 // +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools/finalizers,verbs=update
-// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinesets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=capi-provider.agent-install.openshift.io,resources=agentmachines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agent-install.openshift.io,resources=infraenvs;agents,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile plans and applies vSphere-backed Agent inventory for one hosted
-// cluster NodePool. The hosted cluster autoscaler remains the source of truth:
-// this controller only reacts to the rendered CAPI MachineSet replica count.
+// cluster NodePool. Hypershift and CAPI remain the source of truth: this
+// controller creates inventory only when AgentMachines report NoSuitableAgents.
 func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -104,13 +111,6 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	} else {
 		return r.reconcileDelete(ctx, &pool)
-	}
-
-	machineSet, err := r.findMachineSet(ctx, &pool)
-	if err != nil {
-		r.setStatusError(&pool, conditionMachineSetFound, "MachineSetNotFound", err.Error())
-		_ = r.updateStatus(ctx, &pool, PoolPlan{})
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	infraEnvAvailable, infraEnvISOURL, infraEnvMessage := r.infraEnvAvailable(ctx, &pool)
@@ -132,17 +132,28 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		_ = r.updateStatus(ctx, &pool, PoolPlan{})
 		return ctrl.Result{}, err
 	}
-	pool.Status.OwnedVMs = refreshOwnedVMStatuses(&pool, agents)
+	machines, err := r.listNodePoolMachines(ctx, &pool)
+	if err != nil {
+		r.setStatusError(&pool, conditionReady, "MachineListFailed", err.Error())
+		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		return ctrl.Result{}, err
+	}
+	waitingAgentMachines, err := r.countWaitingAgentMachines(ctx, &pool)
+	if err != nil {
+		r.setStatusError(&pool, conditionReady, "AgentMachineListFailed", err.Error())
+		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		return ctrl.Result{}, err
+	}
+	pool.Status.OwnedVMs = refreshOwnedVMStatuses(&pool, agents, machines)
 
-	replicas := machineSetReplicas(machineSet)
 	plan := buildPlan(&pool, PoolSnapshot{
-		MachineSetReplicas: replicas,
-		MatchingAgents:     agents,
-		OwnedVMs:           pool.Status.OwnedVMs,
+		WaitingAgentMachines: waitingAgentMachines,
+		MatchingAgents:       agents,
+		OwnedVMs:             pool.Status.OwnedVMs,
 	})
 
-	pool.Status.ObservedMachineSet = machineSet.GetName()
-	pool.Status.MachineSetReplicas = replicas
+	pool.Status.ObservedMachineSet = ""
+	pool.Status.MachineSetReplicas = 0
 
 	if pool.Spec.DryRun {
 		r.recordPlan(&pool, plan, "DryRunPlan")
@@ -360,26 +371,43 @@ func (r *VsphereAgentPoolReconciler) provider(ctx context.Context, pool *agentfo
 	return factory(ctx, pool, &secret)
 }
 
-func (r *VsphereAgentPoolReconciler) findMachineSet(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (*unstructured.Unstructured, error) {
-	if pool.Spec.MachineSetName != "" {
-		ms := &unstructured.Unstructured{}
-		ms.SetGroupVersionKind(machineSetGVK)
-		err := r.Get(ctx, types.NamespacedName{Namespace: pool.Spec.ControlPlaneNamespace, Name: pool.Spec.MachineSetName}, ms)
-		return ms, err
-	}
-
+func (r *VsphereAgentPoolReconciler) countWaitingAgentMachines(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (int32, error) {
 	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(machineSetGVK)
+	list.SetGroupVersionKind(agentMachineGVK)
+	if err := r.List(ctx, list, client.InNamespace(pool.Spec.ControlPlaneNamespace)); err != nil {
+		return 0, err
+	}
+	var waiting int32
+	for i := range list.Items {
+		agentMachine := &list.Items[i]
+		if !controlPlaneObjectMatchesPool(agentMachine, pool) {
+			continue
+		}
+		if agentMachineWaitingForAgent(agentMachine) {
+			waiting++
+		}
+	}
+	return waiting, nil
+}
+
+func (r *VsphereAgentPoolReconciler) listNodePoolMachines(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]MachineInfo, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(machineGVK)
 	if err := r.List(ctx, list, client.InNamespace(pool.Spec.ControlPlaneNamespace)); err != nil {
 		return nil, err
 	}
-	expectedNodePool := fmt.Sprintf("%s/%s", pool.Namespace, pool.Spec.NodePoolRef.Name)
+	machines := make([]MachineInfo, 0, len(list.Items))
 	for i := range list.Items {
-		if list.Items[i].GetAnnotations()[nodePoolAnnotation] == expectedNodePool {
-			return &list.Items[i], nil
+		machine := &list.Items[i]
+		if !controlPlaneObjectMatchesPool(machine, pool) {
+			continue
 		}
+		machines = append(machines, MachineInfo{
+			Name:     machine.GetName(),
+			Deleting: machine.GetDeletionTimestamp() != nil || machinePhase(machine) == "Deleting",
+		})
 	}
-	return nil, fmt.Errorf("no MachineSet in namespace %q has annotation %s=%q", pool.Spec.ControlPlaneNamespace, nodePoolAnnotation, expectedNodePool)
+	return machines, nil
 }
 
 func (r *VsphereAgentPoolReconciler) infraEnvAvailable(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (bool, string, string) {
@@ -477,7 +505,7 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 	return assigned
 }
 
-func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo) []agentforgev1alpha1.OwnedVMStatus {
+func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo, machines []MachineInfo) []agentforgev1alpha1.OwnedVMStatus {
 	byHostname := map[string]AgentInfo{}
 	byName := map[string]AgentInfo{}
 	for _, agent := range agents {
@@ -485,6 +513,10 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		if hostname := agentObservedHostname(agent); hostname != "" {
 			byHostname[hostname] = agent
 		}
+	}
+	machineStates := map[string]MachineInfo{}
+	for _, machine := range machines {
+		machineStates[machine.Name] = machine
 	}
 
 	vms := make([]agentforgev1alpha1.OwnedVMStatus, 0, len(pool.Status.OwnedVMs))
@@ -514,7 +546,12 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		}
 		matchedAgents[agent.Name] = struct{}{}
 
+		wasMachineDeleting := vm.Phase == phaseReleased && vm.Reason == "MachineDeleting"
 		applyAgentToOwnedVMStatus(pool, &vm, agent)
+		if wasMachineDeleting {
+			setOwnedVMPhase(&vm, phaseReleased, "MachineDeleting")
+		}
+		applyMachineStateToOwnedVMStatus(&vm, machineStates)
 		vms = append(vms, vm)
 	}
 
@@ -530,10 +567,27 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			continue
 		}
 		vm := agentOwnedVMStatus(pool, agent, hostname)
+		applyMachineStateToOwnedVMStatus(&vm, machineStates)
 		vms = append(vms, vm)
 		knownVMNames[hostname] = struct{}{}
 	}
 	return vms
+}
+
+func applyMachineStateToOwnedVMStatus(vm *agentforgev1alpha1.OwnedVMStatus, machines map[string]MachineInfo) {
+	if vm.MachineRef == nil || vm.MachineRef.Name == "" {
+		return
+	}
+	machine, exists := machines[vm.MachineRef.Name]
+	if !exists {
+		if vm.Phase == phaseReleased && vm.Reason == "MachineDeleting" {
+			setOwnedVMPhase(vm, phaseReleased, "MachineDeleted")
+		}
+		return
+	}
+	if machine.Deleting {
+		setOwnedVMPhase(vm, phaseReleased, "MachineDeleting")
+	}
 }
 
 func vmHadDiscoveredAgent(vm agentforgev1alpha1.OwnedVMStatus) bool {
@@ -594,8 +648,8 @@ func agentObjectReference(pool *agentforgev1alpha1.VsphereAgentPool, name string
 
 func machineObjectReference(pool *agentforgev1alpha1.VsphereAgentPool, name string) *corev1.ObjectReference {
 	return &corev1.ObjectReference{
-		APIVersion: machineSetGVK.GroupVersion().String(),
-		Kind:       "Machine",
+		APIVersion: machineGVK.GroupVersion().String(),
+		Kind:       machineGVK.Kind,
 		Namespace:  pool.Spec.ControlPlaneNamespace,
 		Name:       name,
 	}
@@ -743,6 +797,9 @@ func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *age
 	desired := *pool.Status.DeepCopy()
 	desired.ObservedGeneration = pool.Generation
 	desired.DesiredReplicas = plan.DesiredReplicas
+	desired.WaitingAgentMachines = plan.WaitingAgentMachines
+	desired.MachineSetReplicas = 0
+	desired.ObservedMachineSet = ""
 	desired.MatchingAgents = plan.MatchingAgents
 	desired.BoundAgents = plan.BoundAgents
 	desired.AvailableAgents = plan.AvailableAgents
@@ -823,11 +880,11 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 		Message:            boolMessage(dryRun, "Dry-run is enabled; no vSphere or Agent mutations are applied", "Dry-run is disabled; planned mutations may be applied"),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
-		Type:               conditionMachineSetFound,
+		Type:               conditionAgentMachineDemand,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: pool.Generation,
-		Reason:             "Found",
-		Message:            fmt.Sprintf("Following MachineSet %s", pool.Status.ObservedMachineSet),
+		Reason:             "Observed",
+		Message:            fmt.Sprintf("%d AgentMachines are waiting for suitable Agents", plan.WaitingAgentMachines),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               conditionInfraEnvAvailable,
@@ -841,7 +898,7 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 		Status:             conditionStatus(plan.VMsToCreate == 0),
 		ObservedGeneration: pool.Generation,
 		Reason:             boolReason(plan.VMsToCreate == 0, "Satisfied", "Deficit"),
-		Message:            fmt.Sprintf("desired=%d matchingAgents=%d pendingOwnedVMs=%d boundAgents=%d availableAgents=%d", plan.DesiredReplicas, plan.MatchingAgents, plan.PendingOwnedVMs, plan.BoundAgents, plan.AvailableAgents),
+		Message:            fmt.Sprintf("waitingAgentMachines=%d matchingAgents=%d pendingOwnedVMs=%d boundAgents=%d availableAgents=%d", plan.WaitingAgentMachines, plan.MatchingAgents, plan.PendingOwnedVMs, plan.BoundAgents, plan.AvailableAgents),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               conditionVsphereReady,
@@ -894,16 +951,40 @@ func applySpecDefaults(pool *agentforgev1alpha1.VsphereAgentPool) {
 	}
 }
 
-func machineSetReplicas(machineSet *unstructured.Unstructured) int32 {
-	replicas, found, _ := unstructured.NestedInt64(machineSet.Object, "spec", "replicas")
-	if !found {
-		return 0
-	}
-	return int32(replicas) //nolint:gosec // Kubernetes replica counts fit in int32.
-}
-
 func approveAgents(pool *agentforgev1alpha1.VsphereAgentPool) bool {
 	return pool.Spec.Agent.Approve == nil || *pool.Spec.Agent.Approve
+}
+
+func agentMachineWaitingForAgent(agentMachine *unstructured.Unstructured) bool {
+	return objectConditionReason(agentMachine, conditionReady) == "NoSuitableAgents"
+}
+
+func machinePhase(machine *unstructured.Unstructured) string {
+	phase, _, _ := unstructured.NestedString(machine.Object, "status", "phase")
+	return phase
+}
+
+func objectConditionReason(obj *unstructured.Unstructured, conditionType string) string {
+	conditions, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if !found {
+		return ""
+	}
+	for _, item := range conditions {
+		condition, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if condition["type"] != conditionType {
+			continue
+		}
+		status, _ := condition["status"].(string)
+		if status != string(metav1.ConditionFalse) {
+			return ""
+		}
+		reason, _ := condition["reason"].(string)
+		return reason
+	}
+	return ""
 }
 
 func conditionStatus(value bool) metav1.ConditionStatus {
@@ -1117,9 +1198,15 @@ func removeOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, name string) []agentf
 	return result
 }
 
-func machineSetWatchObject() *unstructured.Unstructured {
+func agentMachineWatchObject() *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(machineSetGVK)
+	obj.SetGroupVersionKind(agentMachineGVK)
+	return obj
+}
+
+func machineWatchObject() *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(machineGVK)
 	return obj
 }
 
@@ -1152,6 +1239,56 @@ func agentChangePredicate() predicate.Predicate {
 	}
 }
 
+func agentMachineChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool {
+			return true
+		},
+		DeleteFunc: func(event.DeleteEvent) bool {
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldObj, oldOK := e.ObjectOld.(*unstructured.Unstructured)
+			newObj, newOK := e.ObjectNew.(*unstructured.Unstructured)
+			if !oldOK || !newOK {
+				return false
+			}
+			if !reflect.DeepEqual(oldObj.GetAnnotations(), newObj.GetAnnotations()) {
+				return true
+			}
+			return agentMachineWaitingForAgent(oldObj) != agentMachineWaitingForAgent(newObj)
+		},
+	}
+}
+
+func machineChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool {
+			return true
+		},
+		DeleteFunc: func(event.DeleteEvent) bool {
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldObj, oldOK := e.ObjectOld.(*unstructured.Unstructured)
+			newObj, newOK := e.ObjectNew.(*unstructured.Unstructured)
+			if !oldOK || !newOK {
+				return false
+			}
+			if !reflect.DeepEqual(oldObj.GetAnnotations(), newObj.GetAnnotations()) {
+				return true
+			}
+			if oldObj.GetDeletionTimestamp() == nil && newObj.GetDeletionTimestamp() != nil {
+				return true
+			}
+			if oldObj.GetDeletionTimestamp() != nil && newObj.GetDeletionTimestamp() == nil {
+				return true
+			}
+			return machinePhase(oldObj) != machinePhase(newObj)
+		},
+	}
+}
+
 func vsphereAgentPoolChangePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool {
@@ -1175,26 +1312,26 @@ func vsphereAgentPoolChangePredicate() predicate.Predicate {
 	}
 }
 
-func (r *VsphereAgentPoolReconciler) requestsForMachineSetChange(ctx context.Context, o client.Object) []reconcile.Request {
-	machineSet, ok := o.(*unstructured.Unstructured)
+func (r *VsphereAgentPoolReconciler) requestsForControlPlaneObjectChange(ctx context.Context, o client.Object) []reconcile.Request {
+	obj, ok := o.(*unstructured.Unstructured)
 	if !ok {
-		err := fmt.Errorf("expected an unstructured MachineSet, got %T", o)
-		ctrl.LoggerFrom(ctx).Error(err, "failed to get requests for MachineSet change")
+		err := fmt.Errorf("expected an unstructured control plane object, got %T", o)
+		ctrl.LoggerFrom(ctx).Error(err, "failed to get requests for control plane object change")
 		return nil
 	}
 
 	var pools agentforgev1alpha1.VsphereAgentPoolList
 	if err := r.List(ctx, &pools, client.MatchingFields{
-		vsphereAgentPoolControlPlaneNamespaceIndex: machineSet.GetNamespace(),
+		vsphereAgentPoolControlPlaneNamespaceIndex: obj.GetNamespace(),
 	}); err != nil {
-		ctrl.LoggerFrom(ctx).Error(err, "failed to list VsphereAgentPools for MachineSet change")
+		ctrl.LoggerFrom(ctx).Error(err, "failed to list VsphereAgentPools for control plane object change")
 		return nil
 	}
 
 	reqs := make([]reconcile.Request, 0, len(pools.Items))
 	for i := range pools.Items {
 		pool := &pools.Items[i]
-		if machineSetMatchesPool(machineSet, pool) {
+		if controlPlaneObjectMatchesPool(obj, pool) {
 			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
 		}
 	}
@@ -1225,15 +1362,12 @@ func (r *VsphereAgentPoolReconciler) requestsForAgentChange(ctx context.Context,
 	return reqs
 }
 
-func machineSetMatchesPool(machineSet *unstructured.Unstructured, pool *agentforgev1alpha1.VsphereAgentPool) bool {
-	if pool.Spec.ControlPlaneNamespace != machineSet.GetNamespace() {
+func controlPlaneObjectMatchesPool(obj *unstructured.Unstructured, pool *agentforgev1alpha1.VsphereAgentPool) bool {
+	if pool.Spec.ControlPlaneNamespace != obj.GetNamespace() {
 		return false
 	}
-	if pool.Spec.MachineSetName != "" {
-		return pool.Spec.MachineSetName == machineSet.GetName()
-	}
 	expectedNodePool := fmt.Sprintf("%s/%s", pool.Namespace, pool.Spec.NodePoolRef.Name)
-	return machineSet.GetAnnotations()[nodePoolAnnotation] == expectedNodePool
+	return obj.GetAnnotations()[nodePoolAnnotation] == expectedNodePool
 }
 
 func agentMatchesPool(agent *unstructured.Unstructured, pool *agentforgev1alpha1.VsphereAgentPool) bool {
@@ -1270,7 +1404,8 @@ func (r *VsphereAgentPoolReconciler) SetupWithManager(ctx context.Context, mgr c
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentforgev1alpha1.VsphereAgentPool{}, builder.WithPredicates(vsphereAgentPoolChangePredicate())).
-		Watches(machineSetWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForMachineSetChange), builder.WithPredicates(predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}))).
+		Watches(agentMachineWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForControlPlaneObjectChange), builder.WithPredicates(agentMachineChangePredicate())).
+		Watches(machineWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForControlPlaneObjectChange), builder.WithPredicates(machineChangePredicate())).
 		Watches(agentWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForAgentChange), builder.WithPredicates(agentChangePredicate())).
 		Named("vsphereagentpool").
 		Complete(r)

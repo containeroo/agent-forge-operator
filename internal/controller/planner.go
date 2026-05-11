@@ -38,13 +38,13 @@ const (
 	phaseReleased         = "Released"
 	defaultAgentRole      = "worker"
 
-	conditionReady             = "Ready"
-	conditionDryRun            = "DryRun"
-	conditionMachineSetFound   = "MachineSetFound"
-	conditionInfraEnvAvailable = "InfraEnvAvailable"
-	conditionCapacitySatisfied = "CapacitySatisfied"
-	conditionVsphereReady      = "VsphereReady"
-	conditionISOReady          = "ISOReady"
+	conditionReady              = "Ready"
+	conditionDryRun             = "DryRun"
+	conditionAgentMachineDemand = "AgentMachineDemandFound"
+	conditionInfraEnvAvailable  = "InfraEnvAvailable"
+	conditionCapacitySatisfied  = "CapacitySatisfied"
+	conditionVsphereReady       = "VsphereReady"
+	conditionISOReady           = "ISOReady"
 )
 
 // AgentInfo is the small subset of an Assisted Installer Agent needed for
@@ -64,24 +64,24 @@ type AgentInfo struct {
 
 // PoolSnapshot is the observed cluster state used by the pure planner.
 type PoolSnapshot struct {
-	MachineSetReplicas int32
-	MatchingAgents     []AgentInfo
-	OwnedVMs           []agentforgev1alpha1.OwnedVMStatus
+	WaitingAgentMachines int32
+	MatchingAgents       []AgentInfo
+	OwnedVMs             []agentforgev1alpha1.OwnedVMStatus
 }
 
 // PoolPlan is the reconcile plan derived from a snapshot and CR spec.
 type PoolPlan struct {
-	MachineSetReplicas int32
-	DesiredReplicas    int32
-	MatchingAgents     int32
-	BoundAgents        int32
-	AvailableAgents    int32
-	PendingOwnedVMs    int32
-	VMsToCreate        int32
-	VMsToDelete        []agentforgev1alpha1.OwnedVMStatus
-	AgentsToDelete     []AgentInfo
-	AgentsToPatch      []AgentInfo
-	Actions            []agentforgev1alpha1.PlannedActionStatus
+	WaitingAgentMachines int32
+	DesiredReplicas      int32
+	MatchingAgents       int32
+	BoundAgents          int32
+	AvailableAgents      int32
+	PendingOwnedVMs      int32
+	VMsToCreate          int32
+	VMsToDelete          []agentforgev1alpha1.OwnedVMStatus
+	AgentsToDelete       []AgentInfo
+	AgentsToPatch        []AgentInfo
+	Actions              []agentforgev1alpha1.PlannedActionStatus
 }
 
 func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot) PoolPlan {
@@ -110,8 +110,8 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 
 	matchingAgents := int32(len(snapshot.MatchingAgents)) //nolint:gosec // Kubernetes object counts fit in int32 here.
 	pendingOwnedVMs := countPendingOwnedVMs(snapshot.OwnedVMs)
-	desiredReplicas := snapshot.MachineSetReplicas + bufferAgents
-	deficit := desiredReplicas - matchingAgents - pendingOwnedVMs
+	desiredReplicas := boundAgents + availableAgents + snapshot.WaitingAgentMachines + bufferAgents
+	deficit := snapshot.WaitingAgentMachines + bufferAgents - availableAgents - pendingOwnedVMs
 	if deficit < 0 {
 		deficit = 0
 	}
@@ -121,37 +121,14 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	for i := int32(0); i < vmsToCreate; i++ {
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionCreateVM,
-			Reason: fmt.Sprintf("MachineSet requires %d replicas plus %d buffer Agents, but only %d matching Agents and %d owned provisioning VMs exist", snapshot.MachineSetReplicas, bufferAgents, matchingAgents, pendingOwnedVMs),
+			Reason: fmt.Sprintf("%d AgentMachines are waiting for suitable Agents plus %d buffer Agents, with %d available Agents and %d owned provisioning VMs", snapshot.WaitingAgentMachines, bufferAgents, availableAgents, pendingOwnedVMs),
 			DryRun: pool.Spec.DryRun,
 		})
 	}
 
-	excess := matchingAgents - desiredReplicas
-	cleanupAllowed := boundAgents >= snapshot.MachineSetReplicas
-	var vmsToDelete []agentforgev1alpha1.OwnedVMStatus
-	var agentsToDelete []AgentInfo
-	if cleanupAllowed {
-		vmsToDelete, agentsToDelete = deletionTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, excess, deletePolicy)
-	}
-	for _, agent := range agentsToDelete {
-		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
-			Type:   actionDeleteAgent,
-			Name:   agent.Name,
-			Reason: fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess),
-			DryRun: pool.Spec.DryRun,
-		})
-	}
-
-	agentsMarkedForDelete := map[string]struct{}{}
-	for _, agent := range agentsToDelete {
-		agentsMarkedForDelete[agent.Name] = struct{}{}
-	}
 	var agentsToPatch []AgentInfo
 	for _, agent := range snapshot.MatchingAgents {
 		if agent.Bound {
-			continue
-		}
-		if _, deleting := agentsMarkedForDelete[agent.Name]; deleting {
 			continue
 		}
 		if agent.Approved && agent.SpecRole == pool.Spec.Agent.Role && agent.RoleLabel == pool.Spec.Agent.Role && agent.Hostname != "" {
@@ -166,23 +143,15 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		})
 	}
 
-	pendingSurplus := matchingAgents + pendingOwnedVMs - desiredReplicas
-	if pendingSurplus < 0 {
-		pendingSurplus = 0
-	}
-	if cleanupAllowed && len(agentsToPatch) == 0 {
-		vmsToDelete = append(vmsToDelete, surplusProvisioningDeletionTargets(snapshot.OwnedVMs, vmsToDelete, pendingSurplus, deletePolicy)...)
-	}
-	if cleanupAllowed {
+	vmsToDelete, agentsToDelete := deletedMachineTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, deletePolicy)
+	if snapshot.WaitingAgentMachines == 0 {
 		vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete, deletePolicy)...)
 	}
 	for _, vm := range vmsToDelete {
-		reason := fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess)
+		reason := "CAPI Machine has been deleted and deletePolicy is OwnedOnly"
 		switch vm.Phase {
 		case phaseOrphaned:
 			reason = "Owned VM no longer has a matching Agent and is eligible for cleanup"
-		case phaseProvisioning:
-			reason = "Owned provisioning VM is no longer needed because matching Agents already satisfy demand"
 		}
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionDeleteVM,
@@ -191,27 +160,35 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 			DryRun: pool.Spec.DryRun,
 		})
 	}
+	for _, agent := range agentsToDelete {
+		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
+			Type:   actionDeleteAgent,
+			Name:   agent.Name,
+			Reason: "CAPI Machine has been deleted and deletePolicy is OwnedOnly",
+			DryRun: pool.Spec.DryRun,
+		})
+	}
 
 	if len(actions) == 0 {
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionNoop,
-			Reason: "Matching Agent capacity satisfies MachineSet demand",
+			Reason: "Agent capacity satisfies current AgentMachine demand",
 			DryRun: pool.Spec.DryRun,
 		})
 	}
 
 	return PoolPlan{
-		MachineSetReplicas: snapshot.MachineSetReplicas,
-		DesiredReplicas:    desiredReplicas,
-		MatchingAgents:     matchingAgents,
-		BoundAgents:        boundAgents,
-		AvailableAgents:    availableAgents,
-		PendingOwnedVMs:    pendingOwnedVMs,
-		VMsToCreate:        vmsToCreate,
-		VMsToDelete:        vmsToDelete,
-		AgentsToDelete:     agentsToDelete,
-		AgentsToPatch:      agentsToPatch,
-		Actions:            actions,
+		WaitingAgentMachines: snapshot.WaitingAgentMachines,
+		DesiredReplicas:      desiredReplicas,
+		MatchingAgents:       matchingAgents,
+		BoundAgents:          boundAgents,
+		AvailableAgents:      availableAgents,
+		PendingOwnedVMs:      pendingOwnedVMs,
+		VMsToCreate:          vmsToCreate,
+		VMsToDelete:          vmsToDelete,
+		AgentsToDelete:       agentsToDelete,
+		AgentsToPatch:        agentsToPatch,
+		Actions:              actions,
 	}
 }
 
@@ -233,90 +210,32 @@ func countPendingOwnedVMs(vms []agentforgev1alpha1.OwnedVMStatus) int32 {
 	return count
 }
 
-func deletionTargets(vms []agentforgev1alpha1.OwnedVMStatus, agents []AgentInfo, excess int32, deletePolicy string) ([]agentforgev1alpha1.OwnedVMStatus, []AgentInfo) {
-	if excess <= 0 || deletePolicy != deletePolicyOwnedOnly {
+func deletedMachineTargets(vms []agentforgev1alpha1.OwnedVMStatus, agents []AgentInfo, deletePolicy string) ([]agentforgev1alpha1.OwnedVMStatus, []AgentInfo) {
+	if deletePolicy != deletePolicyOwnedOnly {
 		return nil, nil
 	}
-
-	unboundAgents := map[string]AgentInfo{}
+	agentsByName := map[string]AgentInfo{}
 	for _, agent := range agents {
-		if !agent.Bound {
-			unboundAgents[agent.Name] = agent
-		}
+		agentsByName[agent.Name] = agent
 	}
 
-	var released []agentforgev1alpha1.OwnedVMStatus
-	var available []agentforgev1alpha1.OwnedVMStatus
-	var provisioning []agentforgev1alpha1.OwnedVMStatus
+	var selectedVMs []agentforgev1alpha1.OwnedVMStatus
+	var selectedAgents []AgentInfo
 	for _, vm := range vms {
-		if vm.Name == "" || vm.Phase == phaseBound {
+		if vm.Name == "" || vm.Phase != phaseReleased || vm.Reason != "MachineDeleted" {
 			continue
-		}
-		if vm.AgentRef == nil || vm.AgentRef.Name == "" {
-			if vm.Phase == phaseProvisioning {
-				provisioning = append(provisioning, vm)
-			}
-			continue
-		}
-		if _, ok := unboundAgents[vm.AgentRef.Name]; !ok {
-			continue
-		}
-		if vm.Phase == phaseReleased {
-			released = append(released, vm)
-			continue
-		}
-		available = append(available, vm)
-	}
-
-	ordered := append(released, available...)
-	ordered = append(ordered, provisioning...)
-	selectedVMs := make([]agentforgev1alpha1.OwnedVMStatus, 0, minInt(excess, int32(len(ordered))))
-	selectedAgents := make([]AgentInfo, 0, minInt(excess, int32(len(ordered))))
-	selectedAgentNames := map[string]struct{}{}
-	for _, vm := range ordered {
-		if int32(len(selectedVMs)) >= excess { //nolint:gosec // bounded by slice length.
-			break
 		}
 		selectedVMs = append(selectedVMs, vm)
 		if vm.AgentRef == nil || vm.AgentRef.Name == "" {
 			continue
 		}
-		agent, ok := unboundAgents[vm.AgentRef.Name]
+		agent, ok := agentsByName[vm.AgentRef.Name]
 		if !ok {
 			continue
 		}
-		if _, exists := selectedAgentNames[agent.Name]; exists {
-			continue
-		}
 		selectedAgents = append(selectedAgents, agent)
-		selectedAgentNames[agent.Name] = struct{}{}
 	}
 	return selectedVMs, selectedAgents
-}
-
-func surplusProvisioningDeletionTargets(vms, alreadySelected []agentforgev1alpha1.OwnedVMStatus, surplus int32, deletePolicy string) []agentforgev1alpha1.OwnedVMStatus {
-	if surplus <= 0 || deletePolicy != deletePolicyOwnedOnly {
-		return nil
-	}
-	selected := selectedVMNames(alreadySelected)
-
-	var targets []agentforgev1alpha1.OwnedVMStatus
-	for _, vm := range vms {
-		if int32(len(targets)) >= surplus { //nolint:gosec // bounded by slice length.
-			break
-		}
-		if vm.Name == "" || vm.Phase != phaseProvisioning {
-			continue
-		}
-		if vm.AgentRef != nil && vm.AgentRef.Name != "" {
-			continue
-		}
-		if _, exists := selected[vm.Name]; exists {
-			continue
-		}
-		targets = append(targets, vm)
-	}
-	return targets
 }
 
 func orphanedDeletionTargets(vms, alreadySelected []agentforgev1alpha1.OwnedVMStatus, deletePolicy string) []agentforgev1alpha1.OwnedVMStatus {
@@ -346,11 +265,4 @@ func selectedVMNames(vms []agentforgev1alpha1.OwnedVMStatus) map[string]struct{}
 		}
 	}
 	return selected
-}
-
-func minInt(a int32, b int32) int {
-	if a < b {
-		return int(a)
-	}
-	return int(b)
 }

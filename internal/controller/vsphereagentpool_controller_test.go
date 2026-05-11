@@ -48,10 +48,13 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 	agent1 := testAgent(testNamespace, "agent-1", true, true)
 	agent2 := testAgent(testNamespace, "agent-2", true, true)
 	agent3 := testAgent(testNamespace, "agent-3", true, true)
+	machine1 := testMachine(testControlPlaneNamespace, "agent-1-machine", "demo/demo-worker", false)
+	machine2 := testMachine(testControlPlaneNamespace, "agent-2-machine", "demo/demo-worker", false)
+	machine3 := testMachine(testControlPlaneNamespace, "agent-3-machine", "demo/demo-worker", false)
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, agent1, agent2, agent3).
+		WithObjects(pool, ms, machine1, machine2, machine3, infraEnv, agent1, agent2, agent3).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -78,21 +81,21 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.DesiredReplicas != 5 {
-		t.Fatalf("desired replicas = %d, want 5", updated.Status.DesiredReplicas)
+	if updated.Status.DesiredReplicas != 4 {
+		t.Fatalf("desired replicas = %d, want 4", updated.Status.DesiredReplicas)
 	}
 	if updated.Status.MatchingAgents != 3 {
 		t.Fatalf("matching agents = %d, want 3", updated.Status.MatchingAgents)
 	}
-	if len(updated.Status.PlannedActions) != 2 {
-		t.Fatalf("planned actions = %d, want 2", len(updated.Status.PlannedActions))
+	if len(updated.Status.PlannedActions) != 1 {
+		t.Fatalf("planned actions = %d, want 1", len(updated.Status.PlannedActions))
 	}
 	if updated.Status.PlannedActions[0].Type != actionCreateVM {
 		t.Fatalf("first action = %s, want %s", updated.Status.PlannedActions[0].Type, actionCreateVM)
 	}
 }
 
-func TestReconcileReportsMissingMachineSetCondition(t *testing.T) {
+func TestReconcileReportsAgentMachineDemandCondition(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -125,12 +128,12 @@ func TestReconcileReportsMissingMachineSetCondition(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
 		t.Fatal(err)
 	}
-	condition := findCondition(updated.Status.Conditions, conditionMachineSetFound)
+	condition := findCondition(updated.Status.Conditions, conditionAgentMachineDemand)
 	if condition == nil {
-		t.Fatal("MachineSetFound condition was not set")
+		t.Fatal("AgentMachineDemandFound condition was not set")
 	}
-	if condition.Status != metav1.ConditionFalse {
-		t.Fatalf("MachineSetFound status = %s, want False", condition.Status)
+	if condition.Status != metav1.ConditionTrue {
+		t.Fatalf("AgentMachineDemandFound status = %s, want True", condition.Status)
 	}
 }
 
@@ -207,6 +210,7 @@ func TestReconcileEnsuresISOOnceForMultipleCreates(t *testing.T) {
 	pool.Spec.DryRun = false
 	pool.Spec.Scaling.MaxProvisioning = 2
 	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 5, "demo/demo-worker")
+	ms2 := testMachineSet(testControlPlaneNamespace, testNodePool+"-2", 1, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent1 := testAgent(testNamespace, "agent-1", true, true)
 	agent2 := testAgent(testNamespace, "agent-2", true, true)
@@ -222,7 +226,7 @@ func TestReconcileEnsuresISOOnceForMultipleCreates(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, agent1, agent2, agent3, secret).
+		WithObjects(pool, ms, ms2, infraEnv, agent1, agent2, agent3, secret).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -357,12 +361,13 @@ func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 		newOwnedVMStatus("demo-worker-ab12"),
 	}
 	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	machine := testMachine(testControlPlaneNamespace, "demo-worker-ab12-machine", "demo/demo-worker", false)
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testAgent(testNamespace, "demo-worker-ab12", true, true)
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, agent).
+		WithObjects(pool, ms, machine, infraEnv, agent).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -413,7 +418,7 @@ func TestRefreshOwnedVMStatusesMarksExpiredUndiscoveredVMOrphaned(t *testing.T) 
 		},
 	}
 
-	vms := refreshOwnedVMStatuses(pool, nil)
+	vms := refreshOwnedVMStatuses(pool, nil, nil)
 
 	if len(vms) != 2 {
 		t.Fatalf("ownedVMs = %d, want 2", len(vms))
@@ -438,7 +443,7 @@ func TestRefreshOwnedVMStatusesMarksMissingDiscoveredAgentOrphaned(t *testing.T)
 		},
 	}
 
-	vms := refreshOwnedVMStatuses(pool, nil)
+	vms := refreshOwnedVMStatuses(pool, nil, nil)
 
 	if len(vms) != 1 {
 		t.Fatalf("ownedVMs = %d, want 1", len(vms))
@@ -451,7 +456,39 @@ func TestRefreshOwnedVMStatusesMarksMissingDiscoveredAgentOrphaned(t *testing.T)
 	}
 }
 
-func TestReconcileDeletesSurplusProvisioningOwnedVMs(t *testing.T) {
+func TestRefreshOwnedVMStatusesRequiresObservedMachineDeletingBeforeMachineDeleted(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{
+			Name:       "demo-worker-bound",
+			Phase:      phaseBound,
+			Reason:     "AgentBound",
+			AgentRef:   &corev1.ObjectReference{Name: "bound-agent"},
+			MachineRef: testMachineRef("missing-machine"),
+		},
+		{
+			Name:       "demo-worker-deleting",
+			Phase:      phaseReleased,
+			Reason:     "MachineDeleting",
+			AgentRef:   &corev1.ObjectReference{Name: "deleting-agent"},
+			MachineRef: testMachineRef("deleted-machine"),
+		},
+	}
+
+	vms := refreshOwnedVMStatuses(pool, []AgentInfo{
+		{Name: "bound-agent", Bound: true, MachineName: "missing-machine", Hostname: "demo-worker-bound"},
+		{Name: "deleting-agent", Bound: true, MachineName: "deleted-machine", Hostname: "demo-worker-deleting"},
+	}, nil)
+
+	if vms[0].Phase != phaseBound || vms[0].Reason != "AgentBound" {
+		t.Fatalf("missing unobserved Machine phase/reason = %s/%s, want Bound/AgentBound", vms[0].Phase, vms[0].Reason)
+	}
+	if vms[1].Phase != phaseReleased || vms[1].Reason != "MachineDeleted" {
+		t.Fatalf("deleted Machine phase/reason = %s/%s, want Released/MachineDeleted", vms[1].Phase, vms[1].Reason)
+	}
+}
+
+func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -498,31 +535,23 @@ func TestReconcileDeletesSurplusProvisioningOwnedVMs(t *testing.T) {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
 
-	if provider.deleteVMCalls != 2 {
-		t.Fatalf("DeleteVM calls = %d, want 2", provider.deleteVMCalls)
-	}
-	if provider.deletedVMNames[0] != "demo-worker-old1" || provider.deletedVMNames[1] != "demo-worker-old2" {
-		t.Fatalf("deleted VMs = %#v, want surplus provisioning VMs", provider.deletedVMNames)
+	if provider.deleteVMCalls != 0 {
+		t.Fatalf("DeleteVM calls = %d, want 0 without deleted Machines", provider.deleteVMCalls)
 	}
 
 	var updated agentforgev1alpha1.VsphereAgentPool
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
 		t.Fatal(err)
 	}
-	if len(updated.Status.OwnedVMs) != 3 {
-		t.Fatalf("ownedVMs = %d, want only 3 bound VMs after cleanup", len(updated.Status.OwnedVMs))
-	}
-	for _, vm := range updated.Status.OwnedVMs {
-		if vm.Phase == phaseProvisioning {
-			t.Fatalf("ownedVMs still contains provisioning VM after cleanup: %#v", vm)
-		}
+	if len(updated.Status.OwnedVMs) != 5 {
+		t.Fatalf("ownedVMs = %d, want bound and provisioning VMs retained", len(updated.Status.OwnedVMs))
 	}
 	condition := findCondition(updated.Status.Conditions, conditionCapacitySatisfied)
 	if condition == nil {
 		t.Fatal("CapacitySatisfied condition missing")
 	}
-	if condition.Message != "desired=3 matchingAgents=3 pendingOwnedVMs=0 boundAgents=3 availableAgents=0" {
-		t.Fatalf("CapacitySatisfied message = %q, want pendingOwnedVMs=0", condition.Message)
+	if condition.Message != "waitingAgentMachines=1 matchingAgents=3 pendingOwnedVMs=2 boundAgents=3 availableAgents=0" {
+		t.Fatalf("CapacitySatisfied message = %q, want retained pending VMs", condition.Message)
 	}
 }
 
@@ -591,12 +620,13 @@ func TestReconcileAdoptsExistingBoundAgentAsOwnedVM(t *testing.T) {
 
 	pool := reconcileTestPool()
 	ms := testMachineSet(testControlPlaneNamespace, testNodePool, 1, "demo/demo-worker")
+	machine := testMachine(testControlPlaneNamespace, "demo-worker-ab12-machine", "demo/demo-worker", false)
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testAgent(testNamespace, "demo-worker-ab12", true, true)
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, ms, infraEnv, agent).
+		WithObjects(pool, ms, machine, infraEnv, agent).
 		WithStatusSubresource(pool).
 		Build()
 
@@ -688,7 +718,7 @@ func TestReconcileAdoptsInventoryHostnameForCandidateAgent(t *testing.T) {
 	}
 }
 
-func TestRequestsForMachineSetChangeFindsMatchingPool(t *testing.T) {
+func TestRequestsForAgentMachineChangeFindsMatchingPool(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -708,7 +738,7 @@ func TestRequestsForMachineSetChangeFindsMatchingPool(t *testing.T) {
 		Build()
 
 	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
-	reqs := reconciler.requestsForMachineSetChange(ctx, ms)
+	reqs := reconciler.requestsForControlPlaneObjectChange(ctx, ms)
 	if len(reqs) != 1 {
 		t.Fatalf("requests = %#v, want one request", reqs)
 	}
@@ -745,7 +775,7 @@ func TestRequestsForAgentChangeFindsMatchingPool(t *testing.T) {
 	}
 }
 
-func TestReconcileDeletesExcessUnboundAgents(t *testing.T) {
+func TestReconcileKeepsUnboundAgentsWithoutDeletedMachine(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -792,11 +822,10 @@ func TestReconcileDeletesExcessUnboundAgents(t *testing.T) {
 	}
 
 	for _, name := range []string{excessAgent1.GetName(), excessAgent2.GetName()} {
-		var deleted unstructured.Unstructured
-		deleted.SetGroupVersionKind(agentGVK)
-		err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: name}, &deleted)
-		if err == nil {
-			t.Fatalf("excess Agent %s still exists", name)
+		var retained unstructured.Unstructured
+		retained.SetGroupVersionKind(agentGVK)
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: name}, &retained); err != nil {
+			t.Fatalf("unbound Agent %s should be retained without deleted Machine: %v", name, err)
 		}
 	}
 	var retained unstructured.Unstructured
@@ -950,13 +979,34 @@ func reconcileTestPool() *agentforgev1alpha1.VsphereAgentPool {
 
 func testMachineSet(namespace, name string, replicas int64, nodePool string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{Object: map[string]any{
-		testAPIVersionKey: "cluster.x-k8s.io/v1beta1",
-		testKindKey:       "MachineSet",
-		"spec": map[string]any{
-			"replicas": replicas,
+		testAPIVersionKey: "capi-provider.agent-install.openshift.io/v1beta1",
+		testKindKey:       "AgentMachine",
+		"status": map[string]any{
+			"conditions": []any{
+				map[string]any{"type": conditionReady, "status": string(metav1.ConditionFalse), "reason": "NoSuitableAgents"},
+			},
 		},
 	}}
-	obj.SetGroupVersionKind(machineSetGVK)
+	obj.SetGroupVersionKind(agentMachineGVK)
+	obj.SetNamespace(namespace)
+	obj.SetName(name)
+	obj.SetAnnotations(map[string]string{nodePoolAnnotation: nodePool})
+	_ = replicas
+	return obj
+}
+
+func testMachine(namespace, name, nodePool string, deleting bool) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		testAPIVersionKey: "cluster.x-k8s.io/v1beta1",
+		testKindKey:       "Machine",
+		"status": map[string]any{
+			"phase": "Running",
+		},
+	}}
+	if deleting {
+		obj.Object["status"] = map[string]any{"phase": "Deleting"}
+	}
+	obj.SetGroupVersionKind(machineGVK)
 	obj.SetNamespace(namespace)
 	obj.SetName(name)
 	obj.SetAnnotations(map[string]string{nodePoolAnnotation: nodePool})
@@ -1035,6 +1085,10 @@ func findCondition(conditions []metav1.Condition, conditionType string) *metav1.
 		}
 	}
 	return nil
+}
+
+func testMachineRef(name string) *corev1.ObjectReference {
+	return &corev1.ObjectReference{Name: name}
 }
 
 func controlPlaneNamespaceIndexFunc(o client.Object) []string {

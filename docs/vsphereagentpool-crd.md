@@ -2,7 +2,7 @@
 
 `VsphereAgentPool` is a namespace-scoped bridge between one Hypershift Agent `NodePool` and vSphere VM inventory.
 
-The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI `MachineSet`; this operator reacts by ensuring enough matching Assisted Installer `Agent` objects exist.
+HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` objects that report `Ready=False` with `Reason=NoSuitableAgents` by ensuring enough matching Assisted Installer `Agent` objects can exist.
 
 ## Spec Fields
 
@@ -12,8 +12,8 @@ The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI
 | `spec.hostedClusterRef.name` | yes | HostedCluster name in the same namespace as this CR. |
 | `spec.nodePoolRef.name` | yes | Hypershift NodePool name in the same namespace as this CR. |
 | `spec.infraEnvRef.name` | yes | Assisted Installer InfraEnv name in the same namespace. The InfraEnv must expose `status.isoDownloadURL`. |
-| `spec.controlPlaneNamespace` | yes | Hosted control plane namespace containing the CAPI MachineSet, for example `demo-demo`. |
-| `spec.machineSetName` | no | Optional explicit CAPI MachineSet name. If omitted, the operator discovers it by `hypershift.openshift.io/nodePool=<namespace>/<nodePool>`. |
+| `spec.controlPlaneNamespace` | yes | Hosted control plane namespace containing the CAPI `AgentMachine` and `Machine` objects, for example `demo-demo`. |
+| `spec.machineSetName` | no | Deprecated. MachineSets are no longer used for reconciliation. |
 | `spec.vsphere.credentialsSecretRef.name` | yes | Secret containing vSphere `server`, `username`, and `password`. Optional key: `insecure`. |
 | `spec.vsphere.credentialsSecretRef.namespace` | no | Secret namespace. Defaults to the CR namespace. |
 | `spec.vsphere.datacenter` | no | vSphere datacenter name. Defaults to `dc1`. |
@@ -36,7 +36,7 @@ The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI
 | `spec.agent.role` | no | Value for `hypershift.openshift.io/nodepool-role`. Defaults to `worker`. |
 | `spec.agent.labels` | yes | Labels required on discovered Agents. These should match the NodePool Agent selector. |
 | `spec.agent.approve` | no | When true, patch matching Agents with `spec.approved=true`. Defaults to `true`. |
-| `spec.scaling.bufferAgents` | no | Extra unbound matching Agents to keep beyond MachineSet demand. Defaults to `0`. |
+| `spec.scaling.bufferAgents` | no | Extra unbound matching Agents to keep beyond current AgentMachine demand. Defaults to `0`. |
 | `spec.scaling.maxProvisioning` | no | Max VMs to create in one reconcile. Defaults to `3`. |
 | `spec.scaling.deletePolicy` | no | `OwnedOnly` destroys only VMs recorded in status; `Retain` never destroys VMs. Defaults to `OwnedOnly`. |
 | `spec.iso.checkInterval` | no | How often to download and hash the InfraEnv ISO to detect changed bytes behind a stable URL. Defaults to `10m`. |
@@ -48,16 +48,17 @@ The hosted cluster autoscaler remains authoritative. It scales the rendered CAPI
 | Field | Description |
 | --- | --- |
 | `status.observedGeneration` | Latest CR generation reconciled. |
-| `status.observedMachineSet` | CAPI MachineSet being followed. |
-| `status.machineSetReplicas` | Raw `MachineSet.spec.replicas`. |
-| `status.desiredReplicas` | MachineSet replicas plus `bufferAgents`. |
+| `status.observedMachineSet` | Deprecated and no longer populated. |
+| `status.machineSetReplicas` | Deprecated and no longer populated. |
+| `status.waitingAgentMachines` | AgentMachines in the hosted control plane namespace that currently report `Ready=False` and `Reason=NoSuitableAgents`. |
+| `status.desiredReplicas` | Current matching Agent count plus unsatisfied AgentMachine demand and `bufferAgents`. |
 | `status.matchingAgents` | Agents in the CR namespace matching `spec.agent.labels`. |
 | `status.boundAgents` | Matching Agents already bound to CAPI/HostedCluster. |
 | `status.availableAgents` | Matching Agents not yet bound. |
 | `status.ownedVMs` | VMs created or tracked by this CR, including MAC, AgentRef, MachineRef, and phase. Phases include `Provisioning`, `Available`, `Bound`, `Released`, and `Orphaned`; orphaned VMs are tracked VMs whose Agent did not appear within the discovery grace period and are eligible for cleanup when `deletePolicy` is `OwnedOnly`. |
 | `status.iso` | Active cached ISO URL, path, SHA256 digest, size, timestamps, force-refresh token, and retained history. |
 | `status.plannedActions` | Latest planned or applied `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions. |
-| `status.conditions` | `Ready`, `DryRun`, `MachineSetFound`, `InfraEnvAvailable`, `ISOReady`, `CapacitySatisfied`, and `VsphereReady`. |
+| `status.conditions` | `Ready`, `DryRun`, `AgentMachineDemandFound`, `InfraEnvAvailable`, `ISOReady`, `CapacitySatisfied`, and `VsphereReady`. |
 
 The ISO cache is content-addressed as `<pathPrefix>/<sha256>.iso`. The operator
 downloads and hashes the InfraEnv ISO when the cache is stale, reuses the active
