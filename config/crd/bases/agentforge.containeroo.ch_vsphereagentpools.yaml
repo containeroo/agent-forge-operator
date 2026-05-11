@@ -606,7 +606,9 @@ spec:
                       description: Name is the vSphere VM name.
                       type: string
                     phase:
-                      description: Phase is the current bridge view of the VM lifecycle.
+                      description: |-
+                        Phase is the current bridge view of the VM lifecycle, such as
+                        Provisioning, Available, Bound, Released, or Orphaned.
                       type: string
                     reason:
                       description: Reason provides a short machine-readable explanation

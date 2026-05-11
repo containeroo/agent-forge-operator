@@ -33,6 +33,7 @@ const (
 	deletePolicyRetain    = "Retain"
 	phaseAvailable        = "Available"
 	phaseBound            = "Bound"
+	phaseOrphaned         = "Orphaned"
 	phaseProvisioning     = "Provisioning"
 	phaseReleased         = "Released"
 	defaultAgentRole      = "worker"
@@ -127,11 +128,24 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 
 	excess := matchingAgents - desiredReplicas
 	vmsToDelete, agentsToDelete := deletionTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, excess, deletePolicy)
+	pendingSurplus := matchingAgents + pendingOwnedVMs - desiredReplicas
+	if pendingSurplus < 0 {
+		pendingSurplus = 0
+	}
+	vmsToDelete = append(vmsToDelete, surplusProvisioningDeletionTargets(snapshot.OwnedVMs, vmsToDelete, pendingSurplus, deletePolicy)...)
+	vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete, deletePolicy)...)
 	for _, vm := range vmsToDelete {
+		reason := fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess)
+		switch vm.Phase {
+		case phaseOrphaned:
+			reason = "Owned VM no longer has a matching Agent after the discovery grace period"
+		case phaseProvisioning:
+			reason = "Owned provisioning VM is no longer needed because matching Agents already satisfy demand"
+		}
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionDeleteVM,
 			Name:   vm.Name,
-			Reason: fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess),
+			Reason: reason,
 			DryRun: pool.Spec.DryRun,
 		})
 	}
@@ -268,6 +282,60 @@ func deletionTargets(vms []agentforgev1alpha1.OwnedVMStatus, agents []AgentInfo,
 		selectedAgentNames[agent.Name] = struct{}{}
 	}
 	return selectedVMs, selectedAgents
+}
+
+func surplusProvisioningDeletionTargets(vms, alreadySelected []agentforgev1alpha1.OwnedVMStatus, surplus int32, deletePolicy string) []agentforgev1alpha1.OwnedVMStatus {
+	if surplus <= 0 || deletePolicy != deletePolicyOwnedOnly {
+		return nil
+	}
+	selected := selectedVMNames(alreadySelected)
+
+	var targets []agentforgev1alpha1.OwnedVMStatus
+	for _, vm := range vms {
+		if int32(len(targets)) >= surplus { //nolint:gosec // bounded by slice length.
+			break
+		}
+		if vm.Name == "" || vm.Phase != phaseProvisioning {
+			continue
+		}
+		if vm.AgentRef != nil && vm.AgentRef.Name != "" {
+			continue
+		}
+		if _, exists := selected[vm.Name]; exists {
+			continue
+		}
+		targets = append(targets, vm)
+	}
+	return targets
+}
+
+func orphanedDeletionTargets(vms, alreadySelected []agentforgev1alpha1.OwnedVMStatus, deletePolicy string) []agentforgev1alpha1.OwnedVMStatus {
+	if deletePolicy != deletePolicyOwnedOnly {
+		return nil
+	}
+	selected := selectedVMNames(alreadySelected)
+
+	var targets []agentforgev1alpha1.OwnedVMStatus
+	for _, vm := range vms {
+		if vm.Name == "" || vm.Phase != phaseOrphaned {
+			continue
+		}
+		if _, exists := selected[vm.Name]; exists {
+			continue
+		}
+		targets = append(targets, vm)
+	}
+	return targets
+}
+
+func selectedVMNames(vms []agentforgev1alpha1.OwnedVMStatus) map[string]struct{} {
+	selected := map[string]struct{}{}
+	for _, vm := range vms {
+		if vm.Name != "" {
+			selected[vm.Name] = struct{}{}
+		}
+	}
+	return selected
 }
 
 func minInt(a int32, b int32) int {

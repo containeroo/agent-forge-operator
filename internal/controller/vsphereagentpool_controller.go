@@ -49,7 +49,8 @@ import (
 const (
 	finalizerName = "agentforge.containeroo.ch/vsphere-agent-pool"
 
-	forceISORefreshAnnotation = "agentforge.containeroo.ch/force-iso-refresh"
+	forceISORefreshAnnotation  = "agentforge.containeroo.ch/force-iso-refresh"
+	orphanedOwnedVMGracePeriod = 30 * time.Minute
 
 	nodePoolAnnotation = "hypershift.openshift.io/nodePool"
 	roleLabelKey       = "hypershift.openshift.io/nodepool-role"
@@ -163,6 +164,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		log.Error(err, "apply plan failed", "retryAfter", 30*time.Second)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+	refreshPlanOwnedVMCounts(&plan, &pool)
 
 	r.recordPlan(&pool, plan, "PlanApplied")
 	setPlanConditions(&pool, plan, false, "")
@@ -171,6 +173,10 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	return ctrl.Result{RequeueAfter: time.Minute}, nil
+}
+
+func refreshPlanOwnedVMCounts(plan *PoolPlan, pool *agentforgev1alpha1.VsphereAgentPool) {
+	plan.PendingOwnedVMs = countPendingOwnedVMs(pool.Status.OwnedVMs)
 }
 
 func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
@@ -495,7 +501,11 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		if !matched {
 			vm.AgentRef = nil
 			vm.MachineRef = nil
-			setOwnedVMPhase(&vm, phaseProvisioning, "AgentNotDiscovered")
+			if ownedVMDiscoveryExpired(vm, time.Now()) {
+				setOwnedVMPhase(&vm, phaseOrphaned, "AgentDiscoveryExpired")
+			} else {
+				setOwnedVMPhase(&vm, phaseProvisioning, "AgentNotDiscovered")
+			}
 			vms = append(vms, vm)
 			continue
 		}
@@ -521,6 +531,16 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		knownVMNames[hostname] = struct{}{}
 	}
 	return vms
+}
+
+func ownedVMDiscoveryExpired(vm agentforgev1alpha1.OwnedVMStatus, now time.Time) bool {
+	if vm.Phase == phaseOrphaned {
+		return true
+	}
+	if vm.Phase != phaseProvisioning || vm.Reason != "AgentNotDiscovered" || vm.LastTransitionTime.IsZero() {
+		return false
+	}
+	return !now.Before(vm.LastTransitionTime.Time.Add(orphanedOwnedVMGracePeriod))
 }
 
 func markOwnedVMAvailable(pool *agentforgev1alpha1.VsphereAgentPool, vms []agentforgev1alpha1.OwnedVMStatus, hostname, agentName string) []agentforgev1alpha1.OwnedVMStatus {

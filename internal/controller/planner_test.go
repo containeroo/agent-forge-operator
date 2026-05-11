@@ -101,6 +101,72 @@ func TestBuildPlanCountsOwnedProvisioningVMsAsPendingCapacity(t *testing.T) {
 	}
 }
 
+func TestBuildPlanDeletesOrphanedOwnedVMsWithoutExcessAgents(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MachineSetReplicas: 3,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "bound-vm-1", Phase: phaseBound, AgentRef: testAgentRef(testAgent1)},
+			{Name: "orphaned-vm-1", Phase: phaseOrphaned},
+			{Name: "orphaned-vm-2", Phase: phaseOrphaned},
+		},
+	})
+
+	if plan.PendingOwnedVMs != 0 {
+		t.Fatalf("PendingOwnedVMs = %d, want 0 for orphaned VMs", plan.PendingOwnedVMs)
+	}
+	if plan.VMsToCreate != 0 {
+		t.Fatalf("VMsToCreate = %d, want 0 because matching Agents satisfy demand", plan.VMsToCreate)
+	}
+	if len(plan.VMsToDelete) != 2 {
+		t.Fatalf("VMsToDelete = %d, want 2 orphaned VMs", len(plan.VMsToDelete))
+	}
+	if plan.VMsToDelete[0].Name != "orphaned-vm-1" || plan.VMsToDelete[1].Name != "orphaned-vm-2" {
+		t.Fatalf("VMsToDelete = %#v, want orphaned VMs", plan.VMsToDelete)
+	}
+	if len(plan.Actions) != 2 || plan.Actions[0].Type != actionDeleteVM || plan.Actions[1].Type != actionDeleteVM {
+		t.Fatalf("actions = %#v, want two DeleteVM actions", plan.Actions)
+	}
+}
+
+func TestBuildPlanDeletesSurplusProvisioningVMsWhenAgentsSatisfyDemand(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MachineSetReplicas: 3,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "pending-vm-1", Phase: phaseProvisioning},
+			{Name: "pending-vm-2", Phase: phaseProvisioning},
+		},
+	})
+
+	if plan.VMsToCreate != 0 {
+		t.Fatalf("VMsToCreate = %d, want 0 because matching Agents satisfy demand", plan.VMsToCreate)
+	}
+	if plan.PendingOwnedVMs != 2 {
+		t.Fatalf("PendingOwnedVMs = %d, want 2 before applying cleanup", plan.PendingOwnedVMs)
+	}
+	if len(plan.VMsToDelete) != 2 {
+		t.Fatalf("VMsToDelete = %d, want 2 surplus provisioning VMs", len(plan.VMsToDelete))
+	}
+	if plan.VMsToDelete[0].Name != "pending-vm-1" || plan.VMsToDelete[1].Name != "pending-vm-2" {
+		t.Fatalf("VMsToDelete = %#v, want surplus provisioning VMs", plan.VMsToDelete)
+	}
+}
+
 func TestBuildPlanCreatesOnlyRemainingDeficitAfterOwnedProvisioningVMs(t *testing.T) {
 	pool := testPool(false)
 	pool.Spec.Scaling.MaxProvisioning = 3

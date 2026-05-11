@@ -285,7 +285,8 @@ type OwnedVMStatus struct {
 	// +optional
 	MachineRef *corev1.ObjectReference `json:"machineRef,omitempty"`
 
-	// Phase is the current bridge view of the VM lifecycle.
+	// Phase is the current bridge view of the VM lifecycle, such as
+	// Provisioning, Available, Bound, Released, or Orphaned.
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
