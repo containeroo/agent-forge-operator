@@ -55,7 +55,7 @@ HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` 
 | `status.matchingAgents` | Agents in the CR namespace matching `spec.agent.labels`. |
 | `status.boundAgents` | Matching Agents already bound to CAPI/HostedCluster. |
 | `status.availableAgents` | Matching Agents not yet bound. |
-| `status.ownedVMs` | VMs created or tracked by this CR, including MAC, AgentRef, MachineRef, and phase. Phases include `Provisioning`, `Available`, `Bound`, `Released`, and `Orphaned`; orphaned VMs are tracked VMs whose Agent did not appear within the discovery grace period and are eligible for cleanup when `deletePolicy` is `OwnedOnly`. |
+| `status.ownedVMs` | VMs created or tracked by this CR, including vSphere BIOS UUID, instance UUID, primary MAC, AgentRef, MachineRef, and phase. The BIOS UUID and MAC are used to match discovered Agents to the VM that actually booted them before any hostname fallback. Phases include `Provisioning`, `Available`, `Bound`, `Released`, and `Orphaned`; orphaned VMs are tracked VMs whose Agent did not appear within the discovery grace period and are eligible for cleanup when `deletePolicy` is `OwnedOnly`. |
 | `status.iso` | Active cached ISO URL, path, SHA256 digest, size, timestamps, force-refresh token, and retained history. |
 | `status.plannedActions` | Latest planned or applied `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions. |
 | `status.conditions` | `Ready`, `DryRun`, `AgentMachineDemandFound`, `InfraEnvAvailable`, `ISOReady`, `CapacitySatisfied`, and `VsphereReady`. |
@@ -70,4 +70,4 @@ refresh, set annotation
 
 ## Current Implementation Note
 
-The controller includes the CRD, planner, status/condition/event handling, dry-run behavior, Agent patching, ISO cache reconciliation, and an injectable vSphere provider interface with unit tests. The default provider uses `govc`, which is included in the manager image, to upload cached InfraEnv ISOs, create/power-on VMs, destroy owned VMs during cleanup or scale-down, and prune old ISO objects. For local development outside the image, set `GOVC_PATH` if `govc` is not at `/usr/local/bin/govc`.
+The controller includes the CRD, planner, status/condition/event handling, dry-run behavior, Agent patching, ISO cache reconciliation, and an injectable vSphere provider interface with unit tests. The default provider uses `govc`, which is included in the manager image, to upload cached InfraEnv ISOs, create/power-on VMs, read VM identity after creation, destroy owned VMs during cleanup or scale-down, and prune old ISO objects. For local development outside the image, set `GOVC_PATH` if `govc` is not at `/usr/local/bin/govc`.

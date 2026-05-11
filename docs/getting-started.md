@@ -210,6 +210,9 @@ Useful status fields:
 | `status.desiredReplicas`      | Observed AgentMachine count plus `spec.scaling.bufferAgents`.                                              |
 | `status.matchingAgents`       | Agents that already match `spec.agent.labels`.                                                             |
 | `status.availableAgents`      | Matching Agents that are not yet bound to CAPI.                                                            |
+| `status.ownedVMs[*].biosUUID` | vSphere BIOS UUID used to match discovered Agents to the VM that actually booted them.                     |
+| `status.ownedVMs[*].macAddress` | Primary VM NIC MAC used as a fallback Agent-to-VM identity match.                                        |
+| `status.ownedVMs[*].machineRef` | CAPI Machine paired with a bound or deleting VM. It is retained during Machine deletion until cleanup.    |
 | `status.iso.path`             | Active content-addressed ISO datastore path used for new VMs.                                              |
 | `status.iso.sha256`           | SHA256 digest of the active InfraEnv ISO bytes.                                                            |
 | `status.iso.checkedAt`        | Last time the operator downloaded and hashed the ISO.                                                      |
@@ -236,8 +239,13 @@ The operator can now:
 - Upload a content-addressed ISO object only when the bytes changed or the datastore object is missing.
 - Create VMs when AgentMachines report `NoSuitableAgents` and demand exceeds
   available matching Agents.
+- Record created VM identity from vSphere, including BIOS UUID, instance UUID,
+  and primary MAC address.
 - Power on created VMs.
-- Patch matching Agents with labels, role, and approval when configured.
+- Match discovered Agents to owned VMs by BIOS UUID or MAC before assigning the
+  Agent hostname.
+- Patch matching Agents with labels, role, approval, and the VM-name hostname
+  when configured.
 - Delete owned VMs and stale unbound Agents during scale-down when `deletePolicy` is `OwnedOnly`.
 
 Force an immediate ISO refresh without changing the spec:
@@ -290,6 +298,21 @@ No Agents match:
 kubectl -n demo get agents -o yaml
 kubectl -n demo get vsphereagentpool demo-worker -o jsonpath='{.status.matchingAgents}{"\n"}'
 ```
+
+VM names, Agent hostnames, or identities do not match:
+
+```sh
+kubectl -n demo get vsphereagentpool demo-worker \
+  -o jsonpath='{range .status.ownedVMs[*]}{.name}{"\t"}{.biosUUID}{"\t"}{.macAddress}{"\t"}{.agentRef.name}{"\n"}{end}'
+
+kubectl -n demo get agents.agent-install.openshift.io \
+  -o custom-columns=NAME:.metadata.name,HOST:.spec.hostname,BIOS:.status.inventory.systemVendor.serialNumber,MAC:.status.inventory.interfaces[0].macAddress
+```
+
+The VM name in `status.ownedVMs[*].name` should match the Agent
+`spec.hostname`. The BIOS UUID and MAC address should describe the same vSphere
+VM. New VMs record this identity immediately after creation; adopted VMs get it
+from the Agent inventory.
 
 vSphere errors:
 
