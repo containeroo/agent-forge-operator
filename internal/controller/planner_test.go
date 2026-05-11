@@ -59,9 +59,9 @@ func TestBuildPlanIncludesBufferAgents(t *testing.T) {
 	plan := buildPlan(pool, PoolSnapshot{
 		MachineSetReplicas: 3,
 		MatchingAgents: []AgentInfo{
-			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
-			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
-			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
 		},
 	})
 
@@ -164,6 +164,88 @@ func TestBuildPlanDeletesSurplusProvisioningVMsWhenAgentsSatisfyDemand(t *testin
 	}
 	if plan.VMsToDelete[0].Name != "pending-vm-1" || plan.VMsToDelete[1].Name != "pending-vm-2" {
 		t.Fatalf("VMsToDelete = %#v, want surplus provisioning VMs", plan.VMsToDelete)
+	}
+}
+
+func TestBuildPlanDoesNotDeleteProvisioningVMsWhilePatchingNewAgents(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MachineSetReplicas: 7,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
+			{Name: "new-agent-1", Bound: false, Approved: false, SpecRole: "", RoleLabel: testWorkerRole},
+			{Name: "new-agent-2", Bound: false, Approved: false, SpecRole: "", RoleLabel: testWorkerRole},
+			{Name: "new-agent-3", Bound: false, Approved: false, SpecRole: "", RoleLabel: testWorkerRole},
+			{Name: "new-agent-4", Bound: false, Approved: false, SpecRole: "", RoleLabel: testWorkerRole},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "pending-vm-1", Phase: phaseProvisioning},
+			{Name: "pending-vm-2", Phase: phaseProvisioning},
+			{Name: "pending-vm-3", Phase: phaseProvisioning},
+			{Name: "pending-vm-4", Phase: phaseProvisioning},
+		},
+	})
+
+	if len(plan.AgentsToPatch) != 4 {
+		t.Fatalf("AgentsToPatch = %d, want 4 new Agents", len(plan.AgentsToPatch))
+	}
+	if len(plan.VMsToDelete) != 0 {
+		t.Fatalf("VMsToDelete = %#v, want no VM deletes while new Agents still need their VMs", plan.VMsToDelete)
+	}
+}
+
+func TestBuildPlanDoesNotDeleteUnboundAgentsDuringScaleUp(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MachineSetReplicas: 7,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
+			{Name: testAgent3, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
+			{Name: "new-agent-1", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "new-agent-1"},
+			{Name: "new-agent-2", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "new-agent-2"},
+			{Name: "new-agent-3", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "new-agent-3"},
+			{Name: "new-agent-4", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "new-agent-4"},
+			{Name: "new-agent-5", Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: "new-agent-5"},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "new-agent-1", Phase: phaseAvailable, AgentRef: testAgentRef("new-agent-1")},
+			{Name: "new-agent-2", Phase: phaseAvailable, AgentRef: testAgentRef("new-agent-2")},
+			{Name: "new-agent-3", Phase: phaseAvailable, AgentRef: testAgentRef("new-agent-3")},
+			{Name: "new-agent-4", Phase: phaseAvailable, AgentRef: testAgentRef("new-agent-4")},
+			{Name: "new-agent-5", Phase: phaseAvailable, AgentRef: testAgentRef("new-agent-5")},
+		},
+	})
+
+	if len(plan.VMsToDelete) != 0 || len(plan.AgentsToDelete) != 0 {
+		t.Fatalf("delete targets = VMs %#v Agents %#v, want no cleanup while MachineSet is still scaling up", plan.VMsToDelete, plan.AgentsToDelete)
+	}
+}
+
+func TestBuildPlanDoesNotDeleteOrphanedVMsDuringScaleUp(t *testing.T) {
+	pool := testPool(false)
+	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MachineSetReplicas: 3,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent2},
+			{Name: testAgent3, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent3},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "orphaned-vm", Phase: phaseOrphaned},
+		},
+	})
+
+	if len(plan.VMsToDelete) != 0 {
+		t.Fatalf("VMsToDelete = %#v, want no orphan cleanup while MachineSet is still scaling up", plan.VMsToDelete)
 	}
 }
 
@@ -273,7 +355,7 @@ func TestBuildPlanDeletesExcessUnboundAgents(t *testing.T) {
 	}
 }
 
-func TestBuildPlanPrefersReleasedVMsForDeletion(t *testing.T) {
+func TestBuildPlanDoesNotDeleteReleasedVMsDuringScaleUp(t *testing.T) {
 	pool := testPool(false)
 	pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
 
@@ -290,11 +372,8 @@ func TestBuildPlanPrefersReleasedVMsForDeletion(t *testing.T) {
 		},
 	})
 
-	if len(plan.VMsToDelete) != 1 {
-		t.Fatalf("VMsToDelete = %d, want 1", len(plan.VMsToDelete))
-	}
-	if plan.VMsToDelete[0].Name != testAgent3 {
-		t.Fatalf("deleted VM = %s, want released VM %s", plan.VMsToDelete[0].Name, testAgent3)
+	if len(plan.VMsToDelete) != 0 || len(plan.AgentsToDelete) != 0 {
+		t.Fatalf("delete targets = VMs %#v Agents %#v, want no cleanup while MachineSet is still scaling up", plan.VMsToDelete, plan.AgentsToDelete)
 	}
 }
 

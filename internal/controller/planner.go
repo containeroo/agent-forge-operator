@@ -127,27 +127,11 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	}
 
 	excess := matchingAgents - desiredReplicas
-	vmsToDelete, agentsToDelete := deletionTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, excess, deletePolicy)
-	pendingSurplus := matchingAgents + pendingOwnedVMs - desiredReplicas
-	if pendingSurplus < 0 {
-		pendingSurplus = 0
-	}
-	vmsToDelete = append(vmsToDelete, surplusProvisioningDeletionTargets(snapshot.OwnedVMs, vmsToDelete, pendingSurplus, deletePolicy)...)
-	vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete, deletePolicy)...)
-	for _, vm := range vmsToDelete {
-		reason := fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess)
-		switch vm.Phase {
-		case phaseOrphaned:
-			reason = "Owned VM no longer has a matching Agent after the discovery grace period"
-		case phaseProvisioning:
-			reason = "Owned provisioning VM is no longer needed because matching Agents already satisfy demand"
-		}
-		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
-			Type:   actionDeleteVM,
-			Name:   vm.Name,
-			Reason: reason,
-			DryRun: pool.Spec.DryRun,
-		})
+	cleanupAllowed := boundAgents >= snapshot.MachineSetReplicas
+	var vmsToDelete []agentforgev1alpha1.OwnedVMStatus
+	var agentsToDelete []AgentInfo
+	if cleanupAllowed {
+		vmsToDelete, agentsToDelete = deletionTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, excess, deletePolicy)
 	}
 	for _, agent := range agentsToDelete {
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
@@ -178,6 +162,32 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 			Type:   actionPatchAgent,
 			Name:   agent.Name,
 			Reason: "Candidate Agent is not approved, named, or assigned to the requested role",
+			DryRun: pool.Spec.DryRun,
+		})
+	}
+
+	pendingSurplus := matchingAgents + pendingOwnedVMs - desiredReplicas
+	if pendingSurplus < 0 {
+		pendingSurplus = 0
+	}
+	if cleanupAllowed && len(agentsToPatch) == 0 {
+		vmsToDelete = append(vmsToDelete, surplusProvisioningDeletionTargets(snapshot.OwnedVMs, vmsToDelete, pendingSurplus, deletePolicy)...)
+	}
+	if cleanupAllowed {
+		vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete, deletePolicy)...)
+	}
+	for _, vm := range vmsToDelete {
+		reason := fmt.Sprintf("There are %d more matching Agents than desired and deletePolicy is OwnedOnly", excess)
+		switch vm.Phase {
+		case phaseOrphaned:
+			reason = "Owned VM no longer has a matching Agent and is eligible for cleanup"
+		case phaseProvisioning:
+			reason = "Owned provisioning VM is no longer needed because matching Agents already satisfy demand"
+		}
+		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
+			Type:   actionDeleteVM,
+			Name:   vm.Name,
+			Reason: reason,
 			DryRun: pool.Spec.DryRun,
 		})
 	}

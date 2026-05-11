@@ -426,6 +426,31 @@ func TestRefreshOwnedVMStatusesMarksExpiredUndiscoveredVMOrphaned(t *testing.T) 
 	}
 }
 
+func TestRefreshOwnedVMStatusesMarksMissingDiscoveredAgentOrphaned(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{
+			Name:               "demo-worker-gone",
+			Phase:              phaseAvailable,
+			Reason:             "AgentAvailable",
+			AgentRef:           testAgentRef("missing-agent"),
+			LastTransitionTime: metav1.Now(),
+		},
+	}
+
+	vms := refreshOwnedVMStatuses(pool, nil)
+
+	if len(vms) != 1 {
+		t.Fatalf("ownedVMs = %d, want 1", len(vms))
+	}
+	if vms[0].Phase != phaseOrphaned || vms[0].Reason != "AgentMissing" {
+		t.Fatalf("VM phase/reason = %s/%s, want Orphaned/AgentMissing", vms[0].Phase, vms[0].Reason)
+	}
+	if vms[0].AgentRef != nil {
+		t.Fatalf("agentRef = %#v, want nil after Agent disappeared", vms[0].AgentRef)
+	}
+}
+
 func TestReconcileDeletesSurplusProvisioningOwnedVMs(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()

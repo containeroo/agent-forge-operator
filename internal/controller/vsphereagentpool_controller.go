@@ -499,9 +499,12 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			agent, matched = byName[vm.AgentRef.Name]
 		}
 		if !matched {
+			hadDiscoveredAgent := vmHadDiscoveredAgent(vm)
 			vm.AgentRef = nil
 			vm.MachineRef = nil
-			if ownedVMDiscoveryExpired(vm, time.Now()) {
+			if hadDiscoveredAgent {
+				setOwnedVMPhase(&vm, phaseOrphaned, "AgentMissing")
+			} else if ownedVMDiscoveryExpired(vm, time.Now()) {
 				setOwnedVMPhase(&vm, phaseOrphaned, "AgentDiscoveryExpired")
 			} else {
 				setOwnedVMPhase(&vm, phaseProvisioning, "AgentNotDiscovered")
@@ -531,6 +534,13 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		knownVMNames[hostname] = struct{}{}
 	}
 	return vms
+}
+
+func vmHadDiscoveredAgent(vm agentforgev1alpha1.OwnedVMStatus) bool {
+	if vm.AgentRef != nil && vm.AgentRef.Name != "" {
+		return true
+	}
+	return vm.Phase == phaseAvailable || vm.Phase == phaseBound || vm.Phase == phaseReleased
 }
 
 func ownedVMDiscoveryExpired(vm agentforgev1alpha1.OwnedVMStatus, now time.Time) bool {
