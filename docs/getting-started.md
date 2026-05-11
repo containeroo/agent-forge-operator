@@ -20,12 +20,12 @@ You already have:
 
 The examples use:
 
-| Value                 | Meaning                                                        |
-| --------------------- | -------------------------------------------------------------- |
-| `demo`                | Hosted cluster namespace and HostedCluster name.               |
-| `demo-worker`         | NodePool name and `VsphereAgentPool` name.                     |
+| Value                 | Meaning                                                                    |
+| --------------------- | -------------------------------------------------------------------------- |
+| `demo`                | Hosted cluster namespace and HostedCluster name.                           |
+| `demo-worker`         | NodePool name and `VsphereAgentPool` name.                                 |
 | `demo-demo`           | Hosted control plane namespace containing CAPI AgentMachines and Machines. |
-| `vsphere-credentials` | Secret with vSphere credentials.                               |
+| `vsphere-credentials` | Secret with vSphere credentials.                                           |
 
 Adjust the names for your environment.
 
@@ -34,13 +34,13 @@ Adjust the names for your environment.
 Install CRDs from a release:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.8/crds.yaml
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.9/crds.yaml
 ```
 
 Deploy the controller:
 
 ```sh
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.8
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.9
 ```
 
 Check that the manager is running:
@@ -201,17 +201,17 @@ kubectl -n demo get vsphereagentpool demo-worker -o yaml
 
 Useful status fields:
 
-| Field                       | What to check                                                                                               |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `status.waitingAgentMachines` | AgentMachines currently reporting `Ready=False` and `Reason=NoSuitableAgents`.                           |
-| `status.desiredReplicas`      | Current matching Agent count plus unsatisfied AgentMachine demand and `spec.scaling.bufferAgents`.        |
-| `status.matchingAgents`     | Agents that already match `spec.agent.labels`.                                                              |
-| `status.availableAgents`    | Matching Agents that are not yet bound to CAPI.                                                             |
-| `status.iso.path`           | Active content-addressed ISO datastore path used for new VMs.                                               |
-| `status.iso.sha256`         | SHA256 digest of the active InfraEnv ISO bytes.                                                             |
-| `status.iso.checkedAt`      | Last time the operator downloaded and hashed the ISO.                                                       |
-| `status.plannedActions`     | Planned `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions.                             |
-| `status.conditions`         | Readiness, dry-run state, AgentMachine demand, InfraEnv availability, ISO cache state, and capacity state. |
+| Field                         | What to check                                                                                              |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `status.waitingAgentMachines` | AgentMachines currently reporting `Ready=False` and `Reason=NoSuitableAgents`.                             |
+| `status.desiredReplicas`      | Current matching Agent count plus unsatisfied AgentMachine demand and `spec.scaling.bufferAgents`.         |
+| `status.matchingAgents`       | Agents that already match `spec.agent.labels`.                                                             |
+| `status.availableAgents`      | Matching Agents that are not yet bound to CAPI.                                                            |
+| `status.iso.path`             | Active content-addressed ISO datastore path used for new VMs.                                              |
+| `status.iso.sha256`           | SHA256 digest of the active InfraEnv ISO bytes.                                                            |
+| `status.iso.checkedAt`        | Last time the operator downloaded and hashed the ISO.                                                      |
+| `status.plannedActions`       | Planned `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions.                            |
+| `status.conditions`           | Readiness, dry-run state, AgentMachine demand, InfraEnv availability, ISO cache state, and capacity state. |
 
 Check Events:
 
@@ -318,6 +318,6 @@ kubectl -n demo delete vsphereagentpool demo-worker
 Uninstall the operator:
 
 ```sh
-kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.8
-kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.8/crds.yaml
+kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.9
+kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.9/crds.yaml
 ```

@@ -106,15 +106,15 @@ still be removed.
 Install the latest release manifests:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.8/crds.yaml
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.8
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.9/crds.yaml
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.9
 ```
 
 The published manager images are:
 
 ```text
-ghcr.io/containeroo/agent-forge-operator:v0.0.8
-containeroo/agent-forge-operator:v0.0.8
+ghcr.io/containeroo/agent-forge-operator:v0.0.9
+containeroo/agent-forge-operator:v0.0.9
 ```
 
 For a local image build:
@@ -223,8 +223,8 @@ The controller uses `govc` for vSphere operations. The container image includes
 Releases are built by GoReleaser from pushed tags:
 
 ```sh
-git tag v0.0.8
-git push origin v0.0.8
+git tag v0.0.9
+git push origin v0.0.9
 ```
 
 The release workflow publishes multi-architecture images to GHCR and DockerHub
