@@ -123,15 +123,15 @@ stale Agent can still be removed.
 Install the latest release manifests:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.9/crds.yaml
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.9
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.10/crds.yaml
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.10
 ```
 
 The published manager images are:
 
 ```text
-ghcr.io/containeroo/agent-forge-operator:v0.0.9
-containeroo/agent-forge-operator:v0.0.9
+ghcr.io/containeroo/agent-forge-operator:v0.0.10
+containeroo/agent-forge-operator:v0.0.10
 ```
 
 For a local image build:
@@ -240,8 +240,8 @@ The controller uses `govc` for vSphere operations. The container image includes
 Releases are built by GoReleaser from pushed tags:
 
 ```sh
-git tag v0.0.9
-git push origin v0.0.9
+git tag v0.0.10
+git push origin v0.0.10
 ```
 
 The release workflow publishes multi-architecture images to GHCR and DockerHub

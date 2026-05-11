@@ -16,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 )
@@ -146,6 +147,55 @@ func TestReconcileReportsAgentMachineDemandCondition(t *testing.T) {
 	}
 	if condition.Status != metav1.ConditionTrue {
 		t.Fatalf("AgentMachineDemandFound status = %s, want True", condition.Status)
+	}
+}
+
+func TestReconcileMarksReadyFalseWhenInfraEnvUnavailable(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Status.Conditions = []metav1.Condition{{
+		Type:               conditionReady,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: pool.Generation,
+		Reason:             "PreviouslyReady",
+		Message:            "stale condition",
+	}}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	ready := findCondition(updated.Status.Conditions, conditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InfraEnvUnavailable" {
+		t.Fatalf("Ready condition = %#v, want InfraEnvUnavailable False", ready)
+	}
+	infraEnv := findCondition(updated.Status.Conditions, conditionInfraEnvAvailable)
+	if infraEnv == nil || infraEnv.Status != metav1.ConditionFalse {
+		t.Fatalf("InfraEnvAvailable condition = %#v, want False", infraEnv)
 	}
 }
 
@@ -821,6 +871,34 @@ func TestReconcileAdoptsInventoryHostnameForCandidateAgent(t *testing.T) {
 	}
 }
 
+func TestListMatchingAgentsSkipsForeignClusterDeployment(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	agent := testAgent(testNamespace, "foreign-agent", false, true)
+	if err := unstructured.SetNestedField(agent.Object, "other-cluster", "spec", "clusterDeploymentName", "name"); err != nil {
+		t.Fatal(err)
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(agent).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+	agents, err := reconciler.listMatchingAgents(ctx, pool)
+	if err != nil {
+		t.Fatalf("listMatchingAgents returned error: %v", err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("matching agents = %#v, want foreign ClusterDeployment Agent ignored", agents)
+	}
+}
+
 func TestRequestsForAgentMachineChangeFindsMatchingPool(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -875,6 +953,28 @@ func TestRequestsForAgentChangeFindsMatchingPool(t *testing.T) {
 	}
 	if reqs[0].NamespacedName != (types.NamespacedName{Namespace: testNamespace, Name: testNodePool}) {
 		t.Fatalf("request = %s, want demo/demo-worker", reqs[0].NamespacedName)
+	}
+}
+
+func TestAgentChangePredicateWatchesInventoryIdentity(t *testing.T) {
+	oldAgent := testCandidateAgent(testNamespace, "candidate-agent")
+	newAgent := oldAgent.DeepCopy()
+	setAgentInventoryHostname(t, newAgent, "demo-worker-c3p0")
+
+	if !agentChangePredicate().Update(event.UpdateEvent{ObjectOld: oldAgent, ObjectNew: newAgent}) {
+		t.Fatal("Agent inventory hostname change did not trigger reconcile")
+	}
+}
+
+func TestAgentMachineChangePredicateWatchesAssignment(t *testing.T) {
+	oldAgentMachine := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+	newAgentMachine := oldAgentMachine.DeepCopy()
+	if err := unstructured.SetNestedField(newAgentMachine.Object, "agent://agent-1", "spec", "providerID"); err != nil {
+		t.Fatal(err)
+	}
+
+	if !agentMachineChangePredicate().Update(event.UpdateEvent{ObjectOld: oldAgentMachine, ObjectNew: newAgentMachine}) {
+		t.Fatal("AgentMachine providerID assignment change did not trigger reconcile")
 	}
 }
 

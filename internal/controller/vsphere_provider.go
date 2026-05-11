@@ -31,11 +31,17 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
+)
+
+const (
+	govcCommandTimeout = 30 * time.Minute
+	isoDownloadTimeout = 30 * time.Minute
 )
 
 // VMCreateRequest carries per-reconcile VM creation details. Ordinal is only
@@ -134,23 +140,38 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 		"-m", strconv.Itoa(int(pool.Spec.Template.MemoryMiB)),
 		"-disk", fmt.Sprintf("%dG", pool.Spec.Template.DiskGiB),
 		"-disk.controller", pool.Spec.VSphere.SCSIType,
-		"-on=false",
-		name,
 	}
+	if pool.Spec.VSphere.DiskEagerlyScrub {
+		args = append(args, "-disk.eager")
+	}
+	args = append(args, "-on=false", name)
 	if err := p.run(ctx, args...); err != nil {
 		return agentforgev1alpha1.OwnedVMStatus{}, err
 	}
 
-	_ = p.run(ctx, "vm.change", "-vm", name, "-e", "disk.enableUUID=TRUE")
-	_ = p.run(ctx, "device.cdrom.add", "-vm", name)
+	cleanupPartialVM := func(cause error) (agentforgev1alpha1.OwnedVMStatus, error) {
+		vm := newOwnedVMStatus(name)
+		if err := p.DeleteVM(ctx, pool, vm); err != nil {
+			return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("%w; failed to clean up partially created VM %q: %v", cause, name, err)
+		}
+		return agentforgev1alpha1.OwnedVMStatus{}, cause
+	}
+	if err := p.run(ctx, "vm.change", "-vm", name, "-e", "disk.enableUUID=TRUE"); err != nil {
+		return cleanupPartialVM(err)
+	}
+	if err := p.run(ctx, "device.cdrom.add", "-vm", name); err != nil {
+		return cleanupPartialVM(err)
+	}
 	if err := p.run(ctx, "device.cdrom.insert", "-vm", name, "-ds", pool.Spec.VSphere.ISODatastore, req.ISOPath); err != nil {
-		return agentforgev1alpha1.OwnedVMStatus{}, err
+		return cleanupPartialVM(err)
 	}
 	for _, tag := range pool.Spec.VSphere.VMTags {
-		_ = p.run(ctx, "tags.attach", tag, name)
+		if err := p.run(ctx, "tags.attach", tag, name); err != nil {
+			return cleanupPartialVM(err)
+		}
 	}
 	if err := p.run(ctx, "vm.power", "-on", name); err != nil {
-		return agentforgev1alpha1.OwnedVMStatus{}, err
+		return cleanupPartialVM(err)
 	}
 
 	vm := newOwnedVMStatus(name)
@@ -182,8 +203,12 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 	}
 	isoPath := isoContentPath(pool, sha)
 
-	if exists, err := p.datastorePathExists(ctx, pool, isoPath); err == nil && exists {
+	exists, err := p.datastorePathExists(ctx, pool, isoPath)
+	if err == nil && exists {
 		return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: false}, nil
+	}
+	if err != nil && !isGovcDatastorePathNotFound(err) {
+		return ISOEnsureResult{}, err
 	}
 
 	if dir := filepath.Dir(isoPath); dir != "." && dir != "" {
@@ -236,7 +261,10 @@ func (p *govcVMProvider) run(ctx context.Context, args ...string) error {
 }
 
 func (p *govcVMProvider) runOutput(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, p.command, args...)
+	commandCtx, cancel := contextWithDefaultTimeout(ctx, govcCommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(commandCtx, p.command, args...)
 	cmd.Env = append(os.Environ(),
 		"HOME=/tmp",
 		"GOVC_PERSIST_SESSION=false",
@@ -247,9 +275,19 @@ func (p *govcVMProvider) runOutput(ctx context.Context, args ...string) ([]byte,
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if commandCtx.Err() != nil {
+			return nil, fmt.Errorf("govc %s failed: %w", strings.Join(args, " "), commandCtx.Err())
+		}
 		return nil, fmt.Errorf("govc %s failed: %w: %s", strings.Join(args, " "), err, sanitizeCommandOutput(string(output)))
 	}
 	return output, nil
+}
+
+func contextWithDefaultTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok || timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -283,13 +321,29 @@ func isGovcVMNotFound(err error) bool {
 	return strings.Contains(message, "no such vm") || strings.Contains(message, "vm ") && strings.Contains(message, " not found")
 }
 
+func isGovcDatastorePathNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such file") ||
+		strings.Contains(message, "not found") ||
+		strings.Contains(message, "no such object")
+}
+
 func downloadFileWithSHA256(ctx context.Context, url, path string) (string, int64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	downloadCtx, cancel := contextWithDefaultTimeout(ctx, isoDownloadTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", 0, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		if downloadCtx.Err() != nil {
+			return "", 0, fmt.Errorf("download %s failed: %w", url, downloadCtx.Err())
+		}
 		return "", 0, err
 	}
 	defer func() {
@@ -308,6 +362,9 @@ func downloadFileWithSHA256(ctx context.Context, url, path string) (string, int6
 	hash := sha256.New()
 	sizeBytes, err := io.Copy(io.MultiWriter(out, hash), resp.Body)
 	if err != nil {
+		if downloadCtx.Err() != nil {
+			return "", 0, fmt.Errorf("download %s failed: %w", url, downloadCtx.Err())
+		}
 		return "", 0, err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), sizeBytes, nil

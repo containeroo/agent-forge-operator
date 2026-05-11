@@ -64,6 +64,9 @@ exit 0
 	if strings.Contains(createArgs, "-ds workload-datastore-cluster") {
 		t.Fatalf("vm.create args = %q, must not pass datastore cluster through -ds", createArgs)
 	}
+	if strings.Contains(createArgs, "-disk.eager") {
+		t.Fatalf("vm.create args = %q, must not pass disk eager flag when diskEagerlyScrub=false", createArgs)
+	}
 	createFields := strings.Fields(createArgs)
 	vmName := createFields[len(createFields)-1]
 	if !agentHostnamePattern.MatchString(vmName) {
@@ -73,6 +76,52 @@ exit 0
 		!strings.Contains(string(logBytes), "-ds iso-datastore") ||
 		!strings.Contains(string(logBytes), "agent-forge/demo/demo-worker/cached.iso") {
 		t.Fatalf("cdrom insertion did not use iso datastore; calls:\n%s", string(logBytes))
+	}
+}
+
+func TestGovcCreateVMUsesDiskEagerFlagWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	pool := providerTestPool()
+	pool.Spec.VSphere.DiskEagerlyScrub = true
+	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err != nil {
+		t.Fatalf("CreateVM returned error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createArgs string
+	for _, line := range strings.Split(strings.TrimSpace(string(logBytes)), "\n") {
+		if strings.HasPrefix(line, "vm.create ") {
+			createArgs = line
+			break
+		}
+	}
+	if !strings.Contains(createArgs, "-disk.eager") {
+		t.Fatalf("vm.create args = %q, want disk eager flag", createArgs)
 	}
 }
 
@@ -128,6 +177,7 @@ func TestGovcEnsureISOUploadsContentAddressedPath(t *testing.T) {
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
 if [ "$1" = "datastore.ls" ]; then
+  echo "govc: file not found" >&2
   exit 1
 fi
 exit 0
@@ -171,6 +221,51 @@ exit 0
 	}
 	if !strings.Contains(string(logBytes), "datastore.upload") || !strings.Contains(string(logBytes), result.Path) {
 		t.Fatalf("upload was not called for content-addressed path; calls:\n%s", string(logBytes))
+	}
+}
+
+func TestGovcEnsureISOStopsOnDatastoreLookupErrors(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "datastore.ls" ]; then
+  echo "govc: permission denied" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	isoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("iso-v1"))
+	}))
+	defer isoServer.Close()
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	if _, err := provider.EnsureISO(ctx, providerTestPool(), ISOEnsureRequest{DownloadURL: isoServer.URL}); err == nil {
+		t.Fatal("EnsureISO succeeded despite datastore lookup failure")
+	}
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logBytes), "datastore.upload") {
+		t.Fatalf("unexpected upload after datastore lookup failure; calls:\n%s", string(logBytes))
 	}
 }
 
@@ -263,6 +358,47 @@ exit 0
 	args := strings.TrimSpace(string(logBytes))
 	if args != "vm.destroy -dc dc1 -vm.ipath /dc1/vm/demo/demo-worker-ab12" {
 		t.Fatalf("vm.destroy args = %q, want folder-qualified inventory path", args)
+	}
+}
+
+func TestGovcCreateVMCleansUpPartialVMOnConfigurationFailure(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "device.cdrom.insert" ]; then
+  echo "govc: cdrom insert failed" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	if _, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err == nil {
+		t.Fatal("CreateVM succeeded despite cdrom insert failure")
+	}
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := string(logBytes)
+	if !strings.Contains(calls, "vm.destroy -dc dc1 -vm.ipath /dc1/vm/demo/demo-worker-") {
+		t.Fatalf("partial VM was not destroyed after configuration failure; calls:\n%s", calls)
 	}
 }
 

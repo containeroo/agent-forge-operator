@@ -34,13 +34,13 @@ Adjust the names for your environment.
 Install CRDs from a release:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.9/crds.yaml
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.10/crds.yaml
 ```
 
 Deploy the controller:
 
 ```sh
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.9
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.10
 ```
 
 Check that the manager is running:
@@ -344,6 +344,6 @@ kubectl -n demo delete vsphereagentpool demo-worker
 Uninstall the operator:
 
 ```sh
-kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.9
-kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.9/crds.yaml
+kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.10
+kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.10/crds.yaml
 ```

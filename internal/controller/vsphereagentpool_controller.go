@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -122,6 +123,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	infraEnvAvailable, infraEnvISOURL, infraEnvMessage := r.infraEnvAvailable(ctx, &pool)
 	if !infraEnvAvailable {
+		r.setStatusError(&pool, conditionReady, "InfraEnvUnavailable", infraEnvMessage)
 		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 			Type:               conditionInfraEnvAvailable,
 			Status:             metav1.ConditionFalse,
@@ -475,10 +477,13 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 		inventoryHostname, _, _ := unstructured.NestedString(obj.Object, "status", "inventory", "hostname")
 		serialNumber, _, _ := unstructured.NestedString(obj.Object, "status", "inventory", "systemVendor", "serialNumber")
 		clusterName, _, _ := unstructured.NestedString(obj.Object, "spec", "clusterDeploymentName", "name")
+		if clusterName != "" && clusterName != pool.Spec.HostedClusterRef.Name {
+			continue
+		}
 		machineName := labels[agentMachineRefKey]
 		agents = append(agents, AgentInfo{
 			Name:              obj.GetName(),
-			Bound:             machineName != "" || clusterName == pool.Spec.HostedClusterRef.Name,
+			Bound:             machineName != "" || clusterName != "",
 			MachineName:       machineName,
 			Approved:          approved,
 			SpecRole:          specRole,
@@ -876,16 +881,17 @@ func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *age
 	desired.AvailableAgents = plan.AvailableAgents
 	desired.PlannedActions = plan.Actions
 
-	var current agentforgev1alpha1.VsphereAgentPool
-	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
-		return err
-	}
-	if reflect.DeepEqual(current.Status, desired) {
-		pool.Status = desired
-		return nil
-	}
-	current.Status = desired
-	if err := r.Status().Update(ctx, &current); err != nil {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var current agentforgev1alpha1.VsphereAgentPool
+		if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
+			return err
+		}
+		if reflect.DeepEqual(current.Status, desired) {
+			return nil
+		}
+		current.Status = desired
+		return r.Status().Update(ctx, &current)
+	}); err != nil {
 		return err
 	}
 	pool.Status = desired
@@ -908,7 +914,6 @@ func (r *VsphereAgentPoolReconciler) recordPlan(pool *agentforgev1alpha1.Vsphere
 		return
 	}
 	if len(plan.Actions) == 1 && plan.Actions[0].Type == actionNoop {
-		r.Recorder.Event(pool, corev1.EventTypeNormal, reason, plan.Actions[0].Reason)
 		return
 	}
 	r.Recorder.Eventf(pool, corev1.EventTypeNormal, reason, "planned %d action(s): %s", len(plan.Actions), summarizeActions(plan.Actions))
@@ -1328,9 +1333,31 @@ func agentChangePredicate() predicate.Predicate {
 			if !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()) {
 				return true
 			}
-			return !reflect.DeepEqual(e.ObjectOld.GetOwnerReferences(), e.ObjectNew.GetOwnerReferences())
+			if !reflect.DeepEqual(e.ObjectOld.GetOwnerReferences(), e.ObjectNew.GetOwnerReferences()) {
+				return true
+			}
+			oldObj, oldOK := e.ObjectOld.(*unstructured.Unstructured)
+			newObj, newOK := e.ObjectNew.(*unstructured.Unstructured)
+			if !oldOK || !newOK {
+				return false
+			}
+			return agentInventoryIdentityChanged(oldObj, newObj)
 		},
 	}
+}
+
+func agentInventoryIdentityChanged(oldObj, newObj *unstructured.Unstructured) bool {
+	for _, path := range [][]string{
+		{"status", "inventory", "hostname"},
+		{"status", "inventory", "systemVendor", "serialNumber"},
+	} {
+		oldValue, _, _ := unstructured.NestedString(oldObj.Object, path...)
+		newValue, _, _ := unstructured.NestedString(newObj.Object, path...)
+		if oldValue != newValue {
+			return true
+		}
+	}
+	return normalizeMAC(agentPrimaryMAC(oldObj)) != normalizeMAC(agentPrimaryMAC(newObj))
 }
 
 func agentMachineChangePredicate() predicate.Predicate {
@@ -1350,9 +1377,26 @@ func agentMachineChangePredicate() predicate.Predicate {
 			if !reflect.DeepEqual(oldObj.GetAnnotations(), newObj.GetAnnotations()) {
 				return true
 			}
-			return objectConditionStatusReasonChanged(oldObj, newObj, conditionReady)
+			if objectConditionStatusReasonChanged(oldObj, newObj, conditionReady) {
+				return true
+			}
+			return agentMachineAssignmentChanged(oldObj, newObj)
 		},
 	}
+}
+
+func agentMachineAssignmentChanged(oldObj, newObj *unstructured.Unstructured) bool {
+	for _, path := range [][]string{
+		{"status", "agentRef", "name"},
+		{"spec", "providerID"},
+	} {
+		oldValue, _, _ := unstructured.NestedString(oldObj.Object, path...)
+		newValue, _, _ := unstructured.NestedString(newObj.Object, path...)
+		if oldValue != newValue {
+			return true
+		}
+	}
+	return false
 }
 
 func objectConditionStatusReasonChanged(oldObj, newObj *unstructured.Unstructured, conditionType string) bool {
