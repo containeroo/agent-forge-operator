@@ -1,4 +1,4 @@
-apiVersion: agentforge.containeroo.ch/v1alpha1
+apiVersion: agent-forge.containeroo.ch/v1alpha1
 kind: VsphereAgentPool
 metadata:
   labels:

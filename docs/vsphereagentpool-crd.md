@@ -27,7 +27,6 @@ HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` 
 | `spec.vsphere.firmware` | no | VM firmware, `efi` or `bios`. Defaults to `efi`. |
 | `spec.vsphere.networkAdapterType` | no | NIC adapter type. Defaults to `vmxnet3`. |
 | `spec.vsphere.diskEagerlyScrub` | no | Enables eager disk scrubbing for the primary disk. Defaults to `false`. |
-| `spec.vsphere.isoPath` | no | Legacy datastore directory prefix for content-addressed ISO objects. Prefer `spec.iso.pathPrefix` for new configs. |
 | `spec.template.namePrefix` | no | Prefix for operator-created VM names. Defaults logically to `<hostedCluster>-<agent.role>`. |
 | `spec.template.numCPUs` | no | VM vCPU count. Defaults to `4`. |
 | `spec.template.memoryMiB` | no | VM memory in MiB. Defaults to `16384`. |
@@ -65,7 +64,7 @@ downloads and hashes the InfraEnv ISO when the cache is stale, reuses the active
 datastore object when the digest is unchanged, and uploads a new object when the
 bytes changed or the active datastore object is missing. To force an immediate
 refresh, set annotation
-`agentforge.containeroo.ch/force-iso-refresh=<unique-value>` on the
+`agent-forge.containeroo.ch/force-iso-refresh=<unique-value>` on the
 `VsphereAgentPool`.
 
 ## Current Implementation Note

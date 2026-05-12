@@ -18,6 +18,35 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - agent-forge.containeroo.ch
+  resources:
+  - vsphereagentpools
+  - vsphereagents
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agent-forge.containeroo.ch
+  resources:
+  - vsphereagentpools/finalizers
+  - vsphereagents/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - agent-forge.containeroo.ch
+  resources:
+  - vsphereagentpools/status
+  - vsphereagents/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
   - agent-install.openshift.io
   resources:
   - agents
@@ -28,32 +57,6 @@ rules:
   - list
   - patch
   - watch
-- apiGroups:
-  - agentforge.containeroo.ch
-  resources:
-  - vsphereagentpools
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - agentforge.containeroo.ch
-  resources:
-  - vsphereagentpools/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - agentforge.containeroo.ch
-  resources:
-  - vsphereagentpools/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - capi-provider.agent-install.openshift.io
   resources:

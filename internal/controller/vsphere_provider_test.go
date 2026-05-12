@@ -1,3 +1,4 @@
+//nolint:goconst
 package controller
 
 import (
@@ -160,9 +161,6 @@ exit 0
 	}
 	if vm.BIOSUUID != "423297c6-d72e-28bb-b279-1209c29ab72b" {
 		t.Fatalf("BIOSUUID = %q, want govc VM UUID", vm.BIOSUUID)
-	}
-	if vm.InstanceUUID != "503297c6-d72e-28bb-b279-1209c29ab72b" {
-		t.Fatalf("InstanceUUID = %q, want govc instance UUID", vm.InstanceUUID)
 	}
 	if vm.MACAddress != "00-50-56-aa-bb-cc" {
 		t.Fatalf("MACAddress = %q, want normalized VM MAC", vm.MACAddress)

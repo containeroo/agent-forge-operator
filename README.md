@@ -123,15 +123,15 @@ stale Agent can still be removed.
 Install the latest release manifests:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.10/crds.yaml
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.10
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.11/crds.yaml
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.11
 ```
 
 The published manager images are:
 
 ```text
-ghcr.io/containeroo/agent-forge-operator:v0.0.10
-containeroo/agent-forge-operator:v0.0.10
+ghcr.io/containeroo/agent-forge-operator:v0.0.11
+containeroo/agent-forge-operator:v0.0.11
 ```
 
 For a local image build:
@@ -153,7 +153,7 @@ For the complete CRD field contract and status model, see
 ## Example
 
 ```yaml
-apiVersion: agentforge.containeroo.ch/v1alpha1
+apiVersion: agent-forge.containeroo.ch/v1alpha1
 kind: VsphereAgentPool
 metadata:
   name: demo-worker
@@ -203,7 +203,7 @@ and hashes the ISO at `spec.iso.checkInterval`, uploads a new `<sha256>.iso`
 object only when the bytes changed or the datastore object is missing, and
 inserts the active `status.iso.path` into every new VM. To force an immediate
 refresh, annotate the CR with
-`agentforge.containeroo.ch/force-iso-refresh=<unique-value>`.
+`agent-forge.containeroo.ch/force-iso-refresh=<unique-value>`.
 
 ## Development
 
@@ -240,8 +240,8 @@ The controller uses `govc` for vSphere operations. The container image includes
 Releases are built by GoReleaser from pushed tags:
 
 ```sh
-git tag v0.0.10
-git push origin v0.0.10
+git tag v0.0.11
+git push origin v0.0.11
 ```
 
 The release workflow publishes multi-architecture images to GHCR and DockerHub

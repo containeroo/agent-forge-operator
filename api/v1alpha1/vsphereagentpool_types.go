@@ -107,12 +107,6 @@ type VspherePlacementSpec struct {
 	// DiskEagerlyScrub controls eager scrubbing for the primary disk.
 	// +optional
 	DiskEagerlyScrub bool `json:"diskEagerlyScrub,omitempty"`
-
-	// ISOPath is a legacy datastore directory prefix for content-addressed
-	// InfraEnv discovery ISO objects. Prefer spec.iso.pathPrefix for new
-	// configurations.
-	// +optional
-	ISOPath string `json:"isoPath,omitempty"`
 }
 
 // VMTemplateSpec describes the VM hardware profile.
@@ -257,17 +251,9 @@ type OwnedVMStatus struct {
 	// Name is the vSphere VM name.
 	Name string `json:"name"`
 
-	// MoRef is the vSphere Managed Object Reference value when known.
-	// +optional
-	MoRef string `json:"moRef,omitempty"`
-
 	// BIOSUUID is the VM BIOS UUID when known.
 	// +optional
 	BIOSUUID string `json:"biosUUID,omitempty"`
-
-	// InstanceUUID is the VM instance UUID when known.
-	// +optional
-	InstanceUUID string `json:"instanceUUID,omitempty"`
 
 	// MACAddress is the primary NIC MAC address normalized with hyphens.
 	// +optional

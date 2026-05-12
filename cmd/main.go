@@ -213,6 +213,21 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "VsphereAgentPool")
 		os.Exit(1)
 	}
+	if err := (&controller.AgentMachineReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AgentMachine")
+		os.Exit(1)
+	}
+	if err := (&controller.VsphereAgentReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+	}).SetupWithManager(ctx, mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VsphereAgent")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {

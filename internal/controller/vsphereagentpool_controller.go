@@ -48,9 +48,9 @@ import (
 )
 
 const (
-	finalizerName = "agentforge.containeroo.ch/vsphere-agent-pool"
+	finalizerName = "agent-forge.containeroo.ch/vsphere-agent-pool"
 
-	forceISORefreshAnnotation  = "agentforge.containeroo.ch/force-iso-refresh"
+	forceISORefreshAnnotation  = "agent-forge.containeroo.ch/force-iso-refresh"
 	orphanedOwnedVMGracePeriod = 30 * time.Minute
 
 	nodePoolAnnotation = "hypershift.openshift.io/nodePool"
@@ -64,8 +64,8 @@ const (
 var (
 	machineGVK      = schema.GroupVersionKind{Group: "cluster.x-k8s.io", Version: apiVersionV1Beta1, Kind: "Machine"}
 	agentMachineGVK = schema.GroupVersionKind{Group: "capi-provider.agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: "AgentMachine"}
-	infraEnvGVK     = schema.GroupVersionKind{Group: "agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: "InfraEnv"}
-	agentGVK        = schema.GroupVersionKind{Group: "agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: "Agent"}
+	infraEnvGVK     = schema.GroupVersionKind{Group: "agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: k8sKindInfraEnv}
+	agentGVK        = schema.GroupVersionKind{Group: "agent-install.openshift.io", Version: apiVersionV1Beta1, Kind: k8sKindAgent}
 )
 
 // VsphereAgentPoolReconciler reconciles a VsphereAgentPool object.
@@ -89,9 +89,10 @@ type AgentMachineDemand struct {
 	WithoutAgent int32
 }
 
-// +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agentforge.containeroo.ch,resources=vsphereagentpools/finalizers,verbs=update
+// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools/finalizers,verbs=update
+// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=capi-provider.agent-install.openshift.io,resources=agentmachines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agent-install.openshift.io,resources=infraenvs;agents,verbs=get;list;watch;patch;delete
@@ -121,14 +122,14 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.reconcileDelete(ctx, &pool)
 	}
 
-	infraEnvAvailable, infraEnvISOURL, infraEnvMessage := r.infraEnvAvailable(ctx, &pool)
+	infraEnvAvailable, _, infraEnvMessage := r.infraEnvAvailable(ctx, &pool)
 	if !infraEnvAvailable {
-		r.setStatusError(&pool, conditionReady, "InfraEnvUnavailable", infraEnvMessage)
+		r.setStatusError(&pool, reasonInfraEnvUnavailable, infraEnvMessage)
 		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 			Type:               conditionInfraEnvAvailable,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: pool.Generation,
-			Reason:             "InfraEnvUnavailable",
+			Reason:             reasonInfraEnvUnavailable,
 			Message:            infraEnvMessage,
 		})
 		_ = r.updateStatus(ctx, &pool, PoolPlan{})
@@ -137,22 +138,32 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	agents, err := r.listMatchingAgents(ctx, &pool)
 	if err != nil {
-		r.setStatusError(&pool, conditionReady, "AgentListFailed", err.Error())
+		r.setStatusError(&pool, "AgentListFailed", err.Error())
 		_ = r.updateStatus(ctx, &pool, PoolPlan{})
 		return ctrl.Result{}, err
 	}
 	machines, err := r.listNodePoolMachines(ctx, &pool)
 	if err != nil {
-		r.setStatusError(&pool, conditionReady, "MachineListFailed", err.Error())
+		r.setStatusError(&pool, "MachineListFailed", err.Error())
 		_ = r.updateStatus(ctx, &pool, PoolPlan{})
 		return ctrl.Result{}, err
 	}
 	agentMachineDemand, err := r.countAgentMachineDemand(ctx, &pool)
 	if err != nil {
-		r.setStatusError(&pool, conditionReady, "AgentMachineListFailed", err.Error())
+		r.setStatusError(&pool, "AgentMachineListFailed", err.Error())
 		_ = r.updateStatus(ctx, &pool, PoolPlan{})
 		return ctrl.Result{}, err
 	}
+	ownedVMs, err := r.listVsphereAgentVMs(ctx, &pool)
+	if err != nil {
+		r.setStatusError(&pool, "VsphereAgentListFailed", err.Error())
+		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		return ctrl.Result{}, err
+	}
+	if len(ownedVMs) == 0 && len(pool.Status.OwnedVMs) > 0 {
+		ownedVMs = pool.Status.OwnedVMs
+	}
+	pool.Status.OwnedVMs = ownedVMs
 	pool.Status.OwnedVMs = refreshOwnedVMStatuses(&pool, agents, machines)
 
 	plan := buildPlan(&pool, PoolSnapshot{
@@ -174,7 +185,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	if err := r.applyPlan(ctx, &pool, plan, infraEnvISOURL); err != nil {
+	if err := r.applyPlan(ctx, &pool, plan); err != nil {
 		errMessage := stableErrorMessage(err)
 		r.recordWarning(&pool, "ApplyPlanFailed", errMessage)
 		setPlanConditions(&pool, plan, false, errMessage)
@@ -205,12 +216,8 @@ func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *
 		return ctrl.Result{}, r.patchFinalizer(ctx, pool)
 	}
 
-	provider, err := r.provider(ctx, pool)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 	for _, vm := range pool.Status.OwnedVMs {
-		if err := provider.DeleteVM(ctx, pool, vm); err != nil {
+		if err := r.deleteVsphereAgentForVM(ctx, pool, vm); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -228,7 +235,28 @@ func (r *VsphereAgentPoolReconciler) patchFinalizer(ctx context.Context, pool *a
 	return r.Patch(ctx, current, client.MergeFrom(before))
 }
 
-func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan, isoDownloadURL string) error {
+func (r *VsphereAgentPoolReconciler) listVsphereAgentVMs(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]agentforgev1alpha1.OwnedVMStatus, error) {
+	var list agentforgev1alpha1.VsphereAgentList
+	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name}); err != nil {
+		return nil, err
+	}
+	vms := make([]agentforgev1alpha1.OwnedVMStatus, 0, len(list.Items))
+	for i := range list.Items {
+		agent := &list.Items[i]
+		if agent.GetDeletionTimestamp() != nil {
+			continue
+		}
+		vm := agent.Status.VM
+		if vm.Name == "" {
+			vm = newOwnedVMStatus(agent.Name)
+			vm.Reason = "VMCreatePending"
+		}
+		vms = append(vms, vm)
+	}
+	return vms, nil
+}
+
+func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan) error {
 	agentHostnames := assignedAgentHostnames(pool, plan.AgentsToPatch)
 	for _, agent := range plan.AgentsToPatch {
 		hostname := agentHostnames[agent.Name]
@@ -241,24 +269,11 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 	}
 
 	if plan.VMsToCreate > 0 || len(plan.VMsToDelete) > 0 {
-		provider, err := r.provider(ctx, pool)
-		if err != nil {
-			return err
-		}
-		isoPath := pool.Status.ISO.Path
-		if plan.VMsToCreate > 0 {
-			isoPath, err = r.ensureISOCache(ctx, pool, provider, isoDownloadURL)
-			if err != nil {
-				r.setStatusError(pool, conditionISOReady, "ISORefreshFailed", err.Error())
+		bufferCreates := bufferVsphereAgentsToCreate(pool, plan)
+		for i := int32(0); i < bufferCreates; i++ {
+			if err := r.createBufferVsphereAgent(ctx, pool); err != nil {
 				return err
 			}
-		}
-		for i := int32(0); i < plan.VMsToCreate; i++ {
-			vm, err := provider.CreateVM(ctx, pool, VMCreateRequest{Ordinal: i, ISOPath: isoPath})
-			if err != nil {
-				return err
-			}
-			pool.Status.OwnedVMs = upsertOwnedVM(pool.Status.OwnedVMs, vm)
 		}
 		agentsToDelete := agentDeleteSet(plan.AgentsToDelete)
 		deletedAgents := map[string]struct{}{}
@@ -274,7 +289,7 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 					continue
 				}
 			}
-			if err := provider.DeleteVM(ctx, pool, vm); err != nil {
+			if err := r.deleteVsphereAgentForVM(ctx, pool, vm); err != nil {
 				return err
 			}
 			pool.Status.OwnedVMs = removeOwnedVM(pool.Status.OwnedVMs, vm.Name)
@@ -293,6 +308,64 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 		}
 	}
 
+	return nil
+}
+
+func bufferVsphereAgentsToCreate(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan) int32 {
+	bufferAgents := pool.Spec.Scaling.BufferAgents
+	if bufferAgents <= 0 {
+		return 0
+	}
+	deficit := bufferAgents - plan.AvailableAgents - plan.PendingOwnedVMs
+	if deficit <= 0 {
+		return 0
+	}
+	maxProvisioning := pool.Spec.Scaling.MaxProvisioning
+	if maxProvisioning <= 0 {
+		maxProvisioning = 3
+	}
+	return minInt32(deficit, maxProvisioning)
+}
+
+func (r *VsphereAgentPoolReconciler) createBufferVsphereAgent(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) error {
+	name := desiredAgentHostname(pool)
+	agent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: pool.Namespace,
+			Name:      name,
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel:   pool.Name,
+				vsphereAgentCreatedForLabel: vsphereAgentCreatedForBuffer,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name},
+		},
+	}
+	if err := controllerutil.SetControllerReference(pool, agent, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, agent); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
+
+func (r *VsphereAgentPoolReconciler) deleteVsphereAgentForVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
+	var list agentforgev1alpha1.VsphereAgentList
+	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name}); err != nil {
+		return err
+	}
+	for i := range list.Items {
+		agent := &list.Items[i]
+		if agent.Status.VM.Name != vm.Name && agent.Name != vm.Name {
+			continue
+		}
+		if err := r.Delete(ctx, agent); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	}
 	return nil
 }
 
@@ -600,21 +673,21 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			} else if ownedVMDiscoveryExpired(vm, time.Now()) {
 				setOwnedVMPhase(&vm, phaseOrphaned, "AgentDiscoveryExpired")
 			} else {
-				setOwnedVMPhase(&vm, phaseProvisioning, "AgentNotDiscovered")
+				setOwnedVMPhase(&vm, phaseProvisioning, reasonAgentNotDiscovered)
 			}
 			vms = append(vms, vm)
 			continue
 		}
 		matchedAgents[agent.Name] = struct{}{}
 
-		wasMachineDeleting := vm.Phase == phaseReleased && vm.Reason == "MachineDeleting"
+		wasMachineDeleting := vm.Phase == phaseReleased && vm.Reason == reasonMachineDeleting
 		previousMachineRef := vm.MachineRef
 		applyAgentToOwnedVMStatus(pool, &vm, agent)
 		if wasMachineDeleting {
 			if (vm.MachineRef == nil || vm.MachineRef.Name == "") && previousMachineRef != nil && previousMachineRef.Name != "" {
 				vm.MachineRef = previousMachineRef
 			}
-			setOwnedVMPhase(&vm, phaseReleased, "MachineDeleting")
+			setOwnedVMPhase(&vm, phaseReleased, reasonMachineDeleting)
 		}
 		applyMachineStateToOwnedVMStatus(&vm, machineStates)
 		vms = append(vms, vm)
@@ -648,20 +721,20 @@ func vmMatchesAgentIdentity(vm agentforgev1alpha1.OwnedVMStatus, agent AgentInfo
 
 func applyMachineStateToOwnedVMStatus(vm *agentforgev1alpha1.OwnedVMStatus, machines map[string]MachineInfo) {
 	if vm.MachineRef == nil || vm.MachineRef.Name == "" {
-		if vm.Phase == phaseReleased && vm.Reason == "MachineDeleting" {
-			setOwnedVMPhase(vm, phaseReleased, "MachineDeleted")
+		if vm.Phase == phaseReleased && vm.Reason == reasonMachineDeleting {
+			setOwnedVMPhase(vm, phaseReleased, reasonMachineDeleted)
 		}
 		return
 	}
 	machine, exists := machines[vm.MachineRef.Name]
 	if !exists {
-		if vm.Phase == phaseReleased && vm.Reason == "MachineDeleting" {
-			setOwnedVMPhase(vm, phaseReleased, "MachineDeleted")
+		if vm.Phase == phaseReleased && vm.Reason == reasonMachineDeleting {
+			setOwnedVMPhase(vm, phaseReleased, reasonMachineDeleted)
 		}
 		return
 	}
 	if machine.Deleting {
-		setOwnedVMPhase(vm, phaseReleased, "MachineDeleting")
+		setOwnedVMPhase(vm, phaseReleased, reasonMachineDeleting)
 	}
 }
 
@@ -676,10 +749,10 @@ func ownedVMDiscoveryExpired(vm agentforgev1alpha1.OwnedVMStatus, now time.Time)
 	if vm.Phase == phaseOrphaned {
 		return true
 	}
-	if vm.Phase != phaseProvisioning || vm.Reason != "AgentNotDiscovered" || vm.LastTransitionTime.IsZero() {
+	if vm.Phase != phaseProvisioning || vm.Reason != reasonAgentNotDiscovered || vm.LastTransitionTime.IsZero() {
 		return false
 	}
-	return !now.Before(vm.LastTransitionTime.Time.Add(orphanedOwnedVMGracePeriod))
+	return !now.Before(vm.LastTransitionTime.Add(orphanedOwnedVMGracePeriod))
 }
 
 func markOwnedVMAvailable(pool *agentforgev1alpha1.VsphereAgentPool, vms []agentforgev1alpha1.OwnedVMStatus, hostname, agentName string) []agentforgev1alpha1.OwnedVMStatus {
@@ -898,9 +971,9 @@ func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *age
 	return nil
 }
 
-func (r *VsphereAgentPoolReconciler) setStatusError(pool *agentforgev1alpha1.VsphereAgentPool, conditionType, reason, message string) {
+func (r *VsphereAgentPoolReconciler) setStatusError(pool *agentforgev1alpha1.VsphereAgentPool, reason, message string) {
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
-		Type:               conditionType,
+		Type:               conditionReady,
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: pool.Generation,
 		Reason:             reason,
@@ -987,7 +1060,7 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 
 func applySpecDefaults(pool *agentforgev1alpha1.VsphereAgentPool) {
 	if pool.Spec.VSphere.Datacenter == "" {
-		pool.Spec.VSphere.Datacenter = "dc1"
+		pool.Spec.VSphere.Datacenter = defaultDatacenter
 	}
 	if pool.Spec.VSphere.GuestID == "" {
 		pool.Spec.VSphere.GuestID = "rhel9_64Guest"
@@ -1260,7 +1333,7 @@ func agentBelongsToInfraEnv(agent *unstructured.Unstructured, infraEnvName strin
 		return true
 	}
 	for _, ref := range agent.GetOwnerReferences() {
-		if ref.Kind == "InfraEnv" && ref.Name == infraEnvName {
+		if ref.Kind == k8sKindInfraEnv && ref.Name == infraEnvName {
 			return true
 		}
 	}
@@ -1275,16 +1348,6 @@ func desiredAgentHostname(pool *agentforgev1alpha1.VsphereAgentPool) string {
 		prefix = strings.TrimRight(prefix[:maxPrefixLen], "-")
 	}
 	return fmt.Sprintf("%s-%s", prefix, suffix)
-}
-
-func upsertOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, vm agentforgev1alpha1.OwnedVMStatus) []agentforgev1alpha1.OwnedVMStatus {
-	for i := range vms {
-		if vms[i].Name == vm.Name {
-			vms[i] = vm
-			return vms
-		}
-	}
-	return append(vms, vm)
 }
 
 func removeOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, name string) []agentforgev1alpha1.OwnedVMStatus {
@@ -1348,8 +1411,8 @@ func agentChangePredicate() predicate.Predicate {
 
 func agentInventoryIdentityChanged(oldObj, newObj *unstructured.Unstructured) bool {
 	for _, path := range [][]string{
-		{"status", "inventory", "hostname"},
-		{"status", "inventory", "systemVendor", "serialNumber"},
+		{unstructuredFieldStatus, "inventory", "hostname"},
+		{unstructuredFieldStatus, "inventory", "systemVendor", "serialNumber"},
 	} {
 		oldValue, _, _ := unstructured.NestedString(oldObj.Object, path...)
 		newValue, _, _ := unstructured.NestedString(newObj.Object, path...)
@@ -1387,8 +1450,8 @@ func agentMachineChangePredicate() predicate.Predicate {
 
 func agentMachineAssignmentChanged(oldObj, newObj *unstructured.Unstructured) bool {
 	for _, path := range [][]string{
-		{"status", "agentRef", "name"},
-		{"spec", "providerID"},
+		{unstructuredFieldStatus, "agentRef", "name"},
+		{unstructuredFieldSpec, "providerID"},
 	} {
 		oldValue, _, _ := unstructured.NestedString(oldObj.Object, path...)
 		newValue, _, _ := unstructured.NestedString(newObj.Object, path...)
@@ -1548,6 +1611,7 @@ func (r *VsphereAgentPoolReconciler) SetupWithManager(ctx context.Context, mgr c
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentforgev1alpha1.VsphereAgentPool{}, builder.WithPredicates(vsphereAgentPoolChangePredicate())).
+		Owns(&agentforgev1alpha1.VsphereAgent{}).
 		Watches(agentMachineWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForControlPlaneObjectChange), builder.WithPredicates(agentMachineChangePredicate())).
 		Watches(machineWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForControlPlaneObjectChange), builder.WithPredicates(machineChangePredicate())).
 		Watches(agentWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForAgentChange), builder.WithPredicates(agentChangePredicate())).

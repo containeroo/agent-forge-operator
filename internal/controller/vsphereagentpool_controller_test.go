@@ -1,3 +1,4 @@
+//nolint:goconst,unparam
 package controller
 
 import (
@@ -199,7 +200,7 @@ func TestReconcileMarksReadyFalseWhenInfraEnvUnavailable(t *testing.T) {
 	}
 }
 
-func TestReconcileApplyFailureRequeuesWithoutReturningError(t *testing.T) {
+func TestReconcileCreatesVsphereAgentInsteadOfCallingProvider(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -228,11 +229,13 @@ func TestReconcileApplyFailureRequeuesWithoutReturningError(t *testing.T) {
 		WithStatusSubresource(pool).
 		Build()
 
+	providerCalled := false
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			providerCalled = true
 			return failingVMProvider{}, nil
 		},
 	}
@@ -241,24 +244,23 @@ func TestReconcileApplyFailureRequeuesWithoutReturningError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
-	if result.RequeueAfter != 30*time.Second {
-		t.Fatalf("requeueAfter = %s, want 30s", result.RequeueAfter)
+	if providerCalled {
+		t.Fatal("pool reconcile called vSphere provider")
+	}
+	if result.RequeueAfter != time.Minute {
+		t.Fatalf("requeueAfter = %s, want 1m", result.RequeueAfter)
 	}
 
-	var updated agentforgev1alpha1.VsphereAgentPool
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+	var vsphereAgents agentforgev1alpha1.VsphereAgentList
+	if err := k8sClient.List(ctx, &vsphereAgents, client.InNamespace(testNamespace), client.MatchingLabels{vsphereAgentPoolNameLabel: testNodePool}); err != nil {
 		t.Fatal(err)
 	}
-	condition := findCondition(updated.Status.Conditions, conditionReady)
-	if condition == nil {
-		t.Fatal("Ready condition was not set")
-	}
-	if condition.Status != metav1.ConditionFalse {
-		t.Fatalf("Ready status = %s, want False", condition.Status)
+	if len(vsphereAgents.Items) != 0 {
+		t.Fatalf("VsphereAgents = %d, want 0 because AgentMachine controller owns demand creation", len(vsphereAgents.Items))
 	}
 }
 
-func TestReconcileEnsuresISOOnceForMultipleCreates(t *testing.T) {
+func TestReconcileCreatesVsphereAgentsForMultipleCreates(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -270,6 +272,7 @@ func TestReconcileEnsuresISOOnceForMultipleCreates(t *testing.T) {
 
 	pool := reconcileTestPool()
 	pool.Spec.DryRun = false
+	pool.Spec.Scaling.BufferAgents = 2
 	pool.Spec.Scaling.MaxProvisioning = 2
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	am2 := testAgentMachine(testControlPlaneNamespace, testNodePool+"-2", "demo/demo-worker")
@@ -306,31 +309,130 @@ func TestReconcileEnsuresISOOnceForMultipleCreates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
+	if provider.ensureISOCalls != 0 {
+		t.Fatalf("EnsureISO calls = %d, want 0 from pool reconcile", provider.ensureISOCalls)
+	}
+	if provider.createVMCalls != 0 {
+		t.Fatalf("CreateVM calls = %d, want 0 from pool reconcile", provider.createVMCalls)
+	}
+
+	var vsphereAgents agentforgev1alpha1.VsphereAgentList
+	if err := k8sClient.List(ctx, &vsphereAgents, client.InNamespace(testNamespace), client.MatchingLabels{vsphereAgentPoolNameLabel: testNodePool}); err != nil {
+		t.Fatal(err)
+	}
+	if len(vsphereAgents.Items) != 2 {
+		t.Fatalf("VsphereAgents = %d, want 2", len(vsphereAgents.Items))
+	}
+}
+
+func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Spec.DryRun = false
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+	am.SetUID(types.UID("agent-machine-uid"))
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, am).
+		WithIndex(&agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolControlPlaneNamespaceIndex, controlPlaneNamespaceIndexFunc).
+		Build()
+
+	reconciler := &AgentMachineReconciler{Client: k8sClient, Scheme: scheme}
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var vsphereAgents agentforgev1alpha1.VsphereAgentList
+	if err := k8sClient.List(ctx, &vsphereAgents, client.InNamespace(testNamespace), client.MatchingLabels{vsphereAgentPoolNameLabel: testNodePool}); err != nil {
+		t.Fatal(err)
+	}
+	if len(vsphereAgents.Items) != 1 {
+		t.Fatalf("VsphereAgents = %d, want 1", len(vsphereAgents.Items))
+	}
+	created := vsphereAgents.Items[0]
+	if created.Spec.PoolRef.Name != testNodePool {
+		t.Fatalf("poolRef = %q, want %q", created.Spec.PoolRef.Name, testNodePool)
+	}
+}
+
+func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Spec.DryRun = false
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
+		Data: map[string][]byte{
+			"server":   []byte("vcenter.example.invalid"),
+			"username": []byte("user"),
+			"password": []byte("pass"),
+		},
+	}
+	vsphereAgent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  testNamespace,
+			Name:       "demo-worker-agent",
+			Finalizers: []string{vsphereAgentFinalizerName},
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel: testNodePool,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, infraEnv, secret, vsphereAgent).
+		WithStatusSubresource(pool, vsphereAgent).
+		Build()
+
+	provider := &fakeVMProvider{isoPath: "agent-forge/demo/demo-worker/abc.iso"}
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "demo-worker-agent"}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
 	if provider.ensureISOCalls != 1 {
 		t.Fatalf("EnsureISO calls = %d, want 1", provider.ensureISOCalls)
 	}
-	if provider.createVMCalls != 2 {
-		t.Fatalf("CreateVM calls = %d, want 2", provider.createVMCalls)
-	}
-	for _, path := range provider.createISOPaths {
-		if path != provider.isoPath {
-			t.Fatalf("CreateVM ISO path = %s, want %s", path, provider.isoPath)
-		}
+	if provider.createVMCalls != 1 {
+		t.Fatalf("CreateVM calls = %d, want 1", provider.createVMCalls)
 	}
 
-	var updated agentforgev1alpha1.VsphereAgentPool
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "demo-worker-agent"}, &updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.ISO.Path != provider.isoPath {
-		t.Fatalf("status ISO path = %s, want %s", updated.Status.ISO.Path, provider.isoPath)
-	}
-	if updated.Status.ISO.SHA256 != "abc" {
-		t.Fatalf("status ISO sha = %s, want abc", updated.Status.ISO.SHA256)
-	}
-	condition := findCondition(updated.Status.Conditions, conditionISOReady)
-	if condition == nil || condition.Status != metav1.ConditionTrue {
-		t.Fatalf("ISOReady condition = %#v, want True", condition)
+	if updated.Status.VM.Name == "" || updated.Status.VM.Phase != phaseProvisioning {
+		t.Fatalf("VM status = %#v, want created provisioning VM", updated.Status.VM)
 	}
 }
 

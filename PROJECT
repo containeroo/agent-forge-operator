@@ -15,9 +15,18 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: example.ch
-  group: agentforge
+  domain: containeroo.ch
+  group: agent-forge
   kind: VsphereAgentPool
+  path: github.com/containeroo/agent-forge-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: containeroo.ch
+  group: agent-forge
+  kind: VsphereAgent
   path: github.com/containeroo/agent-forge-operator/api/v1alpha1
   version: v1alpha1
 version: "3"

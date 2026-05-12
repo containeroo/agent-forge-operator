@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: vsphereagentpools.agentforge.containeroo.ch
+  name: vsphereagentpools.agent-forge.containeroo.ch
 spec:
-  group: agentforge.containeroo.ch
+  group: agent-forge.containeroo.ch
   names:
     kind: VsphereAgentPool
     listKind: VsphereAgentPoolList
@@ -281,12 +281,6 @@ spec:
                       It maps to the static module's vsphere_iso_datastore input.
                     minLength: 1
                     type: string
-                  isoPath:
-                    description: |-
-                      ISOPath is a legacy datastore directory prefix for content-addressed
-                      InfraEnv discovery ISO objects. Prefer spec.iso.pathPrefix for new
-                      configurations.
-                    type: string
                   network:
                     description: Network is the vSphere network name attached to the
                       VM NIC.
@@ -544,9 +538,6 @@ spec:
                     biosUUID:
                       description: BIOSUUID is the VM BIOS UUID when known.
                       type: string
-                    instanceUUID:
-                      description: InstanceUUID is the VM instance UUID when known.
-                      type: string
                     lastTransitionTime:
                       description: LastTransitionTime is updated when Phase changes.
                       format: date-time
@@ -598,10 +589,6 @@ spec:
                           type: string
                       type: object
                       x-kubernetes-map-type: atomic
-                    moRef:
-                      description: MoRef is the vSphere Managed Object Reference value
-                        when known.
-                      type: string
                     name:
                       description: Name is the vSphere VM name.
                       type: string

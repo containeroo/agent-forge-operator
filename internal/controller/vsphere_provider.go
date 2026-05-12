@@ -84,15 +84,15 @@ type VMProvider interface {
 // not depend on vSphere.
 func NewGovcVMProvider(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, secret *corev1.Secret) (VMProvider, error) {
 	cfg := govcConfig{
-		Server:   string(secret.Data["server"]),
-		Username: string(secret.Data["username"]),
-		Password: string(secret.Data["password"]),
-		Insecure: string(secret.Data["insecure"]),
+		Server:   string(secret.Data[secretKeyServer]),
+		Username: string(secret.Data[secretKeyUsername]),
+		Password: string(secret.Data[secretKeyPassword]),
+		Insecure: string(secret.Data[secretKeyInsecure]),
 	}
 	for key, value := range map[string]string{
-		"server":   cfg.Server,
-		"username": cfg.Username,
-		"password": cfg.Password,
+		secretKeyServer:   cfg.Server,
+		secretKeyUsername: cfg.Username,
+		secretKeyPassword: cfg.Password,
 	} {
 		if value == "" {
 			return nil, fmt.Errorf("vSphere credentials Secret %s/%s is missing key %q", secret.Namespace, secret.Name, key)
@@ -177,7 +177,6 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 	vm := newOwnedVMStatus(name)
 	if discovered, err := p.vmStatus(ctx, pool, name); err == nil {
 		vm.BIOSUUID = discovered.BIOSUUID
-		vm.InstanceUUID = discovered.InstanceUUID
 		vm.MACAddress = discovered.MACAddress
 	}
 	return vm, nil
@@ -373,7 +372,7 @@ func downloadFileWithSHA256(ctx context.Context, url, path string) (string, int6
 func newOwnedVMStatus(name string) agentforgev1alpha1.OwnedVMStatus {
 	return agentforgev1alpha1.OwnedVMStatus{
 		Name:               name,
-		Phase:              "Provisioning",
+		Phase:              phaseProvisioning,
 		Reason:             "CreateRequested",
 		LastTransitionTime: metav1.Now(),
 	}
@@ -394,7 +393,6 @@ func (p *govcVMProvider) vmStatus(ctx context.Context, pool *agentforgev1alpha1.
 	vm := info.VirtualMachines[0]
 	status := newOwnedVMStatus(name)
 	status.BIOSUUID = normalizeVMwareSerialUUID(vm.Config.UUID)
-	status.InstanceUUID = normalizeVMwareSerialUUID(vm.Config.InstanceUUID)
 	for _, device := range vm.Config.Hardware.Device {
 		if strings.TrimSpace(device.MACAddress) == "" {
 			continue
@@ -414,9 +412,8 @@ type govcVirtualMachine struct {
 }
 
 type govcVMConfig struct {
-	UUID         string       `json:"uuid"`
-	InstanceUUID string       `json:"instanceUuid"`
-	Hardware     govcHardware `json:"hardware"`
+	UUID     string       `json:"uuid"`
+	Hardware govcHardware `json:"hardware"`
 }
 
 type govcHardware struct {
@@ -456,20 +453,9 @@ func isoContentPath(pool *agentforgev1alpha1.VsphereAgentPool, sha string) strin
 func isoPathPrefix(pool *agentforgev1alpha1.VsphereAgentPool) string {
 	prefix := strings.Trim(strings.TrimSpace(pool.Spec.ISO.PathPrefix), "/")
 	if prefix == "" {
-		prefix = strings.Trim(strings.TrimSpace(pool.Spec.VSphere.ISOPath), "/")
-	}
-	if prefix == "" {
 		prefix = fmt.Sprintf("agent-forge/%s/%s", pool.Namespace, pool.Name)
 	}
 	return prefix
-}
-
-func randomHex(bytes int) string {
-	value := make([]byte, bytes)
-	if _, err := rand.Read(value); err != nil {
-		return "unknown"
-	}
-	return hex.EncodeToString(value)
 }
 
 func randomAlphaNumeric(length int) string {

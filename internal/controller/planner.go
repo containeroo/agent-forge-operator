@@ -37,6 +37,21 @@ const (
 	phaseProvisioning     = "Provisioning"
 	phaseReleased         = "Released"
 	defaultAgentRole      = "worker"
+	defaultDatacenter     = "dc1"
+
+	reasonAgentNotDiscovered   = "AgentNotDiscovered"
+	reasonInfraEnvUnavailable  = "InfraEnvUnavailable"
+	reasonMachineDeleted       = "MachineDeleted"
+	reasonMachineDeleting      = "MachineDeleting"
+	reasonMachineDeletedPolicy = "CAPI Machine has been deleted and deletePolicy is OwnedOnly"
+	k8sKindAgent               = "Agent"
+	k8sKindInfraEnv            = "InfraEnv"
+	unstructuredFieldSpec      = "spec"
+	unstructuredFieldStatus    = "status"
+	secretKeyInsecure          = "insecure"
+	secretKeyPassword          = "password"
+	secretKeyServer            = "server"
+	secretKeyUsername          = "username"
 
 	conditionReady              = "Ready"
 	conditionDryRun             = "DryRun"
@@ -160,7 +175,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete, deletePolicy)...)
 	}
 	for _, vm := range vmsToDelete {
-		reason := "CAPI Machine has been deleted and deletePolicy is OwnedOnly"
+		reason := reasonMachineDeletedPolicy
 		switch vm.Phase {
 		case phaseAvailable:
 			reason = "Owned available Agent exceeds current AgentMachine demand and buffer"
@@ -178,7 +193,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	for _, agent := range agentsToDelete {
 		reason := agentDeleteReasons[agent.Name]
 		if reason == "" {
-			reason = "CAPI Machine has been deleted and deletePolicy is OwnedOnly"
+			reason = reasonMachineDeletedPolicy
 		}
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionDeleteAgent,
@@ -244,7 +259,7 @@ func deletedMachineTargets(vms []agentforgev1alpha1.OwnedVMStatus, agents []Agen
 	var selectedVMs []agentforgev1alpha1.OwnedVMStatus
 	var selectedAgents []AgentInfo
 	for _, vm := range vms {
-		if vm.Name == "" || vm.Phase != phaseReleased || vm.Reason != "MachineDeleted" {
+		if vm.Name == "" || vm.Phase != phaseReleased || vm.Reason != reasonMachineDeleted {
 			continue
 		}
 		selectedVMs = append(selectedVMs, vm)
@@ -310,7 +325,7 @@ func agentDeletionReasonsByName(vms []agentforgev1alpha1.OwnedVMStatus) map[stri
 		case phaseAvailable:
 			reasons[agentName] = "Owned available Agent exceeds current AgentMachine demand and buffer"
 		default:
-			reasons[agentName] = "CAPI Machine has been deleted and deletePolicy is OwnedOnly"
+			reasons[agentName] = reasonMachineDeletedPolicy
 		}
 	}
 	return reasons
