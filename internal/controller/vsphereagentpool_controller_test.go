@@ -30,11 +30,12 @@ const (
 	testInfraEnvName          = "demo"
 	testAPIVersionKey         = "apiVersion"
 	testKindKey               = "kind"
+	testAdoptedVM             = "demo-worker-adopted"
 )
 
 var agentHostnamePattern = regexp.MustCompile(`^demo-worker-[a-z0-9]{4}$`)
 
-func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
+func TestReconcilePlansWithoutCallingProvider(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -79,7 +80,7 @@ func TestReconcileDryRunPlansWithoutCallingProvider(t *testing.T) {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
 	if providerCalled {
-		t.Fatal("dry-run reconcile called vSphere provider")
+		t.Fatal("pool reconcile called vSphere provider")
 	}
 
 	var updated agentforgev1alpha1.VsphereAgentPool
@@ -211,7 +212,6 @@ func TestReconcileCreatesVsphereAgentInsteadOfCallingProvider(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	pool.Spec.DryRun = false
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	secret := &corev1.Secret{
@@ -271,9 +271,6 @@ func TestReconcileCreatesVsphereAgentsForMultipleCreates(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	pool.Spec.DryRun = false
-	pool.Spec.Scaling.BufferAgents = 2
-	pool.Spec.Scaling.MaxProvisioning = 2
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	am2 := testAgentMachine(testControlPlaneNamespace, testNodePool+"-2", "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
@@ -320,8 +317,14 @@ func TestReconcileCreatesVsphereAgentsForMultipleCreates(t *testing.T) {
 	if err := k8sClient.List(ctx, &vsphereAgents, client.InNamespace(testNamespace), client.MatchingLabels{vsphereAgentPoolNameLabel: testNodePool}); err != nil {
 		t.Fatal(err)
 	}
-	if len(vsphereAgents.Items) != 2 {
-		t.Fatalf("VsphereAgents = %d, want 2", len(vsphereAgents.Items))
+	var adoptedAgents int
+	for _, agent := range vsphereAgents.Items {
+		if agent.Labels[vsphereAgentCreatedForLabel] == vsphereAgentCreatedForAdopted {
+			adoptedAgents++
+		}
+	}
+	if adoptedAgents != 3 {
+		t.Fatalf("adopted VsphereAgents = %d, want 3", adoptedAgents)
 	}
 }
 
@@ -336,7 +339,6 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	}
 
 	pool := reconcileTestPool()
-	pool.Spec.DryRun = false
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	am.SetUID(types.UID("agent-machine-uid"))
 
@@ -365,6 +367,51 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	}
 }
 
+func TestReconcileAdoptsExistingMatchingAgents(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	agent := testAgent(testNamespace, testAdoptedVM, false, true)
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, infraEnv, agent).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var adopted agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testAdoptedVM}, &adopted); err != nil {
+		t.Fatal(err)
+	}
+	if adopted.Spec.PoolRef.Name != testNodePool {
+		t.Fatalf("poolRef = %q, want %q", adopted.Spec.PoolRef.Name, testNodePool)
+	}
+	if adopted.Labels[vsphereAgentCreatedForLabel] != vsphereAgentCreatedForAdopted {
+		t.Fatalf("created-for label = %q, want adopted", adopted.Labels[vsphereAgentCreatedForLabel])
+	}
+	if adopted.Status.VM.Name != testAdoptedVM || adopted.Status.VM.AgentRef == nil || adopted.Status.VM.AgentRef.Name != testAdoptedVM {
+		t.Fatalf("adopted VM status = %#v, want VM linked to existing Agent", adopted.Status.VM)
+	}
+}
+
 func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -376,7 +423,6 @@ func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	pool.Spec.DryRun = false
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
@@ -447,7 +493,6 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	pool.Spec.DryRun = false
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
 		newOwnedVMStatus("demo-worker-ab12"),
 	}
@@ -754,7 +799,6 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 	}
 
 	pool := reconcileTestPool()
-	pool.Spec.DryRun = false
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
 		{Name: "demo-worker-one1", Phase: phaseBound, AgentRef: testAgentRef("demo-worker-one1")},
 		{Name: "demo-worker-two2", Phase: phaseBound, AgentRef: testAgentRef("demo-worker-two2")},
@@ -927,7 +971,6 @@ func TestReconcileAdoptsInventoryHostnameForCandidateAgent(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	pool.Spec.DryRun = false
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testCandidateAgent(testNamespace, "candidate-agent")
@@ -1091,7 +1134,6 @@ func TestReconcileKeepsUnboundAgentsWithoutDeletedMachine(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	pool.Spec.DryRun = false
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	boundAgent := testAgent(testNamespace, "bound-agent", true, true)
@@ -1253,7 +1295,6 @@ func reconcileTestPool() *agentforgev1alpha1.VsphereAgentPool {
 			NodePoolRef:           agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
 			InfraEnvRef:           agentforgev1alpha1.LocalObjectReference{Name: testInfraEnvName},
 			ControlPlaneNamespace: testControlPlaneNamespace,
-			DryRun:                true,
 			VSphere: agentforgev1alpha1.VspherePlacementSpec{
 				CredentialsSecretRef: agentforgev1alpha1.SecretReference{Name: "vsphere-credentials"},
 				Datacenter:           "dc1",
@@ -1273,10 +1314,6 @@ func reconcileTestPool() *agentforgev1alpha1.VsphereAgentPool {
 				Labels: map[string]string{
 					testCustomerKey: testCustomer,
 				},
-			},
-			Scaling: agentforgev1alpha1.ScalingPolicySpec{
-				MaxProvisioning: 2,
-				DeletePolicy:    deletePolicyOwnedOnly,
 			},
 		},
 	}

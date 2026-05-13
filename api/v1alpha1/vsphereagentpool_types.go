@@ -154,34 +154,6 @@ type AgentBindingSpec struct {
 	Approve *bool `json:"approve,omitempty"`
 }
 
-// ScalingPolicySpec contains bridge-side guardrails. It does not replace the
-// hosted cluster autoscaler; AgentMachine demand remains the source of truth
-// for desired node count.
-type ScalingPolicySpec struct {
-	// BufferAgents is the number of extra matching, unbound Agents to keep
-	// available beyond current AgentMachine demand. Use 0 for strict cost
-	// control.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=0
-	// +optional
-	BufferAgents int32 `json:"bufferAgents,omitempty"`
-
-	// MaxProvisioning limits how many VMs this operator creates in one
-	// reconciliation. It throttles large autoscaler jumps to protect vSphere,
-	// DHCP, storage, and Assisted Installer.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=3
-	// +optional
-	MaxProvisioning int32 `json:"maxProvisioning,omitempty"`
-
-	// DeletePolicy controls scale-down cleanup. OwnedOnly means only VMs
-	// recorded in this object's status are destroyed. Retain never destroys VMs.
-	// +kubebuilder:validation:Enum=OwnedOnly;Retain
-	// +kubebuilder:default=OwnedOnly
-	// +optional
-	DeletePolicy string `json:"deletePolicy,omitempty"`
-}
-
 // ISOCacheSpec controls how the InfraEnv discovery ISO is cached in vSphere.
 type ISOCacheSpec struct {
 	// CheckInterval controls how often the operator downloads and hashes the
@@ -221,13 +193,6 @@ type VsphereAgentPoolSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	ControlPlaneNamespace string `json:"controlPlaneNamespace"`
 
-	// DryRun makes the operator compute and report actions without creating,
-	// patching, or deleting VMs/Agents. This is the recommended first mode for a
-	// new hosted cluster.
-	// +kubebuilder:default=true
-	// +optional
-	DryRun bool `json:"dryRun"`
-
 	// VSphere configures placement and VM platform settings.
 	VSphere VspherePlacementSpec `json:"vsphere"`
 
@@ -236,10 +201,6 @@ type VsphereAgentPoolSpec struct {
 
 	// Agent configures Agent labels, hostname assignment, and approval.
 	Agent AgentBindingSpec `json:"agent"`
-
-	// Scaling configures bridge-side buffering, throttling, and deletion safety.
-	// +optional
-	Scaling ScalingPolicySpec `json:"scaling,omitempty"`
 
 	// ISO configures content-addressed caching of the InfraEnv discovery ISO.
 	// +optional
@@ -294,9 +255,6 @@ type PlannedActionStatus struct {
 
 	// Reason explains why the action is needed.
 	Reason string `json:"reason"`
-
-	// DryRun is true when the action was only reported.
-	DryRun bool `json:"dryRun"`
 }
 
 // ISOCacheHistoryEntry records one uploaded content-addressed ISO object.
@@ -359,8 +317,7 @@ type VsphereAgentPoolStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// DesiredReplicas is the observed AgentMachine count plus any configured
-	// buffer.
+	// DesiredReplicas is the observed AgentMachine count.
 	// +optional
 	DesiredReplicas int32 `json:"desiredReplicas,omitempty"`
 
@@ -410,7 +367,7 @@ type VsphereAgentPoolStatus struct {
 	// +optional
 	ISO ISOCacheStatus `json:"iso,omitempty"`
 
-	// Conditions summarizes readiness, dry-run state, discovery, and errors.
+	// Conditions summarizes readiness, discovery, and errors.
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	// +listType=map
@@ -425,7 +382,6 @@ type VsphereAgentPoolStatus struct {
 // +kubebuilder:printcolumn:name="Waiting",type=integer,JSONPath=`.status.waitingAgentMachines`
 // +kubebuilder:printcolumn:name="Desired",type=integer,JSONPath=`.status.desiredReplicas`
 // +kubebuilder:printcolumn:name="Agents",type=integer,JSONPath=`.status.matchingAgents`
-// +kubebuilder:printcolumn:name="DryRun",type=boolean,JSONPath=`.spec.dryRun`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // VsphereAgentPool is a namespace-scoped bridge between a Hypershift Agent

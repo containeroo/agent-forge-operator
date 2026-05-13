@@ -18,8 +18,8 @@ Assisted Installer `Agent` objects can appear.
   needed.
 - Optionally approves matching Assisted Installer `Agent` objects.
 - Deletes only owned VMs and stale unbound Agents when scale-down is allowed.
-- Supports dry-run mode, status conditions, planned actions, and Kubernetes
-  Events for operational visibility.
+- Reports status conditions, planned actions, and Kubernetes Events for
+  operational visibility.
 
 ## Current Scope
 
@@ -49,7 +49,7 @@ flowchart TD
     reconcile --> fresh["Read latest VsphereAgentPool\nthrough uncached API reader"]
     fresh --> discover["Resolve inputs\nAgentMachines, Machines, InfraEnv, matching Agents, owned/adopted VMs"]
     discover --> refresh["Refresh ownedVMs status\nProvisioning, Available, Bound, Released"]
-    refresh --> plan["Build plan\nAgentMachine count, waiting demand, buffer, available Agents, provisioning VMs"]
+    refresh --> plan["Build plan\nAgentMachine count, waiting demand, available Agents, provisioning VMs"]
 
     plan -->|deficit| iso["Ensure content-addressed ISO cache\nDownload, hash, upload if changed"]
     iso --> create["Create vSphere VM\nfolder, datastore cluster, network, CPU, memory, disk, ISO"]
@@ -73,7 +73,7 @@ flowchart TD
 
     plan -->|surplus available owned Agent| surplus{"Any AgentMachine\nstill without an Agent?"}
     surplus -->|yes| wait
-    surplus -->|no| deletefree["Delete extra unbound VM and Agent\nrespect bufferAgents"]
+    surplus -->|no| deletefree["Delete extra unbound VM and Agent"]
     deletefree --> agents
 
     plan -->|no changes| noop["Noop\nstatus and conditions only"]
@@ -91,15 +91,16 @@ At the beginning of each reconcile, the controller reads the
 based on the latest recorded `ownedVMs` status instead of stale informer state.
 
 Scale-up is demand driven. The controller counts `AgentMachine` objects for the
-NodePool that report `Ready=False` with `Reason=NoSuitableAgents`, adds
-`spec.scaling.bufferAgents`, subtracts available matching Agents and
-already-provisioning owned VMs, then creates at most
-`spec.scaling.maxProvisioning` VMs per reconcile. Each VM boots the active
-InfraEnv ISO. The controller records the vSphere BIOS UUID, instance UUID, and
-primary MAC address immediately after VM creation. When the Agent appears, it is
-matched to the owned VM by BIOS UUID or MAC before any hostname fallback. The
-controller then applies the configured labels, role, approval, and VM-name
-hostname so the Agent CAPI provider can bind it to a Machine.
+NodePool that report `Ready=False` with `Reason=NoSuitableAgents`, subtracts
+available matching Agents and already-provisioning owned VMs, and records the
+remaining demand in status. The AgentMachine controller creates a
+`VsphereAgent` for each waiting AgentMachine; each `VsphereAgent` then creates a
+vSphere VM that boots the active InfraEnv ISO. The controller records the
+vSphere BIOS UUID, instance UUID, and primary MAC address immediately after VM
+creation. When the Agent appears, it is matched to the owned VM by BIOS UUID or
+MAC before any hostname fallback. The controller then applies the configured
+labels, role, approval, and VM-name hostname so the Agent CAPI provider can bind
+it to a Machine.
 
 Existing clusters are adopted through Agents. If a matching Agent already
 exists, the controller records it in `status.ownedVMs` using the Agent hostname,
@@ -123,15 +124,15 @@ stale Agent can still be removed.
 Install the latest release manifests:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.11/crds.yaml
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.11
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.12/crds.yaml
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.12
 ```
 
 The published manager images are:
 
 ```text
-ghcr.io/containeroo/agent-forge-operator:v0.0.11
-containeroo/agent-forge-operator:v0.0.11
+ghcr.io/containeroo/agent-forge-operator:v0.0.12
+containeroo/agent-forge-operator:v0.0.12
 ```
 
 For a local image build:
@@ -144,8 +145,8 @@ make deploy IMG=<registry>/agent-forge-operator:<tag>
 ## Getting Started
 
 Start with [docs/getting-started.md](docs/getting-started.md). It covers the
-required cluster objects, vSphere Secret, a dry-run `VsphereAgentPool`, status
-inspection, and switching from dry-run to active reconciliation.
+required cluster objects, vSphere Secret, `VsphereAgentPool`, status
+inspection, and active VM reconciliation.
 
 For the complete CRD field contract and status model, see
 [docs/vsphereagentpool-crd.md](docs/vsphereagentpool-crd.md).
@@ -159,7 +160,6 @@ metadata:
   name: demo-worker
   namespace: demo
 spec:
-  dryRun: true
   hostedClusterRef:
     name: demo
   nodePoolRef:
@@ -188,10 +188,6 @@ spec:
       agentclusterinstalls.extensions.hive.openshift.io/location: lab-a
       customer: example
       hypershift.openshift.io/nodepool-role: worker
-  scaling:
-    bufferAgents: 0
-    maxProvisioning: 3
-    deletePolicy: OwnedOnly
   iso:
     checkInterval: 10m
     retainVersions: 2
@@ -240,8 +236,8 @@ The controller uses `govc` for vSphere operations. The container image includes
 Releases are built by GoReleaser from pushed tags:
 
 ```sh
-git tag v0.0.11
-git push origin v0.0.11
+git tag v0.0.12
+git push origin v0.0.12
 ```
 
 The release workflow publishes multi-architecture images to GHCR and DockerHub

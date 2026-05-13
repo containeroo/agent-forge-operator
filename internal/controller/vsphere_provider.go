@@ -80,8 +80,7 @@ type VMProvider interface {
 
 // NewGovcVMProvider returns the default vSphere implementation. It shells out
 // to govc, which is shipped in the manager image. The controller keeps all
-// mutation calls behind this interface so dry-run planning and unit tests do
-// not depend on vSphere.
+// mutation calls behind this interface so unit tests do not depend on vSphere.
 func NewGovcVMProvider(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, secret *corev1.Secret) (VMProvider, error) {
 	cfg := govcConfig{
 		Server:   string(secret.Data[secretKeyServer]),

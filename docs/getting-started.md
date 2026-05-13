@@ -1,7 +1,7 @@
 # Getting Started
 
-This guide walks through a first `VsphereAgentPool` in dry-run mode and then
-enables active VM reconciliation.
+This guide walks through a first `VsphereAgentPool` and active VM
+reconciliation.
 
 ## Assumptions
 
@@ -34,13 +34,13 @@ Adjust the names for your environment.
 Install CRDs from a release:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.11/crds.yaml
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.12/crds.yaml
 ```
 
 Deploy the controller:
 
 ```sh
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.11
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.12
 ```
 
 Check that the manager is running:
@@ -116,11 +116,7 @@ Required keys:
 To keep the Secret in another namespace, set
 `spec.vsphere.credentialsSecretRef.namespace`.
 
-## 5. Create a Dry-Run VsphereAgentPool
-
-Start with `spec.dryRun: true`. In dry-run mode, the operator only plans
-actions, updates status, and emits Events. It does not create VMs, delete VMs,
-or patch Agents.
+## 5. Create a VsphereAgentPool
 
 ```yaml
 apiVersion: agent-forge.containeroo.ch/v1alpha1
@@ -129,7 +125,6 @@ metadata:
   name: demo-worker
   namespace: demo
 spec:
-  dryRun: true
   hostedClusterRef:
     name: demo
   nodePoolRef:
@@ -162,10 +157,6 @@ spec:
       agentclusterinstalls.extensions.hive.openshift.io/location: lab-a
       customer: example
       hypershift.openshift.io/nodepool-role: worker
-  scaling:
-    bufferAgents: 0
-    maxProvisioning: 3
-    deletePolicy: OwnedOnly
   iso:
     checkInterval: 10m
     retainVersions: 2
@@ -207,7 +198,7 @@ Useful status fields:
 | `status.waitingAgentMachines` | AgentMachines currently reporting `Ready=False` and `Reason=NoSuitableAgents`.                             |
 | `status.unreadyAgentMachines` | Observed AgentMachines whose `Ready` condition is not `True`.                                              |
 | `status.agentMachinesWithoutAgent` | Unready AgentMachines without an assigned Agent. Surplus unbound Agents are retained while this is non-zero. |
-| `status.desiredReplicas`      | Observed AgentMachine count plus `spec.scaling.bufferAgents`.                                              |
+| `status.desiredReplicas`      | Observed AgentMachine count.                                                                              |
 | `status.matchingAgents`       | Agents that already match `spec.agent.labels`.                                                             |
 | `status.availableAgents`      | Matching Agents that are not yet bound to CAPI.                                                            |
 | `status.ownedVMs[*].biosUUID` | vSphere BIOS UUID used to match discovered Agents to the VM that actually booted them.                     |
@@ -217,7 +208,7 @@ Useful status fields:
 | `status.iso.sha256`           | SHA256 digest of the active InfraEnv ISO bytes.                                                            |
 | `status.iso.checkedAt`        | Last time the operator downloaded and hashed the ISO.                                                      |
 | `status.plannedActions`       | Planned `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions.                            |
-| `status.conditions`           | Readiness, dry-run state, AgentMachine demand, InfraEnv availability, ISO cache state, and capacity state. |
+| `status.conditions`           | Readiness, AgentMachine demand, InfraEnv availability, ISO cache state, and capacity state.                |
 
 Check Events:
 
@@ -225,15 +216,9 @@ Check Events:
 kubectl -n demo get events --field-selector involvedObject.name=demo-worker --sort-by=.lastTimestamp
 ```
 
-## 7. Enable Active Reconciliation
+## 7. Reconciliation Behavior
 
-When the dry-run plan is correct, disable dry-run:
-
-```sh
-kubectl -n demo patch vsphereagentpool demo-worker --type=merge -p '{"spec":{"dryRun":false}}'
-```
-
-The operator can now:
+The operator will:
 
 - Download and hash the InfraEnv discovery ISO when the cache is stale.
 - Upload a content-addressed ISO object only when the bytes changed or the datastore object is missing.
@@ -246,7 +231,7 @@ The operator can now:
   Agent hostname.
 - Patch matching Agents with labels, role, approval, and the VM-name hostname
   when configured.
-- Delete owned VMs and stale unbound Agents during scale-down when `deletePolicy` is `OwnedOnly`.
+- Delete owned VMs and stale unbound Agents during scale-down.
 
 Force an immediate ISO refresh without changing the spec:
 
@@ -256,27 +241,7 @@ kubectl -n demo annotate vsphereagentpool demo-worker \
   --overwrite
 ```
 
-## 8. Tune Scaling Guardrails
-
-The hosted cluster autoscaler controls the actual desired node count. The
-`spec.scaling` block only controls how aggressively Agent Forge responds.
-
-```yaml
-scaling:
-  bufferAgents: 1
-  maxProvisioning: 2
-  deletePolicy: OwnedOnly
-```
-
-Fields:
-
-| Field             | Guidance                                                                                                             |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `bufferAgents`    | Extra unbound Agents to keep ready beyond current AgentMachine demand. Use `0` for strict cost control.              |
-| `maxProvisioning` | Maximum VMs to create per reconcile. Lower values reduce pressure on vSphere, DHCP, storage, and Assisted Installer. |
-| `deletePolicy`    | Use `OwnedOnly` for normal cleanup. Use `Retain` when testing or when VM deletion should be manual.                  |
-
-## 9. Troubleshooting
+## 8. Troubleshooting
 
 AgentMachine demand is not observed:
 
@@ -321,19 +286,7 @@ kubectl -n demo describe vsphereagentpool demo-worker
 kubectl -n agent-forge-operator-system logs deploy/agent-forge-operator-controller-manager -c manager
 ```
 
-Dry-run remains enabled:
-
-```sh
-kubectl -n demo get vsphereagentpool demo-worker -o jsonpath='{.spec.dryRun}{"\n"}'
-```
-
-## 10. Clean Up
-
-Pause destructive cleanup first if you want to retain VMs:
-
-```sh
-kubectl -n demo patch vsphereagentpool demo-worker --type=merge -p '{"spec":{"scaling":{"deletePolicy":"Retain"}}}'
-```
+## 9. Clean Up
 
 Delete the bridge:
 
@@ -344,6 +297,6 @@ kubectl -n demo delete vsphereagentpool demo-worker
 Uninstall the operator:
 
 ```sh
-kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.11
-kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.11/crds.yaml
+kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.12
+kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.12/crds.yaml
 ```

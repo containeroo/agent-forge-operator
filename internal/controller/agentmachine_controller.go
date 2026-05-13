@@ -39,8 +39,8 @@ const (
 	vsphereAgentMachineNameLabel    = "agent-forge.containeroo.ch/agent-machine"
 	vsphereAgentMachineUIDLabel     = "agent-forge.containeroo.ch/agent-machine-uid"
 	vsphereAgentCreatedForLabel     = "agent-forge.containeroo.ch/created-for"
+	vsphereAgentCreatedForAdopted   = "adopted"
 	vsphereAgentCreatedForDemand    = "agent-machine"
-	vsphereAgentCreatedForBuffer    = "buffer"
 	vsphereAgentFinalizerName       = "agent-forge.containeroo.ch/vsphere-agent"
 	vsphereAgentPoolOwnerFieldIndex = ".spec.poolRef.name"
 )
@@ -73,7 +73,7 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	for i := range pools.Items {
 		pool := &pools.Items[i]
 		applySpecDefaults(pool)
-		if pool.Spec.DryRun || !controlPlaneObjectMatchesPool(&agentMachine, pool) {
+		if !controlPlaneObjectMatchesPool(&agentMachine, pool) {
 			continue
 		}
 		if err := r.ensureVsphereAgentForAgentMachine(ctx, pool, &agentMachine); err != nil {
@@ -92,18 +92,6 @@ func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.C
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
-	}
-
-	pending, err := r.pendingVsphereAgentsForPool(ctx, pool)
-	if err != nil {
-		return err
-	}
-	maxProvisioning := pool.Spec.Scaling.MaxProvisioning
-	if maxProvisioning <= 0 {
-		maxProvisioning = 3
-	}
-	if pending >= maxProvisioning {
-		return nil
 	}
 
 	agent := &agentforgev1alpha1.VsphereAgent{
@@ -125,24 +113,6 @@ func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.C
 		return err
 	}
 	return r.Create(ctx, agent)
-}
-
-func (r *AgentMachineReconciler) pendingVsphereAgentsForPool(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (int32, error) {
-	var agents agentforgev1alpha1.VsphereAgentList
-	if err := r.List(ctx, &agents, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name}); err != nil {
-		return 0, err
-	}
-	var pending int32
-	for i := range agents.Items {
-		agent := &agents.Items[i]
-		if agent.GetDeletionTimestamp() != nil {
-			continue
-		}
-		if agent.Status.VM.Name == "" {
-			pending++
-		}
-	}
-	return pending, nil
 }
 
 func vsphereAgentNameForAgentMachine(pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) string {

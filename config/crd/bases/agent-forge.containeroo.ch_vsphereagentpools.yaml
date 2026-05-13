@@ -26,9 +26,6 @@ spec:
     - jsonPath: .status.matchingAgents
       name: Agents
       type: integer
-    - jsonPath: .spec.dryRun
-      name: DryRun
-      type: boolean
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -97,13 +94,6 @@ spec:
                   example demo-demo.
                 minLength: 1
                 type: string
-              dryRun:
-                default: true
-                description: |-
-                  DryRun makes the operator compute and report actions without creating,
-                  patching, or deleting VMs/Agents. This is the recommended first mode for a
-                  new hosted cluster.
-                type: boolean
               hostedClusterRef:
                 description: HostedClusterRef references the Hypershift HostedCluster
                   this pool serves.
@@ -161,38 +151,6 @@ spec:
                     type: string
                 required:
                 - name
-                type: object
-              scaling:
-                description: Scaling configures bridge-side buffering, throttling,
-                  and deletion safety.
-                properties:
-                  bufferAgents:
-                    default: 0
-                    description: |-
-                      BufferAgents is the number of extra matching, unbound Agents to keep
-                      available beyond current AgentMachine demand. Use 0 for strict cost
-                      control.
-                    format: int32
-                    minimum: 0
-                    type: integer
-                  deletePolicy:
-                    default: OwnedOnly
-                    description: |-
-                      DeletePolicy controls scale-down cleanup. OwnedOnly means only VMs
-                      recorded in this object's status are destroyed. Retain never destroys VMs.
-                    enum:
-                    - OwnedOnly
-                    - Retain
-                    type: string
-                  maxProvisioning:
-                    default: 3
-                    description: |-
-                      MaxProvisioning limits how many VMs this operator creates in one
-                      reconciliation. It throttles large autoscaler jumps to protect vSphere,
-                      DHCP, storage, and Assisted Installer.
-                    format: int32
-                    minimum: 1
-                    type: integer
                 type: object
               template:
                 description: Template configures the worker VM hardware profile.
@@ -350,8 +308,7 @@ spec:
                 format: int32
                 type: integer
               conditions:
-                description: Conditions summarizes readiness, dry-run state, discovery,
-                  and errors.
+                description: Conditions summarizes readiness, discovery, and errors.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -411,9 +368,7 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               desiredReplicas:
-                description: |-
-                  DesiredReplicas is the observed AgentMachine count plus any configured
-                  buffer.
+                description: DesiredReplicas is the observed AgentMachine count.
                 format: int32
                 type: integer
               iso:
@@ -613,9 +568,6 @@ spec:
                     PlannedActionStatus records the latest create/delete/patch actions the
                     operator planned or executed.
                   properties:
-                    dryRun:
-                      description: DryRun is true when the action was only reported.
-                      type: boolean
                     name:
                       description: Name is the target VM or Agent name when known.
                       type: string
@@ -628,7 +580,6 @@ spec:
                         PatchAgent, or Noop.
                       type: string
                   required:
-                  - dryRun
                   - reason
                   - type
                   type: object

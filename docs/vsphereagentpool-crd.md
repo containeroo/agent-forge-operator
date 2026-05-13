@@ -8,7 +8,6 @@ HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` 
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `spec.dryRun` | no | When `true`, only computes planned actions, writes status, and emits Events. No VM or Agent mutation is applied. Defaults to `true`. |
 | `spec.hostedClusterRef.name` | yes | HostedCluster name in the same namespace as this CR. |
 | `spec.nodePoolRef.name` | yes | Hypershift NodePool name in the same namespace as this CR. |
 | `spec.infraEnvRef.name` | yes | Assisted Installer InfraEnv name in the same namespace. The InfraEnv must expose `status.isoDownloadURL`. |
@@ -34,9 +33,6 @@ HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` 
 | `spec.agent.role` | no | Value for `hypershift.openshift.io/nodepool-role`. Defaults to `worker`. |
 | `spec.agent.labels` | yes | Labels required on discovered Agents. These should match the NodePool Agent selector. |
 | `spec.agent.approve` | no | When true, patch matching Agents with `spec.approved=true`. Defaults to `true`. |
-| `spec.scaling.bufferAgents` | no | Extra unbound matching Agents to keep beyond current AgentMachine demand. Defaults to `0`. |
-| `spec.scaling.maxProvisioning` | no | Max VMs to create in one reconcile. Defaults to `3`. |
-| `spec.scaling.deletePolicy` | no | `OwnedOnly` destroys only VMs recorded in status; `Retain` never destroys VMs. Defaults to `OwnedOnly`. |
 | `spec.iso.checkInterval` | no | How often to download and hash the InfraEnv ISO to detect changed bytes behind a stable URL. Defaults to `10m`. |
 | `spec.iso.retainVersions` | no | Number of content-addressed ISO objects to keep in the datastore. Defaults to `2`. |
 | `spec.iso.pathPrefix` | no | Datastore directory for cached ISO objects. Defaults to `agent-forge/<namespace>/<vsphereAgentPool>`. |
@@ -50,14 +46,14 @@ HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` 
 | `status.waitingAgentMachines` | AgentMachines in the hosted control plane namespace that currently report `Ready=False` and `Reason=NoSuitableAgents`. |
 | `status.unreadyAgentMachines` | Observed AgentMachines whose `Ready` condition is not `True`, including machines waiting for suitable Agents and machines still installing. |
 | `status.agentMachinesWithoutAgent` | Unready AgentMachines without an assigned Agent. Surplus unbound Agents are retained while this is non-zero. |
-| `status.desiredReplicas` | Observed AgentMachine count plus `spec.scaling.bufferAgents`. |
+| `status.desiredReplicas` | Observed AgentMachine count. |
 | `status.matchingAgents` | Agents in the CR namespace matching `spec.agent.labels`. |
 | `status.boundAgents` | Matching Agents already bound to CAPI/HostedCluster. |
 | `status.availableAgents` | Matching Agents not yet bound. |
-| `status.ownedVMs` | VMs created or tracked by this CR, including vSphere BIOS UUID, instance UUID, primary MAC, AgentRef, MachineRef, and phase. The BIOS UUID and MAC are used to match discovered Agents to the VM that actually booted them before any hostname fallback. Phases include `Provisioning`, `Available`, `Bound`, `Released`, and `Orphaned`; orphaned VMs are tracked VMs whose Agent did not appear within the discovery grace period and are eligible for cleanup when `deletePolicy` is `OwnedOnly`. |
+| `status.ownedVMs` | VMs created or tracked by this CR, including vSphere BIOS UUID, instance UUID, primary MAC, AgentRef, MachineRef, and phase. The BIOS UUID and MAC are used to match discovered Agents to the VM that actually booted them before any hostname fallback. Phases include `Provisioning`, `Available`, `Bound`, `Released`, and `Orphaned`; orphaned VMs are tracked VMs whose Agent did not appear within the discovery grace period and are eligible for cleanup once current AgentMachine demand is satisfied. |
 | `status.iso` | Active cached ISO URL, path, SHA256 digest, size, timestamps, force-refresh token, and retained history. |
 | `status.plannedActions` | Latest planned or applied `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions. |
-| `status.conditions` | `Ready`, `DryRun`, `AgentMachineDemandFound`, `InfraEnvAvailable`, `ISOReady`, `CapacitySatisfied`, and `VsphereReady`. |
+| `status.conditions` | `Ready`, `AgentMachineDemandFound`, `InfraEnvAvailable`, `ISOReady`, `CapacitySatisfied`, and `VsphereReady`. |
 
 The ISO cache is content-addressed as `<pathPrefix>/<sha256>.iso`. The operator
 downloads and hashes the InfraEnv ISO when the cache is stale, reuses the active
@@ -69,4 +65,4 @@ refresh, set annotation
 
 ## Current Implementation Note
 
-The controller includes the CRD, planner, status/condition/event handling, dry-run behavior, Agent patching, ISO cache reconciliation, and an injectable vSphere provider interface with unit tests. The default provider uses `govc`, which is included in the manager image, to upload cached InfraEnv ISOs, create/power-on VMs, read VM identity after creation, destroy owned VMs during cleanup or scale-down, and prune old ISO objects. For local development outside the image, set `GOVC_PATH` if `govc` is not at `/usr/local/bin/govc`.
+The controller includes the CRD, planner, status/condition/event handling, Agent patching, ISO cache reconciliation, and an injectable vSphere provider interface with unit tests. The default provider uses `govc`, which is included in the manager image, to upload cached InfraEnv ISOs, create/power-on VMs, read VM identity after creation, destroy owned VMs during cleanup or scale-down, and prune old ISO objects. For local development outside the image, set `GOVC_PATH` if `govc` is not at `/usr/local/bin/govc`.

@@ -86,17 +86,6 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.reconcileDelete(ctx, &agent, &pool)
 	}
 
-	if pool.Spec.DryRun {
-		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
-			Type:               conditionReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: agent.Generation,
-			Reason:             "DryRun",
-			Message:            "referenced VsphereAgentPool is in dry-run mode",
-		})
-		return ctrl.Result{RequeueAfter: time.Minute}, r.updateStatus(ctx, &agent)
-	}
-
 	if agent.Status.VM.Name != "" {
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
@@ -174,7 +163,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
-	if !pool.Spec.DryRun && pool.Spec.Scaling.DeletePolicy != deletePolicyRetain && agent.Status.VM.Name != "" {
+	if agent.Status.VM.Name != "" {
 		provider, err := r.poolReconciler().provider(ctx, pool)
 		if err != nil {
 			return ctrl.Result{}, err

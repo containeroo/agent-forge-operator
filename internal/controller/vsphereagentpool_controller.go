@@ -165,6 +165,11 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	pool.Status.OwnedVMs = ownedVMs
 	pool.Status.OwnedVMs = refreshOwnedVMStatuses(&pool, agents, machines)
+	if err := r.adoptMatchingAgents(ctx, &pool, agents); err != nil {
+		r.setStatusError(&pool, "VsphereAgentAdoptionFailed", err.Error())
+		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		return ctrl.Result{}, err
+	}
 
 	plan := buildPlan(&pool, PoolSnapshot{
 		AgentMachines:             agentMachineDemand.Total,
@@ -175,20 +180,10 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		OwnedVMs:                  pool.Status.OwnedVMs,
 	})
 
-	if pool.Spec.DryRun {
-		r.recordPlan(&pool, plan, "DryRunPlan")
-		setPlanConditions(&pool, plan, true, "")
-		if err := r.updateStatus(ctx, &pool, plan); err != nil {
-			return ctrl.Result{}, err
-		}
-		log.Info("dry-run plan computed", "actions", plan.Actions, "desiredReplicas", plan.DesiredReplicas, "matchingAgents", plan.MatchingAgents)
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
-	}
-
 	if err := r.applyPlan(ctx, &pool, plan); err != nil {
 		errMessage := stableErrorMessage(err)
 		r.recordWarning(&pool, "ApplyPlanFailed", errMessage)
-		setPlanConditions(&pool, plan, false, errMessage)
+		setPlanConditions(&pool, plan, errMessage)
 		if statusErr := r.updateStatus(ctx, &pool, plan); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
@@ -198,7 +193,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	refreshPlanOwnedVMCounts(&plan, &pool)
 
 	r.recordPlan(&pool, plan, "PlanApplied")
-	setPlanConditions(&pool, plan, false, "")
+	setPlanConditions(&pool, plan, "")
 	if err := r.updateStatus(ctx, &pool, plan); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -211,7 +206,7 @@ func refreshPlanOwnedVMCounts(plan *PoolPlan, pool *agentforgev1alpha1.VsphereAg
 }
 
 func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
-	if pool.Spec.DryRun || pool.Spec.Scaling.DeletePolicy == deletePolicyRetain || len(pool.Status.OwnedVMs) == 0 {
+	if len(pool.Status.OwnedVMs) == 0 {
 		controllerutil.RemoveFinalizer(pool, finalizerName)
 		return ctrl.Result{}, r.patchFinalizer(ctx, pool)
 	}
@@ -256,6 +251,90 @@ func (r *VsphereAgentPoolReconciler) listVsphereAgentVMs(ctx context.Context, po
 	return vms, nil
 }
 
+func (r *VsphereAgentPoolReconciler) adoptMatchingAgents(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo) error {
+	for _, agent := range agents {
+		hostname := agentObservedHostname(agent)
+		if hostname == "" {
+			continue
+		}
+		vm := ownedVMForAgent(pool, agent, hostname)
+		if err := r.ensureVsphereAgentForAdoptedVM(ctx, pool, agent, vm); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ownedVMForAgent(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo, hostname string) agentforgev1alpha1.OwnedVMStatus {
+	for _, vm := range pool.Status.OwnedVMs {
+		if vmMatchesAgentIdentity(vm, agent) || vm.Name == hostname || (vm.AgentRef != nil && vm.AgentRef.Name == agent.Name) {
+			return vm
+		}
+	}
+	return agentOwnedVMStatus(pool, agent, hostname)
+}
+
+func (r *VsphereAgentPoolReconciler) ensureVsphereAgentForAdoptedVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo, vm agentforgev1alpha1.OwnedVMStatus) error {
+	name := adoptedVsphereAgentName(pool, agent, vm)
+	current := &agentforgev1alpha1.VsphereAgent{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, current)
+	if apierrors.IsNotFound(err) {
+		current = &agentforgev1alpha1.VsphereAgent{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:  pool.Namespace,
+				Name:       name,
+				Finalizers: []string{vsphereAgentFinalizerName},
+				Labels: map[string]string{
+					vsphereAgentPoolNameLabel:   pool.Name,
+					vsphereAgentCreatedForLabel: vsphereAgentCreatedForAdopted,
+				},
+			},
+			Spec: agentforgev1alpha1.VsphereAgentSpec{
+				PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name},
+			},
+		}
+		if err := controllerutil.SetControllerReference(pool, current, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, current); err != nil {
+			return err
+		}
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	if current.Status.VM.Name != "" {
+		return nil
+	}
+	current.Status.VM = vm
+	if current.Status.VM.Reason == "" || current.Status.VM.Phase == "" {
+		applyAgentToOwnedVMStatus(pool, &current.Status.VM, agent)
+	}
+	if current.Status.VM.Reason == "" {
+		current.Status.VM.Reason = reasonVMAdopted
+	}
+	return r.updateVsphereAgentStatus(ctx, current)
+}
+
+func (r *VsphereAgentPoolReconciler) updateVsphereAgentStatus(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent) error {
+	if err := r.Status().Update(ctx, agent); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+	return r.Update(ctx, agent)
+}
+
+func adoptedVsphereAgentName(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo, vm agentforgev1alpha1.OwnedVMStatus) string {
+	if vm.Name != "" {
+		return vm.Name
+	}
+	if hostname := agentObservedHostname(agent); hostname != "" {
+		return hostname
+	}
+	return fmt.Sprintf("%s-%s", pool.Name, agent.Name)
+}
+
 func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan) error {
 	agentHostnames := assignedAgentHostnames(pool, plan.AgentsToPatch)
 	for _, agent := range plan.AgentsToPatch {
@@ -268,13 +347,7 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 		}
 	}
 
-	if plan.VMsToCreate > 0 || len(plan.VMsToDelete) > 0 {
-		bufferCreates := bufferVsphereAgentsToCreate(pool, plan)
-		for i := int32(0); i < bufferCreates; i++ {
-			if err := r.createBufferVsphereAgent(ctx, pool); err != nil {
-				return err
-			}
-		}
+	if len(plan.VMsToDelete) > 0 {
 		agentsToDelete := agentDeleteSet(plan.AgentsToDelete)
 		deletedAgents := map[string]struct{}{}
 		for _, vm := range plan.VMsToDelete {
@@ -308,46 +381,6 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 		}
 	}
 
-	return nil
-}
-
-func bufferVsphereAgentsToCreate(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan) int32 {
-	bufferAgents := pool.Spec.Scaling.BufferAgents
-	if bufferAgents <= 0 {
-		return 0
-	}
-	deficit := bufferAgents - plan.AvailableAgents - plan.PendingOwnedVMs
-	if deficit <= 0 {
-		return 0
-	}
-	maxProvisioning := pool.Spec.Scaling.MaxProvisioning
-	if maxProvisioning <= 0 {
-		maxProvisioning = 3
-	}
-	return minInt32(deficit, maxProvisioning)
-}
-
-func (r *VsphereAgentPoolReconciler) createBufferVsphereAgent(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) error {
-	name := desiredAgentHostname(pool)
-	agent := &agentforgev1alpha1.VsphereAgent{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: pool.Namespace,
-			Name:      name,
-			Labels: map[string]string{
-				vsphereAgentPoolNameLabel:   pool.Name,
-				vsphereAgentCreatedForLabel: vsphereAgentCreatedForBuffer,
-			},
-		},
-		Spec: agentforgev1alpha1.VsphereAgentSpec{
-			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name},
-		},
-	}
-	if err := controllerutil.SetControllerReference(pool, agent, r.Scheme); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, agent); err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
-	}
 	return nil
 }
 
@@ -1004,7 +1037,7 @@ func (r *VsphereAgentPoolReconciler) recordNormal(pool *agentforgev1alpha1.Vsphe
 	}
 }
 
-func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan, dryRun bool, errMessage string) {
+func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan, errMessage string) {
 	nowStatus := metav1.ConditionTrue
 	reason := "Reconciled"
 	message := "Agent capacity bridge reconciled successfully"
@@ -1020,13 +1053,6 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 		ObservedGeneration: pool.Generation,
 		Reason:             reason,
 		Message:            message,
-	})
-	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
-		Type:               conditionDryRun,
-		Status:             conditionStatus(dryRun),
-		ObservedGeneration: pool.Generation,
-		Reason:             boolReason(dryRun, "Enabled", "Disabled"),
-		Message:            boolMessage(dryRun, "Dry-run is enabled; no vSphere or Agent mutations are applied", "Dry-run is disabled; planned mutations may be applied"),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               conditionAgentMachineDemand,
@@ -1085,12 +1111,6 @@ func applySpecDefaults(pool *agentforgev1alpha1.VsphereAgentPool) {
 	}
 	if pool.Spec.Agent.Role == "" {
 		pool.Spec.Agent.Role = defaultAgentRole
-	}
-	if pool.Spec.Scaling.MaxProvisioning == 0 {
-		pool.Spec.Scaling.MaxProvisioning = 3
-	}
-	if pool.Spec.Scaling.DeletePolicy == "" {
-		pool.Spec.Scaling.DeletePolicy = deletePolicyOwnedOnly
 	}
 	if pool.Spec.ISO.CheckInterval.Duration == 0 {
 		pool.Spec.ISO.CheckInterval.Duration = 10 * time.Minute
