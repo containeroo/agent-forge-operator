@@ -372,7 +372,7 @@ func newOwnedVMStatus(name string) agentforgev1alpha1.OwnedVMStatus {
 	return agentforgev1alpha1.OwnedVMStatus{
 		Name:               name,
 		Phase:              phaseProvisioning,
-		Reason:             "CreateRequested",
+		Reason:             reasonVMCreateRequested,
 		LastTransitionTime: metav1.Now(),
 	}
 }

@@ -40,6 +40,7 @@ const (
 	reasonAgentNotDiscovered   = "AgentNotDiscovered"
 	reasonInfraEnvUnavailable  = "InfraEnvUnavailable"
 	reasonVMAdopted            = "VMAdopted"
+	reasonVMCreateRequested    = "CreateRequested"
 	reasonMachineDeleted       = "MachineDeleted"
 	reasonMachineDeleting      = "MachineDeleting"
 	reasonMachineDeletedPolicy = "CAPI Machine has been deleted"

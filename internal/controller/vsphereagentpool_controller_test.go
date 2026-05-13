@@ -412,6 +412,73 @@ func TestReconcileAdoptsExistingMatchingAgents(t *testing.T) {
 	}
 }
 
+func TestReconcileCorrectsAdoptedVsphereAgentStatus(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	adopted := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testAdoptedVM,
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel:   testNodePool,
+				vsphereAgentCreatedForLabel: vsphereAgentCreatedForAdopted,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: agentforgev1alpha1.OwnedVMStatus{
+				Name:       "wrong-new-vm",
+				Phase:      phaseProvisioning,
+				Reason:     reasonVMCreateRequested,
+				BIOSUUID:   "wrong-bios",
+				MACAddress: "00-50-56-aa-bb-cc",
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, adopted).
+		WithStatusSubresource(adopted).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+	err := reconciler.adoptMatchingAgents(ctx, pool, []AgentInfo{{
+		Name:     testAdoptedVM,
+		Hostname: testAdoptedVM,
+		MAC:      "00-50-56-dd-ee-ff",
+		BIOSUUID: "adopted-bios",
+	}})
+	if err != nil {
+		t.Fatalf("adoptMatchingAgents returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testAdoptedVM}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.VM.Name != testAdoptedVM || updated.Status.VM.AgentRef == nil || updated.Status.VM.AgentRef.Name != testAdoptedVM {
+		t.Fatalf("adopted VM status = %#v, want corrected existing Agent VM", updated.Status.VM)
+	}
+	if updated.Status.VM.BIOSUUID != "adopted-bios" || updated.Status.VM.MACAddress != "00-50-56-dd-ee-ff" {
+		t.Fatalf("adopted VM identity = %#v, want corrected identity", updated.Status.VM)
+	}
+}
+
 func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -479,6 +546,69 @@ func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	}
 	if updated.Status.VM.Name == "" || updated.Status.VM.Phase != phaseProvisioning {
 		t.Fatalf("VM status = %#v, want created provisioning VM", updated.Status.VM)
+	}
+}
+
+func TestVsphereAgentReconcileWaitsForAdoptedStatus(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	vsphereAgent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  testNamespace,
+			Name:       testAdoptedVM,
+			Finalizers: []string{vsphereAgentFinalizerName},
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel:   testNodePool,
+				vsphereAgentCreatedForLabel: vsphereAgentCreatedForAdopted,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, vsphereAgent).
+		WithStatusSubresource(vsphereAgent).
+		Build()
+
+	provider := &fakeVMProvider{}
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testAdoptedVM}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if result.RequeueAfter != 10*time.Second {
+		t.Fatalf("requeueAfter = %s, want 10s", result.RequeueAfter)
+	}
+	if provider.createVMCalls != 0 {
+		t.Fatalf("CreateVM calls = %d, want 0 for adopted VsphereAgent without status", provider.createVMCalls)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testAdoptedVM}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	ready := findCondition(updated.Status.Conditions, conditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "AdoptionPending" {
+		t.Fatalf("Ready condition = %#v, want AdoptionPending False", ready)
 	}
 }
 
@@ -727,7 +857,7 @@ func TestRefreshOwnedVMStatusesMatchesAgentsByBIOSUUIDBeforeHostname(t *testing.
 		{
 			Name:       "demo-worker-real",
 			Phase:      phaseProvisioning,
-			Reason:     "CreateRequested",
+			Reason:     reasonVMCreateRequested,
 			BIOSUUID:   "423297c6-d72e-28bb-b279-1209c29ab72b",
 			MACAddress: "00-50-56-aa-bb-cc",
 		},

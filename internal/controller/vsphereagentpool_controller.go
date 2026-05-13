@@ -303,17 +303,37 @@ func (r *VsphereAgentPoolReconciler) ensureVsphereAgentForAdoptedVM(ctx context.
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
-	if current.Status.VM.Name != "" {
+	desiredVM := vm
+	if desiredVM.Reason == "" || desiredVM.Phase == "" {
+		applyAgentToOwnedVMStatus(pool, &desiredVM, agent)
+	}
+	if desiredVM.Reason == "" {
+		desiredVM.Reason = reasonVMAdopted
+	}
+	if current.Status.VM.Name != "" && (current.Labels[vsphereAgentCreatedForLabel] != vsphereAgentCreatedForAdopted || adoptedVMStatusMatches(current.Status.VM, desiredVM)) {
 		return nil
 	}
-	current.Status.VM = vm
-	if current.Status.VM.Reason == "" || current.Status.VM.Phase == "" {
-		applyAgentToOwnedVMStatus(pool, &current.Status.VM, agent)
-	}
-	if current.Status.VM.Reason == "" {
-		current.Status.VM.Reason = reasonVMAdopted
-	}
+	current.Status.VM = desiredVM
 	return r.updateVsphereAgentStatus(ctx, current)
+}
+
+func adoptedVMStatusMatches(current, desired agentforgev1alpha1.OwnedVMStatus) bool {
+	if current.Name != desired.Name ||
+		current.BIOSUUID != desired.BIOSUUID ||
+		current.MACAddress != desired.MACAddress ||
+		current.Phase != desired.Phase ||
+		current.Reason != desired.Reason {
+		return false
+	}
+	return objectReferenceName(current.AgentRef) == objectReferenceName(desired.AgentRef) &&
+		objectReferenceName(current.MachineRef) == objectReferenceName(desired.MachineRef)
+}
+
+func objectReferenceName(ref *corev1.ObjectReference) string {
+	if ref == nil {
+		return ""
+	}
+	return ref.Name
 }
 
 func (r *VsphereAgentPoolReconciler) updateVsphereAgentStatus(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent) error {

@@ -97,6 +97,18 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: time.Minute}, r.updateStatus(ctx, &agent)
 	}
 
+	if agent.Labels[vsphereAgentCreatedForLabel] == vsphereAgentCreatedForAdopted {
+		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+			Type:               conditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: agent.Generation,
+			Reason:             "AdoptionPending",
+			Message:            "waiting for VsphereAgentPool to initialize adopted VM status",
+		})
+		_ = r.updateStatus(ctx, &agent)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	poolOps := r.poolReconciler()
 	infraEnvAvailable, infraEnvISOURL, infraEnvMessage := poolOps.infraEnvAvailable(ctx, &pool)
 	if !infraEnvAvailable {
