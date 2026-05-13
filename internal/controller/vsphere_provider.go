@@ -44,10 +44,9 @@ const (
 	isoDownloadTimeout = 30 * time.Minute
 )
 
-// VMCreateRequest carries per-reconcile VM creation details. Ordinal is only
-// unique within one reconciliation; providers still create collision-safe names.
+// VMCreateRequest carries per-reconcile VM creation details.
 type VMCreateRequest struct {
-	Ordinal int32
+	Name    string
 	ISOPath string
 }
 
@@ -120,7 +119,10 @@ type govcVMProvider struct {
 }
 
 func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
-	name := desiredAgentHostname(pool)
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = desiredAgentHostname(pool)
+	}
 	if req.ISOPath == "" {
 		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("cached ISO path is empty")
 	}

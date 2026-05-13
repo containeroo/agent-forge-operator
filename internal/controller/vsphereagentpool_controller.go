@@ -279,25 +279,33 @@ func (r *VsphereAgentPoolReconciler) ensureVsphereAgentForAdoptedVM(ctx context.
 	current := &agentforgev1alpha1.VsphereAgent{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, current)
 	if apierrors.IsNotFound(err) {
-		current = &agentforgev1alpha1.VsphereAgent{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace:  pool.Namespace,
-				Name:       name,
-				Finalizers: []string{vsphereAgentFinalizerName},
-				Labels: map[string]string{
-					vsphereAgentPoolNameLabel:   pool.Name,
-					vsphereAgentCreatedForLabel: vsphereAgentCreatedForAdopted,
+		existing, findErr := r.findVsphereAgentForAdoptedVM(ctx, pool, agent, vm)
+		if findErr != nil {
+			return findErr
+		}
+		if existing != nil {
+			current = existing
+		} else {
+			current = &agentforgev1alpha1.VsphereAgent{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:  pool.Namespace,
+					Name:       name,
+					Finalizers: []string{vsphereAgentFinalizerName},
+					Labels: map[string]string{
+						vsphereAgentPoolNameLabel:   pool.Name,
+						vsphereAgentCreatedForLabel: vsphereAgentCreatedForAdopted,
+					},
 				},
-			},
-			Spec: agentforgev1alpha1.VsphereAgentSpec{
-				PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name},
-			},
-		}
-		if err := controllerutil.SetControllerReference(pool, current, r.Scheme); err != nil {
-			return err
-		}
-		if err := r.Create(ctx, current); err != nil {
-			return err
+				Spec: agentforgev1alpha1.VsphereAgentSpec{
+					PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name},
+				},
+			}
+			if err := controllerutil.SetControllerReference(pool, current, r.Scheme); err != nil {
+				return err
+			}
+			if err := r.Create(ctx, current); err != nil {
+				return err
+			}
 		}
 	}
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -310,11 +318,57 @@ func (r *VsphereAgentPoolReconciler) ensureVsphereAgentForAdoptedVM(ctx context.
 	if desiredVM.Reason == "" {
 		desiredVM.Reason = reasonVMAdopted
 	}
-	if current.Status.VM.Name != "" && (current.Labels[vsphereAgentCreatedForLabel] != vsphereAgentCreatedForAdopted || adoptedVMStatusMatches(current.Status.VM, desiredVM)) {
-		return nil
+	if current.Status.VM.Name != "" && adoptedVMStatusMatches(current.Status.VM, desiredVM) {
+		return r.deleteDuplicateVsphereAgentsForVM(ctx, pool, current, desiredVM)
 	}
 	current.Status.VM = desiredVM
-	return r.updateVsphereAgentStatus(ctx, current)
+	if err := r.updateVsphereAgentStatus(ctx, current); err != nil {
+		return err
+	}
+	return r.deleteDuplicateVsphereAgentsForVM(ctx, pool, current, desiredVM)
+}
+
+func (r *VsphereAgentPoolReconciler) findVsphereAgentForAdoptedVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo, vm agentforgev1alpha1.OwnedVMStatus) (*agentforgev1alpha1.VsphereAgent, error) {
+	var list agentforgev1alpha1.VsphereAgentList
+	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name}); err != nil {
+		return nil, err
+	}
+	for i := range list.Items {
+		current := &list.Items[i]
+		if current.GetDeletionTimestamp() != nil {
+			continue
+		}
+		if current.Status.VM.Name != "" && current.Status.VM.Name == vm.Name {
+			return current, nil
+		}
+		if vmMatchesAgentIdentity(current.Status.VM, agent) {
+			return current, nil
+		}
+		if current.Status.VM.AgentRef != nil && current.Status.VM.AgentRef.Name == agent.Name {
+			return current, nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *VsphereAgentPoolReconciler) deleteDuplicateVsphereAgentsForVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, current *agentforgev1alpha1.VsphereAgent, vm agentforgev1alpha1.OwnedVMStatus) error {
+	if vm.Name == "" || current.Name != vm.Name {
+		return nil
+	}
+	var list agentforgev1alpha1.VsphereAgentList
+	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name}); err != nil {
+		return err
+	}
+	for i := range list.Items {
+		duplicate := &list.Items[i]
+		if duplicate.Name == current.Name || duplicate.GetDeletionTimestamp() != nil || duplicate.Status.VM.Name != vm.Name {
+			continue
+		}
+		if err := r.Delete(ctx, duplicate); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func adoptedVMStatusMatches(current, desired agentforgev1alpha1.OwnedVMStatus) bool {

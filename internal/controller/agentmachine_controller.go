@@ -18,15 +18,11 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -84,50 +80,59 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) error {
-	name := vsphereAgentNameForAgentMachine(pool, agentMachine)
-	var existing agentforgev1alpha1.VsphereAgent
-	err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, &existing)
-	if err == nil {
-		return nil
-	}
-	if !apierrors.IsNotFound(err) {
+	exists, err := r.vsphereAgentExistsForAgentMachine(ctx, pool, agentMachine)
+	if err != nil || exists {
 		return err
 	}
 
-	agent := &agentforgev1alpha1.VsphereAgent{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: pool.Namespace,
-			Name:      name,
-			Labels: map[string]string{
-				vsphereAgentPoolNameLabel:    pool.Name,
-				vsphereAgentMachineNameLabel: agentMachine.GetName(),
-				vsphereAgentMachineUIDLabel:  string(agentMachine.GetUID()),
-				vsphereAgentCreatedForLabel:  vsphereAgentCreatedForDemand,
+	for i := 0; i < 5; i++ {
+		name := vsphereAgentNameForAgentMachine(pool, agentMachine)
+		agent := &agentforgev1alpha1.VsphereAgent{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: pool.Namespace,
+				Name:      name,
+				Labels: map[string]string{
+					vsphereAgentPoolNameLabel:    pool.Name,
+					vsphereAgentMachineNameLabel: agentMachine.GetName(),
+					vsphereAgentMachineUIDLabel:  string(agentMachine.GetUID()),
+					vsphereAgentCreatedForLabel:  vsphereAgentCreatedForDemand,
+				},
 			},
-		},
-		Spec: agentforgev1alpha1.VsphereAgentSpec{
-			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name},
-		},
+			Spec: agentforgev1alpha1.VsphereAgentSpec{
+				PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name},
+			},
+		}
+		if err := controllerutil.SetControllerReference(pool, agent, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, agent); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				continue
+			}
+			return err
+		}
+		return nil
 	}
-	if err := controllerutil.SetControllerReference(pool, agent, r.Scheme); err != nil {
-		return err
+	return apierrors.NewAlreadyExists(agentforgev1alpha1.GroupVersion.WithResource("vsphereagents").GroupResource(), vsphereAgentNameForAgentMachine(pool, agentMachine))
+}
+
+func (r *AgentMachineReconciler) vsphereAgentExistsForAgentMachine(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) (bool, error) {
+	labels := map[string]string{
+		vsphereAgentPoolNameLabel:    pool.Name,
+		vsphereAgentMachineNameLabel: agentMachine.GetName(),
 	}
-	return r.Create(ctx, agent)
+	if agentMachine.GetUID() != "" {
+		labels[vsphereAgentMachineUIDLabel] = string(agentMachine.GetUID())
+	}
+	var list agentforgev1alpha1.VsphereAgentList
+	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels(labels)); err != nil {
+		return false, err
+	}
+	return len(list.Items) > 0, nil
 }
 
 func vsphereAgentNameForAgentMachine(pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) string {
-	uid := string(agentMachine.GetUID())
-	if uid == "" {
-		uid = fmt.Sprintf("%s/%s", agentMachine.GetNamespace(), agentMachine.GetName())
-	}
-	sum := sha256.Sum256([]byte(uid))
-	suffix := hex.EncodeToString(sum[:])[:10]
-	prefix := pool.Name
-	maxPrefixLen := 63 - len(suffix) - 1
-	if len(prefix) > maxPrefixLen {
-		prefix = prefix[:maxPrefixLen]
-	}
-	return fmt.Sprintf("%s-%s", prefix, suffix)
+	return desiredAgentHostname(pool)
 }
 
 func (r *AgentMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {

@@ -151,7 +151,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	vm, err := provider.CreateVM(ctx, &pool, VMCreateRequest{ISOPath: isoPath})
+	vm, err := provider.CreateVM(ctx, &pool, VMCreateRequest{Name: agent.Name, ISOPath: isoPath})
 	if err != nil {
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
@@ -176,16 +176,45 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
 	if agent.Status.VM.Name != "" {
-		provider, err := r.poolReconciler().provider(ctx, pool)
+		managedByAnotherAgent, err := r.vmManagedByAnotherVsphereAgent(ctx, agent)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if err := provider.DeleteVM(ctx, pool, agent.Status.VM); err != nil {
-			return ctrl.Result{}, err
+		if !managedByAnotherAgent {
+			provider, err := r.poolReconciler().provider(ctx, pool)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if err := provider.DeleteVM(ctx, pool, agent.Status.VM); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 	controllerutil.RemoveFinalizer(agent, vsphereAgentFinalizerName)
 	return ctrl.Result{}, r.patchFinalizer(ctx, agent)
+}
+
+func (r *VsphereAgentReconciler) vmManagedByAnotherVsphereAgent(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent) (bool, error) {
+	if agent.Status.VM.Name == "" || agent.Spec.PoolRef.Name == "" {
+		return false, nil
+	}
+	if agent.Name == agent.Status.VM.Name {
+		return false, nil
+	}
+	var list agentforgev1alpha1.VsphereAgentList
+	if err := r.List(ctx, &list, client.InNamespace(agent.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: agent.Spec.PoolRef.Name}); err != nil {
+		return false, err
+	}
+	for i := range list.Items {
+		other := &list.Items[i]
+		if other.Name == agent.Name || other.GetDeletionTimestamp() != nil {
+			continue
+		}
+		if other.Status.VM.Name == agent.Status.VM.Name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *VsphereAgentReconciler) patchFinalizer(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent) error {
