@@ -148,15 +148,19 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		})
 	}
 
-	vmsToDelete, agentsToDelete := deletedMachineTargets(snapshot.OwnedVMs, snapshot.MatchingAgents)
-	if snapshot.WaitingAgentMachines == 0 && snapshot.AgentMachinesWithoutAgent == 0 {
-		surplusAvailable := availableAgents
-		if surplusAvailable > 0 {
-			surplusVMs, surplusAgents := surplusAvailableDeletionTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, vmsToDelete, surplusAvailable)
-			vmsToDelete = append(vmsToDelete, surplusVMs...)
-			agentsToDelete = append(agentsToDelete, surplusAgents...)
+	var vmsToDelete []agentforgev1alpha1.OwnedVMStatus
+	var agentsToDelete []AgentInfo
+	if cleanupEnabled(pool) {
+		vmsToDelete, agentsToDelete = deletedMachineTargets(snapshot.OwnedVMs, snapshot.MatchingAgents)
+		if snapshot.WaitingAgentMachines == 0 && snapshot.AgentMachinesWithoutAgent == 0 {
+			surplusAvailable := availableAgents
+			if surplusAvailable > 0 {
+				surplusVMs, surplusAgents := surplusAvailableDeletionTargets(snapshot.OwnedVMs, snapshot.MatchingAgents, vmsToDelete, surplusAvailable)
+				vmsToDelete = append(vmsToDelete, surplusVMs...)
+				agentsToDelete = append(agentsToDelete, surplusAgents...)
+			}
+			vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete)...)
 		}
-		vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete)...)
 	}
 	for _, vm := range vmsToDelete {
 		reason := reasonMachineDeletedPolicy

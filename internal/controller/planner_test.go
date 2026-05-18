@@ -290,8 +290,8 @@ func TestBuildPlanDeletesVMsForDeletedMachines(t *testing.T) {
 	plan := buildPlan(pool, PoolSnapshot{
 		WaitingAgentMachines: 0,
 		MatchingAgents: []AgentInfo{
-			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
-			{Name: testAgent2, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testFreeVM},
 			{Name: testAgent3, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole},
 		},
 		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
@@ -308,6 +308,32 @@ func TestBuildPlanDeletesVMsForDeletedMachines(t *testing.T) {
 	}
 	if len(plan.AgentsToDelete) != 1 || plan.AgentsToDelete[0].Name != testAgent2 {
 		t.Fatalf("AgentsToDelete = %#v, want Agent paired with deleted VM", plan.AgentsToDelete)
+	}
+}
+
+func TestBuildPlanRetainsCleanupTargetsWhenCleanupPolicyRetain(t *testing.T) {
+	pool := testPool()
+	pool.Spec.CleanupPolicy = agentforgev1alpha1.CleanupPolicyRetain
+
+	plan := buildPlan(pool, PoolSnapshot{
+		AgentMachines:        1,
+		WaitingAgentMachines: 0,
+		MatchingAgents: []AgentInfo{
+			{Name: testAgent1, Bound: true, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testAgent1},
+			{Name: testAgent2, Bound: false, Approved: true, SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: testFreeVM},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: testFreeVM, Phase: phaseAvailable, AgentRef: testAgentRef(testAgent2)},
+			{Name: "orphaned-vm", Phase: phaseOrphaned},
+			{Name: "released-vm", Phase: phaseReleased, Reason: reasonMachineDeleted, AgentRef: testAgentRef(testAgent2)},
+		},
+	})
+
+	if len(plan.VMsToDelete) != 0 || len(plan.AgentsToDelete) != 0 {
+		t.Fatalf("delete targets = VMs %#v Agents %#v, want retained cleanup targets", plan.VMsToDelete, plan.AgentsToDelete)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Type != actionNoop {
+		t.Fatalf("actions = %#v, want Noop when cleanup targets are retained", plan.Actions)
 	}
 }
 

@@ -26,6 +26,8 @@ import (
 type LocalObjectReference struct {
 	// Name is the referenced object's metadata.name.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 }
 
@@ -34,10 +36,14 @@ type LocalObjectReference struct {
 type SecretReference struct {
 	// Name is the Secret metadata.name.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 
 	// Namespace is the Secret metadata.namespace. Leave empty to use the
 	// VsphereAgentPool namespace.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
@@ -53,43 +59,54 @@ type VspherePlacementSpec struct {
 	// Datacenter is the target vSphere datacenter name.
 	// +kubebuilder:default=dc1
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	Datacenter string `json:"datacenter,omitempty"`
 
 	// DatastoreCluster is the datastore cluster used for VM disks. It maps to
 	// the static module's vsphere_datastore_cluster input.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	DatastoreCluster string `json:"datastoreCluster"`
 
 	// ISODatastore is the datastore that contains the uploaded discovery ISO.
 	// It maps to the static module's vsphere_iso_datastore input.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	ISODatastore string `json:"isoDatastore"`
 
 	// ResourcePool is the vSphere resource pool path, for example
 	// cluster/Resources.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
 	ResourcePool string `json:"resourcePool"`
 
 	// Folder is the VM folder path. When empty, the operator uses the hosted
 	// cluster name.
+	// +kubebuilder:validation:MaxLength=512
 	// +optional
 	Folder string `json:"folder,omitempty"`
 
 	// Network is the vSphere network name attached to the VM NIC.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	Network string `json:"network"`
 
 	// VMTags contains optional vSphere tag IDs to attach to each VM.
+	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	VMTags []string `json:"vmTags,omitempty"`
 
 	// GuestID is the vSphere guest OS identifier used for from-scratch VMs.
 	// +kubebuilder:default=rhel9_64Guest
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.-]+$`
 	// +optional
 	GuestID string `json:"guestID,omitempty"`
 
 	// SCSIType is the SCSI controller type used for from-scratch VMs.
 	// +kubebuilder:default=pvscsi
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.-]+$`
 	// +optional
 	SCSIType string `json:"scsiType,omitempty"`
 
@@ -101,6 +118,8 @@ type VspherePlacementSpec struct {
 
 	// NetworkAdapterType is the vSphere NIC adapter type.
 	// +kubebuilder:default=vmxnet3
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.-]+$`
 	// +optional
 	NetworkAdapterType string `json:"networkAdapterType,omitempty"`
 
@@ -113,21 +132,26 @@ type VspherePlacementSpec struct {
 type VMTemplateSpec struct {
 	// NamePrefix prefixes operator-created VM names. When empty, the operator
 	// uses <hostedCluster>-<agent.role>.
+	// +kubebuilder:validation:MaxLength=58
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +optional
 	NamePrefix string `json:"namePrefix,omitempty"`
 
 	// NumCPUs is the VM vCPU count.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=128
 	// +kubebuilder:default=4
 	NumCPUs int32 `json:"numCPUs,omitempty"`
 
 	// MemoryMiB is the VM memory size in MiB.
 	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=1048576
 	// +kubebuilder:default=16384
 	MemoryMiB int32 `json:"memoryMiB,omitempty"`
 
 	// DiskGiB is the primary disk size in GiB.
 	// +kubebuilder:validation:Minimum=20
+	// +kubebuilder:validation:Maximum=65536
 	// +kubebuilder:default=100
 	DiskGiB int32 `json:"diskGiB,omitempty"`
 }
@@ -139,12 +163,15 @@ type AgentBindingSpec struct {
 	// Agents. For worker pools this is normally "worker".
 	// +kubebuilder:default=worker
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$`
 	Role string `json:"role,omitempty"`
 
 	// Labels are required on a discovered Agent before the Agent CAPI provider
 	// can bind it to an AgentMachine. These should match the NodePool
 	// spec.platform.agent.agentLabelSelector labels.
 	// +kubebuilder:validation:MinProperties=1
+	// +kubebuilder:validation:MaxProperties=32
 	Labels map[string]string `json:"labels"`
 
 	// Approve controls whether matching discovered Agents are automatically
@@ -164,6 +191,7 @@ type ISOCacheSpec struct {
 	// RetainVersions controls how many content-addressed ISO objects are kept in
 	// the datastore. The current ISO is always retained.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
 	// +kubebuilder:default=2
 	// +optional
 	RetainVersions int32 `json:"retainVersions,omitempty"`
@@ -171,9 +199,26 @@ type ISOCacheSpec struct {
 	// PathPrefix is the datastore directory used for content-addressed ISO
 	// objects. When empty, the operator uses
 	// agent-forge/<namespace>/<vsphereAgentPool>.
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^$|^[^/\s][^\s]*$`
 	// +optional
 	PathPrefix string `json:"pathPrefix,omitempty"`
 }
+
+// CleanupPolicy controls whether the operator deletes external inventory when
+// demand disappears or the VsphereAgentPool is deleted.
+// +kubebuilder:validation:Enum=Delete;Retain
+type CleanupPolicy string
+
+const (
+	// CleanupPolicyDelete preserves the historical behavior: stale
+	// operator-created VMs and unbound Agents are deleted when no longer needed.
+	CleanupPolicyDelete CleanupPolicy = "Delete"
+
+	// CleanupPolicyRetain keeps external VMs and Agents in place. The operator
+	// still removes its own Kubernetes bookkeeping objects during pool deletion.
+	CleanupPolicyRetain CleanupPolicy = "Retain"
+)
 
 // VsphereAgentPoolSpec defines the desired state of VsphereAgentPool.
 type VsphereAgentPoolSpec struct {
@@ -205,6 +250,13 @@ type VsphereAgentPoolSpec struct {
 	// ISO configures content-addressed caching of the InfraEnv discovery ISO.
 	// +optional
 	ISO ISOCacheSpec `json:"iso,omitempty"`
+
+	// CleanupPolicy controls whether stale vSphere VMs and unbound Assisted
+	// Installer Agents are deleted by the operator. Use Retain for conservative
+	// production rollouts where external inventory cleanup is handled manually.
+	// +kubebuilder:default=Delete
+	// +optional
+	CleanupPolicy CleanupPolicy `json:"cleanupPolicy,omitempty"`
 }
 
 // OwnedVMStatus records a VM created or managed by this VsphereAgentPool.

@@ -45,3 +45,4 @@ spec:
     checkInterval: 10m
     retainVersions: 2
     pathPrefix: agent-forge/demo/demo-worker
+  cleanupPolicy: Delete

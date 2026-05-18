@@ -203,6 +203,320 @@ func TestReconcileMarksReadyFalseWhenInfraEnvUnavailable(t *testing.T) {
 	}
 }
 
+func TestPoolDeleteWaitsForVsphereAgentFinalizers(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	agent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  testNamespace,
+			Name:       "demo-worker-agent",
+			Finalizers: []string{vsphereAgentFinalizerName},
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel: testNodePool,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: newOwnedVMStatus("demo-worker-agent"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, agent).
+		WithStatusSubresource(pool, agent).
+		Build()
+
+	provider := &fakeVMProvider{}
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if result.RequeueAfter != 10*time.Second {
+		t.Fatalf("requeueAfter = %s, want 10s while child finalizer runs", result.RequeueAfter)
+	}
+	if provider.deleteVMCalls != 0 {
+		t.Fatalf("DeleteVM calls = %d, want child VsphereAgent to delete VM", provider.deleteVMCalls)
+	}
+
+	var updatedPool agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updatedPool); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerutil.ContainsFinalizer(&updatedPool, finalizerName) {
+		t.Fatalf("pool finalizers = %#v, want pool finalizer retained until child is gone", updatedPool.Finalizers)
+	}
+	var deletingAgent agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: agent.Name}, &deletingAgent); err != nil {
+		t.Fatal(err)
+	}
+	if deletingAgent.GetDeletionTimestamp() == nil {
+		t.Fatal("child VsphereAgent was not marked for deletion")
+	}
+}
+
+func TestPoolDeleteCleansUpLegacyStatusVMsAfterChildrenGone(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{newOwnedVMStatus("legacy-vm")}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
+		Data: map[string][]byte{
+			"server":   []byte("vcenter.example.invalid"),
+			"username": []byte("user"),
+			"password": []byte("pass"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, secret).
+		WithStatusSubresource(pool).
+		Build()
+
+	provider := &fakeVMProvider{}
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if provider.deleteVMCalls != 1 || provider.deletedVMNames[0] != "legacy-vm" {
+		t.Fatalf("deleted VMs = %#v, want legacy-vm", provider.deletedVMNames)
+	}
+	var updatedPool agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updatedPool); err != nil {
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		t.Fatal(err)
+	}
+	if controllerutil.ContainsFinalizer(&updatedPool, finalizerName) {
+		t.Fatalf("pool finalizers = %#v, want pool finalizer removed after legacy VM cleanup", updatedPool.Finalizers)
+	}
+}
+
+func TestPoolDeleteRetainsLegacyStatusVMsWhenCleanupPolicyRetain(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Spec.CleanupPolicy = agentforgev1alpha1.CleanupPolicyRetain
+	pool.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{newOwnedVMStatus("legacy-vm")}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool).
+		WithStatusSubresource(pool).
+		Build()
+
+	provider := &fakeVMProvider{}
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if provider.deleteVMCalls != 0 {
+		t.Fatalf("DeleteVM calls = %d, want retained VM", provider.deleteVMCalls)
+	}
+	var updatedPool agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updatedPool); err != nil {
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		t.Fatal(err)
+	}
+	if controllerutil.ContainsFinalizer(&updatedPool, finalizerName) {
+		t.Fatalf("pool finalizers = %#v, want pool finalizer removed after retaining legacy VM", updatedPool.Finalizers)
+	}
+}
+
+func TestPoolStatusUpdatePreservesISOStatus(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	current := reconcileTestPool()
+	current.Status.ISO = agentforgev1alpha1.ISOCacheStatus{
+		URL:    "https://example.invalid/discovery.iso",
+		Path:   "agent-forge/demo/demo-worker/abc.iso",
+		SHA256: "abc",
+	}
+	stale := current.DeepCopy()
+	stale.Status.ISO = agentforgev1alpha1.ISOCacheStatus{}
+	setPlanConditions(stale, PoolPlan{AgentMachines: 1}, "")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(current).
+		WithStatusSubresource(current).
+		Build()
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+
+	if err := reconciler.updateStatus(ctx, stale, PoolPlan{AgentMachines: 1, DesiredReplicas: 1}); err != nil {
+		t.Fatalf("updateStatus returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.ISO.Path != current.Status.ISO.Path || updated.Status.ISO.SHA256 != current.Status.ISO.SHA256 {
+		t.Fatalf("ISO status = %#v, want preserved current ISO status", updated.Status.ISO)
+	}
+}
+
+func TestPoolPatchFinalizerPreservesForeignFinalizers(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Finalizers = []string{finalizerName, "example.com/other-finalizer"}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool).
+		Build()
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+
+	desired := pool.DeepCopy()
+	controllerutil.RemoveFinalizer(desired, finalizerName)
+	if err := reconciler.patchFinalizer(ctx, desired); err != nil {
+		t.Fatalf("patchFinalizer returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if controllerutil.ContainsFinalizer(&updated, finalizerName) {
+		t.Fatalf("finalizers = %#v, want managed finalizer removed", updated.Finalizers)
+	}
+	if !controllerutil.ContainsFinalizer(&updated, "example.com/other-finalizer") {
+		t.Fatalf("finalizers = %#v, want foreign finalizer preserved", updated.Finalizers)
+	}
+}
+
+func TestVsphereAgentReconcileRetainsVMWhenCleanupPolicyRetain(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Spec.CleanupPolicy = agentforgev1alpha1.CleanupPolicyRetain
+	agent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         testNamespace,
+			Name:              "demo-worker-retained",
+			Finalizers:        []string{vsphereAgentFinalizerName},
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel: testNodePool,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: newOwnedVMStatus("demo-worker-retained"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, agent).
+		WithStatusSubresource(pool, agent).
+		Build()
+
+	provider := &fakeVMProvider{}
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: agent.Name}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if provider.deleteVMCalls != 0 {
+		t.Fatalf("DeleteVM calls = %d, want retained VM", provider.deleteVMCalls)
+	}
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: agent.Name}, &updated); err != nil {
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		t.Fatal(err)
+	}
+	if controllerutil.ContainsFinalizer(&updated, vsphereAgentFinalizerName) {
+		t.Fatalf("finalizers = %#v, want finalizer removed without VM deletion", updated.Finalizers)
+	}
+}
+
 func TestReconcileCreatesVsphereAgentInsteadOfCallingProvider(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()

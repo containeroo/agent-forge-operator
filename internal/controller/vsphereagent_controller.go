@@ -64,6 +64,10 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	var pool agentforgev1alpha1.VsphereAgentPool
 	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Spec.PoolRef.Name}, &pool); err != nil {
 		if apierrors.IsNotFound(err) {
+			if !agent.DeletionTimestamp.IsZero() && agent.Status.VM.Name == "" {
+				controllerutil.RemoveFinalizer(&agent, vsphereAgentFinalizerName)
+				return ctrl.Result{}, r.patchFinalizer(ctx, &agent)
+			}
 			meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 				Type:               conditionReady,
 				Status:             metav1.ConditionFalse,
@@ -153,6 +157,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	vm, err := provider.CreateVM(ctx, &pool, VMCreateRequest{Name: agent.Name, ISOPath: isoPath})
 	if err != nil {
+		recordVMOperation("create", err)
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
 			Status:             metav1.ConditionFalse,
@@ -163,6 +168,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		_ = r.updateStatus(ctx, &agent)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+	recordVMOperation("create", nil)
 	agent.Status.VM = vm
 	meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,
@@ -175,7 +181,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
-	if agent.Status.VM.Name != "" {
+	if cleanupEnabled(pool) && agent.Status.VM.Name != "" {
 		managedByAnotherAgent, err := r.vmManagedByAnotherVsphereAgent(ctx, agent)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -186,8 +192,10 @@ func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *age
 				return ctrl.Result{}, err
 			}
 			if err := provider.DeleteVM(ctx, pool, agent.Status.VM); err != nil {
+				recordVMOperation("delete", err)
 				return ctrl.Result{}, err
 			}
+			recordVMOperation("delete", nil)
 		}
 	}
 	controllerutil.RemoveFinalizer(agent, vsphereAgentFinalizerName)
@@ -223,7 +231,11 @@ func (r *VsphereAgentReconciler) patchFinalizer(ctx context.Context, agent *agen
 		return err
 	}
 	before := current.DeepCopy()
-	current.SetFinalizers(agent.GetFinalizers())
+	if controllerutil.ContainsFinalizer(agent, vsphereAgentFinalizerName) {
+		controllerutil.AddFinalizer(current, vsphereAgentFinalizerName)
+	} else {
+		controllerutil.RemoveFinalizer(current, vsphereAgentFinalizerName)
+	}
 	return r.Patch(ctx, current, client.MergeFrom(before))
 }
 

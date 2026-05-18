@@ -36,6 +36,7 @@ HyperShift and CAPI remain authoritative. The operator reacts to `AgentMachine` 
 | `spec.iso.checkInterval` | no | How often to download and hash the InfraEnv ISO to detect changed bytes behind a stable URL. Defaults to `10m`. |
 | `spec.iso.retainVersions` | no | Number of content-addressed ISO objects to keep in the datastore. Defaults to `2`. |
 | `spec.iso.pathPrefix` | no | Datastore directory for cached ISO objects. Defaults to `agent-forge/<namespace>/<vsphereAgentPool>`. |
+| `spec.cleanupPolicy` | no | External inventory cleanup policy. `Delete` deletes stale owned VMs and unbound Agents when demand disappears. `Retain` leaves external VMs and Agents in place and only removes operator bookkeeping. Defaults to `Delete`. |
 
 ## Status Fields
 
@@ -62,6 +63,11 @@ bytes changed or the active datastore object is missing. To force an immediate
 refresh, set annotation
 `agent-forge.containeroo.ch/force-iso-refresh=<unique-value>` on the
 `VsphereAgentPool`.
+
+Set `spec.cleanupPolicy: Retain` for conservative production rollouts where VM
+and Agent cleanup is handled manually. With `Retain`, the operator still creates
+and patches capacity, but it does not plan scale-down VM/Agent deletes and it
+does not destroy vSphere VMs when a pool or `VsphereAgent` is deleted.
 
 ## Current Implementation Note
 

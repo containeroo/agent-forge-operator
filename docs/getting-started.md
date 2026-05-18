@@ -34,13 +34,13 @@ Adjust the names for your environment.
 Install CRDs from a release:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.14/crds.yaml
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.15/crds.yaml
 ```
 
 Deploy the controller:
 
 ```sh
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.14
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.15
 ```
 
 Check that the manager is running:
@@ -210,11 +210,24 @@ Useful status fields:
 | `status.plannedActions`       | Planned `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions.                            |
 | `status.conditions`           | Readiness, AgentMachine demand, InfraEnv availability, ISO cache state, and capacity state.                |
 
+Production rollouts can set `spec.cleanupPolicy: Retain` to prevent automatic
+deletion of stale owned VMs and unbound Agents while still allowing the operator
+to create and prepare new capacity. The default `Delete` policy preserves the
+normal automated cleanup behavior.
+
 Check Events:
 
 ```sh
 kubectl -n demo get events --field-selector involvedObject.name=demo-worker --sort-by=.lastTimestamp
 ```
+
+Metrics are exposed on the controller manager metrics endpoint:
+
+| Metric | Meaning |
+| ------ | ------- |
+| `agent_forge_vsphere_vm_operations_total` | VM create/delete attempts by operation and result. |
+| `agent_forge_iso_operations_total` | ISO cache ensure/delete attempts by operation and result. |
+| `agent_forge_pool_capacity` | Per-pool capacity gauges for desired, waiting, available, pending, and planned-create counts. |
 
 ## 7. Reconciliation Behavior
 
@@ -297,6 +310,6 @@ kubectl -n demo delete vsphereagentpool demo-worker
 Uninstall the operator:
 
 ```sh
-kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.14
-kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.14/crds.yaml
+kubectl delete -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.15
+kubectl delete -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.15/crds.yaml
 ```

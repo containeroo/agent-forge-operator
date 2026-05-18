@@ -75,6 +75,7 @@ spec:
                       Labels are required on a discovered Agent before the Agent CAPI provider
                       can bind it to an AgentMachine. These should match the NodePool
                       spec.platform.agent.agentLabelSelector labels.
+                    maxProperties: 32
                     minProperties: 1
                     type: object
                   role:
@@ -82,11 +83,23 @@ spec:
                     description: |-
                       Role is the Hypershift NodePool role label value to apply to discovered
                       Agents. For worker pools this is normally "worker".
+                    maxLength: 63
                     minLength: 1
+                    pattern: ^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$
                     type: string
                 required:
                 - labels
                 type: object
+              cleanupPolicy:
+                default: Delete
+                description: |-
+                  CleanupPolicy controls whether stale vSphere VMs and unbound Assisted
+                  Installer Agents are deleted by the operator. Use Retain for conservative
+                  production rollouts where external inventory cleanup is handled manually.
+                enum:
+                - Delete
+                - Retain
+                type: string
               controlPlaneNamespace:
                 description: |-
                   ControlPlaneNamespace is the hosted control plane namespace that contains
@@ -100,7 +113,9 @@ spec:
                 properties:
                   name:
                     description: Name is the referenced object's metadata.name.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                     type: string
                 required:
                 - name
@@ -112,7 +127,9 @@ spec:
                 properties:
                   name:
                     description: Name is the referenced object's metadata.name.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                     type: string
                 required:
                 - name
@@ -131,6 +148,8 @@ spec:
                       PathPrefix is the datastore directory used for content-addressed ISO
                       objects. When empty, the operator uses
                       agent-forge/<namespace>/<vsphereAgentPool>.
+                    maxLength: 512
+                    pattern: ^$|^[^/\s][^\s]*$
                     type: string
                   retainVersions:
                     default: 2
@@ -138,6 +157,7 @@ spec:
                       RetainVersions controls how many content-addressed ISO objects are kept in
                       the datastore. The current ISO is always retained.
                     format: int32
+                    maximum: 20
                     minimum: 1
                     type: integer
                 type: object
@@ -147,7 +167,9 @@ spec:
                 properties:
                   name:
                     description: Name is the referenced object's metadata.name.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                     type: string
                 required:
                 - name
@@ -159,23 +181,28 @@ spec:
                     default: 100
                     description: DiskGiB is the primary disk size in GiB.
                     format: int32
+                    maximum: 65536
                     minimum: 20
                     type: integer
                   memoryMiB:
                     default: 16384
                     description: MemoryMiB is the VM memory size in MiB.
                     format: int32
+                    maximum: 1048576
                     minimum: 1024
                     type: integer
                   namePrefix:
                     description: |-
                       NamePrefix prefixes operator-created VM names. When empty, the operator
                       uses <hostedCluster>-<agent.role>.
+                    maxLength: 58
+                    pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   numCPUs:
                     default: 4
                     description: NumCPUs is the VM vCPU count.
                     format: int32
+                    maximum: 128
                     minimum: 1
                     type: integer
                 type: object
@@ -191,12 +218,16 @@ spec:
                     properties:
                       name:
                         description: Name is the Secret metadata.name.
+                        maxLength: 253
                         minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                         type: string
                       namespace:
                         description: |-
                           Namespace is the Secret metadata.namespace. Leave empty to use the
                           VsphereAgentPool namespace.
+                        maxLength: 63
+                        pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                     required:
                     - name
@@ -204,12 +235,14 @@ spec:
                   datacenter:
                     default: dc1
                     description: Datacenter is the target vSphere datacenter name.
+                    maxLength: 256
                     minLength: 1
                     type: string
                   datastoreCluster:
                     description: |-
                       DatastoreCluster is the datastore cluster used for VM disks. It maps to
                       the static module's vsphere_datastore_cluster input.
+                    maxLength: 256
                     minLength: 1
                     type: string
                   diskEagerlyScrub:
@@ -227,43 +260,54 @@ spec:
                     description: |-
                       Folder is the VM folder path. When empty, the operator uses the hosted
                       cluster name.
+                    maxLength: 512
                     type: string
                   guestID:
                     default: rhel9_64Guest
                     description: GuestID is the vSphere guest OS identifier used for
                       from-scratch VMs.
+                    maxLength: 64
+                    pattern: ^[A-Za-z0-9_.-]+$
                     type: string
                   isoDatastore:
                     description: |-
                       ISODatastore is the datastore that contains the uploaded discovery ISO.
                       It maps to the static module's vsphere_iso_datastore input.
+                    maxLength: 256
                     minLength: 1
                     type: string
                   network:
                     description: Network is the vSphere network name attached to the
                       VM NIC.
+                    maxLength: 256
                     minLength: 1
                     type: string
                   networkAdapterType:
                     default: vmxnet3
                     description: NetworkAdapterType is the vSphere NIC adapter type.
+                    maxLength: 64
+                    pattern: ^[A-Za-z0-9_.-]+$
                     type: string
                   resourcePool:
                     description: |-
                       ResourcePool is the vSphere resource pool path, for example
                       cluster/Resources.
+                    maxLength: 512
                     minLength: 1
                     type: string
                   scsiType:
                     default: pvscsi
                     description: SCSIType is the SCSI controller type used for from-scratch
                       VMs.
+                    maxLength: 64
+                    pattern: ^[A-Za-z0-9_.-]+$
                     type: string
                   vmTags:
                     description: VMTags contains optional vSphere tag IDs to attach
                       to each VM.
                     items:
                       type: string
+                    maxItems: 64
                     type: array
                 required:
                 - credentialsSecretRef

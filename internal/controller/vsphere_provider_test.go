@@ -167,6 +167,117 @@ exit 0
 	}
 }
 
+func TestGovcCreateVMRecoversExistingVM(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "vm.create" ]; then
+  echo "govc: The name 'demo-worker-ab12' already exists." >&2
+  exit 1
+fi
+if [ "$1" = "vm.info" ]; then
+  cat <<'JSON'
+{"virtualMachines":[{"config":{"uuid":"423297c6-d72e-28bb-b279-1209c29ab72b","hardware":{"device":[{"macAddress":"00:50:56:aa:bb:cc"}]}}}]}
+JSON
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	vm, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{
+		Name:    "demo-worker-ab12",
+		ISOPath: "agent-forge/demo/demo-worker/cached.iso",
+	})
+	if err != nil {
+		t.Fatalf("CreateVM returned error: %v", err)
+	}
+	if vm.Name != "demo-worker-ab12" || vm.BIOSUUID != "423297c6-d72e-28bb-b279-1209c29ab72b" || vm.MACAddress != "00-50-56-aa-bb-cc" {
+		t.Fatalf("VM status = %#v, want recovered existing VM identity", vm)
+	}
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := string(logBytes)
+	if !strings.Contains(calls, "vm.info") {
+		t.Fatalf("vm.info was not called to recover existing VM; calls:\n%s", calls)
+	}
+	if !strings.Contains(calls, "device.cdrom.add") || !strings.Contains(calls, "device.cdrom.insert") || !strings.Contains(calls, "vm.power -on demo-worker-ab12") {
+		t.Fatalf("existing VM recovery did not reconcile VM configuration; calls:\n%s", calls)
+	}
+}
+
+func TestGovcCreateVMDoesNotAddDuplicateCDROMWhenOneExists(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "vm.create" ]; then
+  echo "govc: duplicate name" >&2
+  exit 1
+fi
+if [ "$1" = "device.cdrom.ls" ]; then
+  echo "cdrom-3000"
+fi
+if [ "$1" = "vm.info" ]; then
+  cat <<'JSON'
+{"virtualMachines":[{"config":{"uuid":"423297c6-d72e-28bb-b279-1209c29ab72b","hardware":{"device":[{"macAddress":"00:50:56:aa:bb:cc"}]}}}]}
+JSON
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	provider := &govcVMProvider{
+		command: govcPath,
+		config: govcConfig{
+			Server:   "vcenter.example.invalid",
+			Username: "user",
+			Password: "pass",
+			Insecure: "true",
+		},
+	}
+
+	if _, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{
+		Name:    "demo-worker-ab12",
+		ISOPath: "agent-forge/demo/demo-worker/cached.iso",
+	}); err != nil {
+		t.Fatalf("CreateVM returned error: %v", err)
+	}
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := string(logBytes)
+	if strings.Contains(calls, "device.cdrom.add") {
+		t.Fatalf("existing cdrom should have been reused; calls:\n%s", calls)
+	}
+	if !strings.Contains(calls, "device.cdrom.insert") {
+		t.Fatalf("existing cdrom should still receive ISO insert; calls:\n%s", calls)
+	}
+}
+
 func TestGovcEnsureISOUploadsContentAddressedPath(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()

@@ -146,11 +146,19 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 		args = append(args, "-disk.eager")
 	}
 	args = append(args, "-on=false", name)
+	created := true
 	if err := p.run(ctx, args...); err != nil {
-		return agentforgev1alpha1.OwnedVMStatus{}, err
+		if isGovcVMAlreadyExists(err) {
+			created = false
+		} else {
+			return agentforgev1alpha1.OwnedVMStatus{}, err
+		}
 	}
 
 	cleanupPartialVM := func(cause error) (agentforgev1alpha1.OwnedVMStatus, error) {
+		if !created {
+			return agentforgev1alpha1.OwnedVMStatus{}, cause
+		}
 		vm := newOwnedVMStatus(name)
 		if err := p.DeleteVM(ctx, pool, vm); err != nil {
 			return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("%w; failed to clean up partially created VM %q: %v", cause, name, err)
@@ -160,7 +168,7 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 	if err := p.run(ctx, "vm.change", "-vm", name, "-e", "disk.enableUUID=TRUE"); err != nil {
 		return cleanupPartialVM(err)
 	}
-	if err := p.run(ctx, "device.cdrom.add", "-vm", name); err != nil {
+	if err := p.ensureCDROM(ctx, name); err != nil {
 		return cleanupPartialVM(err)
 	}
 	if err := p.run(ctx, "device.cdrom.insert", "-vm", name, "-ds", pool.Spec.VSphere.ISODatastore, req.ISOPath); err != nil {
@@ -168,11 +176,15 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 	}
 	for _, tag := range pool.Spec.VSphere.VMTags {
 		if err := p.run(ctx, "tags.attach", tag, name); err != nil {
-			return cleanupPartialVM(err)
+			if !isGovcTagAlreadyAttached(err) {
+				return cleanupPartialVM(err)
+			}
 		}
 	}
 	if err := p.run(ctx, "vm.power", "-on", name); err != nil {
-		return cleanupPartialVM(err)
+		if !isGovcVMAlreadyPoweredOn(err) {
+			return cleanupPartialVM(err)
+		}
 	}
 
 	vm := newOwnedVMStatus(name)
@@ -181,6 +193,20 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 		vm.MACAddress = discovered.MACAddress
 	}
 	return vm, nil
+}
+
+func (p *govcVMProvider) ensureCDROM(ctx context.Context, name string) error {
+	output, err := p.runOutput(ctx, "device.cdrom.ls", "-vm", name)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(output)) != "" {
+		return nil
+	}
+	if err := p.run(ctx, "device.cdrom.add", "-vm", name); err != nil && !isGovcDeviceAlreadyExists(err) {
+		return err
+	}
+	return nil
 }
 
 func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req ISOEnsureRequest) (ISOEnsureResult, error) {
@@ -212,7 +238,9 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 	}
 
 	if dir := filepath.Dir(isoPath); dir != "." && dir != "" {
-		_ = p.run(ctx, "datastore.mkdir", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, dir)
+		if err := p.run(ctx, "datastore.mkdir", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, dir); err != nil && !isGovcDatastorePathAlreadyExists(err) {
+			return ISOEnsureResult{}, err
+		}
 	}
 	if err := p.run(ctx, "datastore.upload", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, tmpFile, isoPath); err != nil {
 		return ISOEnsureResult{}, err
@@ -244,7 +272,11 @@ func (p *govcVMProvider) DeleteISO(ctx context.Context, pool *agentforgev1alpha1
 	if strings.TrimSpace(isoPath) == "" {
 		return nil
 	}
-	return p.run(ctx, "datastore.rm", "-f", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, isoPath)
+	err := p.run(ctx, "datastore.rm", "-f", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, isoPath)
+	if isGovcDatastorePathNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func (p *govcVMProvider) datastorePathExists(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, isoPath string) (bool, error) {
@@ -321,6 +353,44 @@ func isGovcVMNotFound(err error) bool {
 	return strings.Contains(message, "no such vm") || strings.Contains(message, "vm ") && strings.Contains(message, " not found")
 }
 
+func isGovcVMAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "already exists") ||
+		strings.Contains(message, "duplicatename") ||
+		strings.Contains(message, "duplicate name")
+}
+
+func isGovcDeviceAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "already exists") ||
+		strings.Contains(message, "already present") ||
+		strings.Contains(message, "device") && strings.Contains(message, "exists")
+}
+
+func isGovcTagAlreadyAttached(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "already attached") ||
+		strings.Contains(message, "already exists")
+}
+
+func isGovcVMAlreadyPoweredOn(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "already powered on") ||
+		strings.Contains(message, "current state") && strings.Contains(message, "poweredon")
+}
+
 func isGovcDatastorePathNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -329,6 +399,15 @@ func isGovcDatastorePathNotFound(err error) bool {
 	return strings.Contains(message, "no such file") ||
 		strings.Contains(message, "not found") ||
 		strings.Contains(message, "no such object")
+}
+
+func isGovcDatastorePathAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "already exists") ||
+		strings.Contains(message, "file exists")
 }
 
 func downloadFileWithSHA256(ctx context.Context, url, path string) (string, int64, error) {

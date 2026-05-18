@@ -206,14 +206,37 @@ func refreshPlanOwnedVMCounts(plan *PoolPlan, pool *agentforgev1alpha1.VsphereAg
 }
 
 func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
-	if len(pool.Status.OwnedVMs) == 0 {
-		controllerutil.RemoveFinalizer(pool, finalizerName)
-		return ctrl.Result{}, r.patchFinalizer(ctx, pool)
+	agents, err := r.listVsphereAgentsForPool(ctx, pool)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(agents.Items) > 0 {
+		for i := range agents.Items {
+			agent := &agents.Items[i]
+			if agent.GetDeletionTimestamp() != nil {
+				continue
+			}
+			if err := r.Delete(ctx, agent); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	for _, vm := range pool.Status.OwnedVMs {
-		if err := r.deleteVsphereAgentForVM(ctx, pool, vm); err != nil {
+	if cleanupEnabled(pool) && len(pool.Status.OwnedVMs) > 0 {
+		provider, err := r.provider(ctx, pool)
+		if err != nil {
 			return ctrl.Result{}, err
+		}
+		for _, vm := range pool.Status.OwnedVMs {
+			if vm.Name == "" {
+				continue
+			}
+			if err := provider.DeleteVM(ctx, pool, vm); err != nil {
+				recordVMOperation("delete", err)
+				return ctrl.Result{}, err
+			}
+			recordVMOperation("delete", nil)
 		}
 	}
 	controllerutil.RemoveFinalizer(pool, finalizerName)
@@ -226,13 +249,23 @@ func (r *VsphereAgentPoolReconciler) patchFinalizer(ctx context.Context, pool *a
 		return err
 	}
 	before := current.DeepCopy()
-	current.SetFinalizers(pool.GetFinalizers())
+	if controllerutil.ContainsFinalizer(pool, finalizerName) {
+		controllerutil.AddFinalizer(current, finalizerName)
+	} else {
+		controllerutil.RemoveFinalizer(current, finalizerName)
+	}
 	return r.Patch(ctx, current, client.MergeFrom(before))
 }
 
-func (r *VsphereAgentPoolReconciler) listVsphereAgentVMs(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]agentforgev1alpha1.OwnedVMStatus, error) {
+func (r *VsphereAgentPoolReconciler) listVsphereAgentsForPool(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (agentforgev1alpha1.VsphereAgentList, error) {
 	var list agentforgev1alpha1.VsphereAgentList
-	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name}); err != nil {
+	err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name})
+	return list, err
+}
+
+func (r *VsphereAgentPoolReconciler) listVsphereAgentVMs(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]agentforgev1alpha1.OwnedVMStatus, error) {
+	list, err := r.listVsphereAgentsForPool(ctx, pool)
+	if err != nil {
 		return nil, err
 	}
 	vms := make([]agentforgev1alpha1.OwnedVMStatus, 0, len(list.Items))
@@ -459,8 +492,8 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 }
 
 func (r *VsphereAgentPoolReconciler) deleteVsphereAgentForVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
-	var list agentforgev1alpha1.VsphereAgentList
-	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name}); err != nil {
+	list, err := r.listVsphereAgentsForPool(ctx, pool)
+	if err != nil {
 		return err
 	}
 	for i := range list.Items {
@@ -471,7 +504,6 @@ func (r *VsphereAgentPoolReconciler) deleteVsphereAgentForVM(ctx context.Context
 		if err := r.Delete(ctx, agent); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
-		return nil
 	}
 	return nil
 }
@@ -489,8 +521,10 @@ func (r *VsphereAgentPoolReconciler) ensureISOCache(ctx context.Context, pool *a
 		CurrentPath:   pool.Status.ISO.Path,
 	})
 	if err != nil {
+		recordISOOperation("ensure", err)
 		return "", err
 	}
+	recordISOOperation("ensure", nil)
 
 	previousPath := pool.Status.ISO.Path
 	previousHistory := append([]agentforgev1alpha1.ISOCacheHistoryEntry(nil), pool.Status.ISO.History...)
@@ -516,7 +550,10 @@ func (r *VsphereAgentPoolReconciler) ensureISOCache(ctx context.Context, pool *a
 
 	for _, stalePath := range staleISOPaths(previousHistory, previousPath, result.Path, retainVersions) {
 		if err := provider.DeleteISO(ctx, pool, stalePath); err != nil {
+			recordISOOperation("delete", err)
 			r.recordWarning(pool, "ISOPruneFailed", stableErrorMessage(err))
+		} else {
+			recordISOOperation("delete", nil)
 		}
 	}
 
@@ -1061,21 +1098,70 @@ func (r *VsphereAgentPoolReconciler) updateStatus(ctx context.Context, pool *age
 	desired.AvailableAgents = plan.AvailableAgents
 	desired.PlannedActions = plan.Actions
 
+	var updated agentforgev1alpha1.VsphereAgentPoolStatus
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var current agentforgev1alpha1.VsphereAgentPool
 		if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
 			return err
 		}
-		if reflect.DeepEqual(current.Status, desired) {
+		next := mergePoolReconcileStatus(current.Status, desired)
+		if reflect.DeepEqual(current.Status, next) {
+			updated = current.Status
 			return nil
 		}
-		current.Status = desired
-		return r.Status().Update(ctx, &current)
+		current.Status = next
+		if err := r.Status().Update(ctx, &current); err != nil {
+			return err
+		}
+		updated = next
+		return nil
 	}); err != nil {
 		return err
 	}
-	pool.Status = desired
+	pool.Status = updated
+	recordPoolCapacityMetrics(pool, plan)
 	return nil
+}
+
+func mergePoolReconcileStatus(current, desired agentforgev1alpha1.VsphereAgentPoolStatus) agentforgev1alpha1.VsphereAgentPoolStatus {
+	next := current
+	next.ObservedGeneration = desired.ObservedGeneration
+	next.DesiredReplicas = desired.DesiredReplicas
+	next.AgentMachines = desired.AgentMachines
+	next.WaitingAgentMachines = desired.WaitingAgentMachines
+	next.UnreadyAgentMachines = desired.UnreadyAgentMachines
+	next.AgentMachinesWithoutAgent = desired.AgentMachinesWithoutAgent
+	next.MatchingAgents = desired.MatchingAgents
+	next.BoundAgents = desired.BoundAgents
+	next.AvailableAgents = desired.AvailableAgents
+	next.OwnedVMs = desired.OwnedVMs
+	next.PlannedActions = desired.PlannedActions
+	next.Conditions = mergePoolReconcileConditions(current.Conditions, desired.Conditions)
+	return next
+}
+
+func mergePoolReconcileConditions(current, desired []metav1.Condition) []metav1.Condition {
+	result := append([]metav1.Condition(nil), current...)
+	for _, condition := range desired {
+		if !isPoolReconcileCondition(condition.Type) {
+			continue
+		}
+		meta.SetStatusCondition(&result, condition)
+	}
+	return result
+}
+
+func isPoolReconcileCondition(conditionType string) bool {
+	switch conditionType {
+	case conditionReady,
+		conditionAgentMachineDemand,
+		conditionInfraEnvAvailable,
+		conditionCapacitySatisfied,
+		conditionVsphereReady:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *VsphereAgentPoolReconciler) setStatusError(pool *agentforgev1alpha1.VsphereAgentPool, reason, message string) {
@@ -1192,10 +1278,17 @@ func applySpecDefaults(pool *agentforgev1alpha1.VsphereAgentPool) {
 	if pool.Spec.ISO.RetainVersions == 0 {
 		pool.Spec.ISO.RetainVersions = 2
 	}
+	if pool.Spec.CleanupPolicy == "" {
+		pool.Spec.CleanupPolicy = agentforgev1alpha1.CleanupPolicyDelete
+	}
 }
 
 func approveAgents(pool *agentforgev1alpha1.VsphereAgentPool) bool {
 	return pool.Spec.Agent.Approve == nil || *pool.Spec.Agent.Approve
+}
+
+func cleanupEnabled(pool *agentforgev1alpha1.VsphereAgentPool) bool {
+	return pool.Spec.CleanupPolicy != agentforgev1alpha1.CleanupPolicyRetain
 }
 
 func agentMachineWaitingForAgent(agentMachine *unstructured.Unstructured) bool {
@@ -1484,6 +1577,9 @@ func agentChangePredicate() predicate.Predicate {
 			if e.ObjectOld == nil || e.ObjectNew == nil {
 				return false
 			}
+			if deletionTimestampChanged(e.ObjectOld, e.ObjectNew) {
+				return true
+			}
 			if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
 				return true
 			}
@@ -1531,6 +1627,9 @@ func agentMachineChangePredicate() predicate.Predicate {
 			if !oldOK || !newOK {
 				return false
 			}
+			if deletionTimestampChanged(oldObj, newObj) {
+				return true
+			}
 			if !reflect.DeepEqual(oldObj.GetAnnotations(), newObj.GetAnnotations()) {
 				return true
 			}
@@ -1576,13 +1675,10 @@ func machineChangePredicate() predicate.Predicate {
 			if !oldOK || !newOK {
 				return false
 			}
+			if deletionTimestampChanged(oldObj, newObj) {
+				return true
+			}
 			if !reflect.DeepEqual(oldObj.GetAnnotations(), newObj.GetAnnotations()) {
-				return true
-			}
-			if oldObj.GetDeletionTimestamp() == nil && newObj.GetDeletionTimestamp() != nil {
-				return true
-			}
-			if oldObj.GetDeletionTimestamp() != nil && newObj.GetDeletionTimestamp() == nil {
 				return true
 			}
 			return machinePhase(oldObj) != machinePhase(newObj)
@@ -1602,6 +1698,9 @@ func vsphereAgentPoolChangePredicate() predicate.Predicate {
 			if e.ObjectOld == nil || e.ObjectNew == nil {
 				return false
 			}
+			if deletionTimestampChanged(e.ObjectOld, e.ObjectNew) {
+				return true
+			}
 			if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
 				return true
 			}
@@ -1611,6 +1710,12 @@ func vsphereAgentPoolChangePredicate() predicate.Predicate {
 			return !reflect.DeepEqual(e.ObjectOld.GetFinalizers(), e.ObjectNew.GetFinalizers())
 		},
 	}
+}
+
+func deletionTimestampChanged(oldObj, newObj client.Object) bool {
+	oldDeleting := oldObj.GetDeletionTimestamp() != nil
+	newDeleting := newObj.GetDeletionTimestamp() != nil
+	return oldDeleting != newDeleting
 }
 
 func (r *VsphereAgentPoolReconciler) requestsForControlPlaneObjectChange(ctx context.Context, o client.Object) []reconcile.Request {
