@@ -196,17 +196,26 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 }
 
 func (p *govcVMProvider) ensureCDROM(ctx context.Context, name string) error {
-	output, err := p.runOutput(ctx, "device.cdrom.ls", "-vm", name)
+	output, err := p.runOutput(ctx, "device.ls", "-vm", name)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(string(output)) != "" {
+	if hasCDROMDevice(output) {
 		return nil
 	}
 	if err := p.run(ctx, "device.cdrom.add", "-vm", name); err != nil && !isGovcDeviceAlreadyExists(err) {
 		return err
 	}
 	return nil
+}
+
+func hasCDROMDevice(output []byte) bool {
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "cdrom-") {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req ISOEnsureRequest) (ISOEnsureResult, error) {

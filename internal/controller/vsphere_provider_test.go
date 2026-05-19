@@ -234,7 +234,7 @@ if [ "$1" = "vm.create" ]; then
   echo "govc: duplicate name" >&2
   exit 1
 fi
-if [ "$1" = "device.cdrom.ls" ]; then
+if [ "$1" = "device.ls" ]; then
   echo "cdrom-3000"
 fi
 if [ "$1" = "vm.info" ]; then
@@ -270,6 +270,9 @@ exit 0
 		t.Fatal(err)
 	}
 	calls := string(logBytes)
+	if strings.Contains(calls, "device.cdrom.ls") {
+		t.Fatalf("unsupported device.cdrom.ls command was called; calls:\n%s", calls)
+	}
 	if strings.Contains(calls, "device.cdrom.add") {
 		t.Fatalf("existing cdrom should have been reused; calls:\n%s", calls)
 	}

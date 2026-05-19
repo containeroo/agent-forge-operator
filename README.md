@@ -140,15 +140,15 @@ and Agent cleanup must be handled manually.
 Install the latest release manifests:
 
 ```sh
-kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.15/crds.yaml
-kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.15
+kubectl apply -f https://github.com/containeroo/agent-forge-operator/releases/download/v0.0.16/crds.yaml
+kubectl apply -k github.com/containeroo/agent-forge-operator//config/default?ref=v0.0.16
 ```
 
 The published manager images are:
 
 ```text
-ghcr.io/containeroo/agent-forge-operator:v0.0.15
-containeroo/agent-forge-operator:v0.0.15
+ghcr.io/containeroo/agent-forge-operator:v0.0.16
+containeroo/agent-forge-operator:v0.0.16
 ```
 
 For a local image build:
@@ -253,8 +253,8 @@ The controller uses `govc` for vSphere operations. The container image includes
 Releases are built by GoReleaser from pushed tags:
 
 ```sh
-git tag v0.0.15
-git push origin v0.0.15
+git tag v0.0.16
+git push origin v0.0.16
 ```
 
 The release workflow publishes multi-architecture images to GHCR and DockerHub
