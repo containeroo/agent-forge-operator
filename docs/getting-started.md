@@ -192,23 +192,23 @@ kubectl -n demo get vsphereagentpool demo-worker -o yaml
 
 Useful status fields:
 
-| Field                         | What to check                                                                                              |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `status.agentMachines`        | Non-deleting AgentMachines observed for this NodePool in `spec.controlPlaneNamespace`.                     |
-| `status.waitingAgentMachines` | AgentMachines currently reporting `Ready=False` and `Reason=NoSuitableAgents`.                             |
-| `status.unreadyAgentMachines` | Observed AgentMachines whose `Ready` condition is not `True`.                                              |
+| Field                              | What to check                                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `status.agentMachines`             | Non-deleting AgentMachines observed for this NodePool in `spec.controlPlaneNamespace`.                       |
+| `status.waitingAgentMachines`      | AgentMachines currently reporting `Ready=False` and `Reason=NoSuitableAgents`.                               |
+| `status.unreadyAgentMachines`      | Observed AgentMachines whose `Ready` condition is not `True`.                                                |
 | `status.agentMachinesWithoutAgent` | Unready AgentMachines without an assigned Agent. Surplus unbound Agents are retained while this is non-zero. |
-| `status.desiredReplicas`      | Observed AgentMachine count.                                                                              |
-| `status.matchingAgents`       | Agents that already match `spec.agent.labels`.                                                             |
-| `status.availableAgents`      | Matching Agents that are not yet bound to CAPI.                                                            |
-| `status.ownedVMs[*].biosUUID` | vSphere BIOS UUID used to match discovered Agents to the VM that actually booted them.                     |
-| `status.ownedVMs[*].macAddress` | Primary VM NIC MAC used as a fallback Agent-to-VM identity match.                                        |
-| `status.ownedVMs[*].machineRef` | CAPI Machine paired with a bound or deleting VM. It is retained during Machine deletion until cleanup.    |
-| `status.iso.path`             | Active content-addressed ISO datastore path used for new VMs.                                              |
-| `status.iso.sha256`           | SHA256 digest of the active InfraEnv ISO bytes.                                                            |
-| `status.iso.checkedAt`        | Last time the operator downloaded and hashed the ISO.                                                      |
-| `status.plannedActions`       | Planned `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions.                            |
-| `status.conditions`           | Readiness, AgentMachine demand, InfraEnv availability, ISO cache state, and capacity state.                |
+| `status.desiredReplicas`           | Observed AgentMachine count.                                                                                 |
+| `status.matchingAgents`            | Agents that already match `spec.agent.labels`.                                                               |
+| `status.availableAgents`           | Matching Agents that are not yet bound to CAPI.                                                              |
+| `status.ownedVMs[*].biosUUID`      | vSphere BIOS UUID used to match discovered Agents to the VM that actually booted them.                       |
+| `status.ownedVMs[*].macAddress`    | Primary VM NIC MAC used as a fallback Agent-to-VM identity match.                                            |
+| `status.ownedVMs[*].machineRef`    | CAPI Machine paired with a bound or deleting VM. It is retained during Machine deletion until cleanup.       |
+| `status.iso.path`                  | Active content-addressed ISO datastore path used for new VMs.                                                |
+| `status.iso.sha256`                | SHA256 digest of the active InfraEnv ISO bytes.                                                              |
+| `status.iso.checkedAt`             | Last time the operator downloaded and hashed the ISO.                                                        |
+| `status.plannedActions`            | Planned `CreateVM`, `DeleteVM`, `DeleteAgent`, `PatchAgent`, or `Noop` actions.                              |
+| `status.conditions`                | Readiness, AgentMachine demand, InfraEnv availability, ISO cache state, and capacity state.                  |
 
 Production rollouts can set `spec.cleanupPolicy: Retain` to prevent automatic
 deletion of stale owned VMs and unbound Agents while still allowing the operator
@@ -223,11 +223,11 @@ kubectl -n demo get events --field-selector involvedObject.name=demo-worker --so
 
 Metrics are exposed on the controller manager metrics endpoint:
 
-| Metric | Meaning |
-| ------ | ------- |
-| `agent_forge_vsphere_vm_operations_total` | VM create/delete attempts by operation and result. |
-| `agent_forge_iso_operations_total` | ISO cache ensure/delete attempts by operation and result. |
-| `agent_forge_pool_capacity` | Per-pool capacity gauges for desired, waiting, available, pending, and planned-create counts. |
+| Metric                                    | Meaning                                                                                       |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `agent_forge_vsphere_vm_operations_total` | VM create/delete attempts by operation and result.                                            |
+| `agent_forge_iso_operations_total`        | ISO cache ensure/delete attempts by operation and result.                                     |
+| `agent_forge_pool_capacity`               | Per-pool capacity gauges for desired, waiting, available, pending, and planned-create counts. |
 
 ## 7. Reconciliation Behavior
 
@@ -237,8 +237,8 @@ The operator will:
 - Upload a content-addressed ISO object only when the bytes changed or the datastore object is missing.
 - Create VMs when AgentMachines report `NoSuitableAgents` and demand exceeds
   available matching Agents.
-- Record created VM identity from vSphere, including BIOS UUID, instance UUID,
-  and primary MAC address.
+- Record created VM identity from vSphere, including BIOS UUID and primary MAC
+  address.
 - Power on created VMs.
 - Match discovered Agents to owned VMs by BIOS UUID or MAC before assigning the
   Agent hostname.

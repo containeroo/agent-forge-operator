@@ -14,12 +14,15 @@ Assisted Installer `Agent` objects can appear.
 - Watches CAPI `AgentMachine` demand for one HyperShift `NodePool`.
 - Creates capacity only for `AgentMachine` objects waiting on
   `NoSuitableAgents`.
-- Creates vSphere VMs from an `InfraEnv` discovery ISO when more Agents are
-  needed.
+- Creates `VsphereAgent` requests and then vSphere VMs from an `InfraEnv`
+  discovery ISO when more Agents are needed.
 - Optionally approves matching Assisted Installer `Agent` objects.
-- Deletes only owned VMs and stale unbound Agents when scale-down is allowed.
+- Deletes only owned VMs and stale unbound Agents when scale-down is allowed by
+  `spec.cleanupPolicy`.
 - Reports status conditions, planned actions, and Kubernetes Events for
   operational visibility.
+- Exposes Prometheus metrics for VM operations, ISO operations, and per-pool
+  capacity.
 
 ## Current Scope
 
@@ -40,20 +43,27 @@ flowchart TD
     autoscaler["Hosted cluster autoscaler"] --> nodepool["HyperShift NodePool"]
     nodepool --> agentmachine["CAPI AgentMachines\nReady=False / NoSuitableAgents"]
     nodepool --> machine["CAPI Machines"]
-    pool["VsphereAgentPool\nnamespace-scoped config"] --> reconcile["Agent Forge reconcile"]
-    agentmachine --> reconcile
-    machine --> reconcile
-    infraenv["InfraEnv\nISO URL and Agent ownership"] --> reconcile
-    agents["Assisted Installer Agents"] --> reconcile
+    pool["VsphereAgentPool\nnamespace-scoped config"] --> poolrec["VsphereAgentPool reconcile"]
+    agentmachine --> poolrec
+    machine --> poolrec
+    infraenv["InfraEnv\nISO URL and Agent ownership"] --> poolrec
+    agents["Assisted Installer Agents"] --> poolrec
+    pool --> amrec["AgentMachine reconcile"]
+    agentmachine --> amrec
 
-    reconcile --> fresh["Read latest VsphereAgentPool\nthrough uncached API reader"]
-    fresh --> discover["Resolve inputs\nAgentMachines, Machines, InfraEnv, matching Agents, owned/adopted VMs"]
-    discover --> refresh["Refresh ownedVMs status\nProvisioning, Available, Bound, Released"]
-    refresh --> plan["Build plan\nAgentMachine count, waiting demand, available Agents, provisioning VMs"]
+    poolrec --> fresh["Read latest VsphereAgentPool\nthrough uncached API reader"]
+    fresh --> discover["Resolve inputs\nAgentMachines, Machines, InfraEnv, matching Agents, VsphereAgent VM status"]
+    discover --> refresh["Refresh ownedVMs status\nProvisioning, Available, Bound, Released, Orphaned"]
+    refresh --> adopt["Adopt matching existing Agents\ninto VsphereAgent status"]
+    adopt --> plan["Build plan\nwaiting demand, available Agents, provisioning VMs, cleanup policy"]
 
-    plan -->|deficit| iso["Ensure content-addressed ISO cache\nDownload, hash, upload if changed"]
-    iso --> create["Create vSphere VM\nfolder, datastore cluster, network, CPU, memory, disk, ISO"]
-    create --> identity["Record VM identity\nBIOS UUID, instance UUID, MAC"]
+    amrec -->|NoSuitableAgents| vagent["Create VsphereAgent\none request per waiting AgentMachine"]
+    vagent --> agentrec["VsphereAgent reconcile"]
+    pool --> agentrec
+
+    agentrec -->|no VM status| iso["Ensure content-addressed ISO cache\nDownload, hash, upload if changed"]
+    iso --> create["Create or recover vSphere VM\nfolder, datastore cluster, network, CPU, memory, disk, ISO"]
+    create --> identity["Record VM identity\nBIOS UUID and MAC"]
     identity --> boot["VM boots InfraEnv ISO"]
     boot --> newagent["New Agent appears"]
     newagent --> agents
@@ -63,29 +73,33 @@ flowchart TD
     prep --> bind["Agent CAPI provider binds Agent to Machine"]
     bind --> agents
 
-    plan -->|scale-down| deleting{"Was the CAPI Machine\nobserved deleting and then gone?"}
+    plan -->|scale-down with cleanupPolicy Delete| deleting{"Was the CAPI Machine\nobserved deleting and then gone?"}
     deleting -->|no| wait["Wait\nno VM or Agent deletion"]
-    deleting -->|yes| deletevm["Delete paired vSphere VM\nprefer BIOS UUID, fallback inventory path"]
-    deletevm --> deleteagent{"VM gone or already missing?"}
+    deleting -->|yes| deleteva["Delete paired VsphereAgent"]
+    deleteva --> agentfinalizer["VsphereAgent finalizer deletes VM\nprefer BIOS UUID, fallback inventory path"]
+    agentfinalizer --> deleteagent{"VM gone or already missing?"}
     deleteagent -->|yes| removeagent["Delete paired stale Agent"]
     deleteagent -->|no| retry["Record condition/event\nretry later"]
     removeagent --> agents
 
-    plan -->|surplus available owned Agent| surplus{"Any AgentMachine\nstill without an Agent?"}
+    plan -->|surplus available owned Agent\nwith cleanupPolicy Delete| surplus{"Any AgentMachine\nstill without an Agent?"}
     surplus -->|yes| wait
-    surplus -->|no| deletefree["Delete extra unbound VM and Agent"]
+    surplus -->|no| deletefree["Delete extra VsphereAgent\nthen unbound Agent"]
     deletefree --> agents
 
+    plan -->|cleanupPolicy Retain| retain["Retain external VMs and Agents\nstatus only"]
     plan -->|no changes| noop["Noop\nstatus and conditions only"]
-    wait --> reconcile
-    retry --> reconcile
-    noop --> reconcile
+    wait --> next["Next reconcile"]
+    retry --> next
+    retain --> next
+    noop --> next
 ```
 
-The reconciliation loop is driven by watches on `VsphereAgentPool`,
-`AgentMachine`, `Machine`, and matching `Agent` objects. That means new
-NoSuitableAgents demand, Machine deletion, and newly discovered Agents are
-handled immediately instead of waiting only for the periodic requeue.
+The reconciliation loops are driven by watches on `VsphereAgentPool`,
+`VsphereAgent`, `AgentMachine`, `Machine`, and matching `Agent` objects. That
+means new NoSuitableAgents demand, Machine deletion, newly discovered Agents,
+and per-VM status changes are handled immediately instead of waiting only for
+the periodic requeue.
 At the beginning of each reconcile, the controller reads the
 `VsphereAgentPool` through the uncached API reader so create/delete planning is
 based on the latest recorded `ownedVMs` status instead of stale informer state.
@@ -96,11 +110,11 @@ available matching Agents and already-provisioning owned VMs, and records the
 remaining demand in status. The AgentMachine controller creates a
 `VsphereAgent` for each waiting AgentMachine; each `VsphereAgent` then creates a
 vSphere VM that boots the active InfraEnv ISO. The controller records the
-vSphere BIOS UUID, instance UUID, and primary MAC address immediately after VM
-creation. When the Agent appears, it is matched to the owned VM by BIOS UUID or
-MAC before any hostname fallback. The controller then applies the configured
-labels, role, approval, and VM-name hostname so the Agent CAPI provider can bind
-it to a Machine.
+vSphere BIOS UUID and primary MAC address immediately after VM creation. When
+the Agent appears, it is matched to the owned VM by BIOS UUID or MAC before any
+hostname fallback. The pool controller then applies the configured labels, role,
+approval, and VM-name hostname so the Agent CAPI provider can bind it to a
+Machine.
 
 Existing clusters are adopted through Agents. If a matching Agent already
 exists, the controller records it in `status.ownedVMs` using the Agent hostname,
@@ -112,12 +126,14 @@ are marked `Released`.
 
 Scale-down is deliberately conservative. The controller does not choose random
 VMs. It first observes a paired CAPI `Machine` entering deletion, waits until
-that Machine has disappeared, and only then deletes the paired VM and stale
-Agent. While a Machine is deleting, the last known `machineRef` is retained in
-status so the VM can transition from `MachineDeleting` to `MachineDeleted` once
-the Machine disappears. VM deletion prefers the VMware BIOS UUID and falls back
-to the full inventory path. A missing VM is treated as already deleted so the
-stale Agent can still be removed.
+that Machine has disappeared, and only then deletes the paired `VsphereAgent`;
+that object's finalizer deletes the paired VM before the stale Agent is removed.
+While a Machine is deleting, the last known `machineRef` is retained in status
+so the VM can transition from `MachineDeleting` to `MachineDeleted` once the
+Machine disappears. VM deletion prefers the VMware BIOS UUID and falls back to
+the full inventory path. A missing VM is treated as already deleted so the stale
+Agent can still be removed. Set `spec.cleanupPolicy: Retain` when external VM
+and Agent cleanup must be handled manually.
 
 ## Installation
 
@@ -167,6 +183,7 @@ spec:
   infraEnvRef:
     name: demo
   controlPlaneNamespace: demo-demo
+  cleanupPolicy: Delete
   vsphere:
     credentialsSecretRef:
       name: vsphere-credentials
