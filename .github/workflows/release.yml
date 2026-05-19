@@ -23,8 +23,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
       - name: Login to DockerHub
@@ -39,7 +37,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate CRDs
-        run: make kustomize && make crd && git reset --hard
+        run: make kustomize && ./bin/kustomize build config/crd > crds.yaml
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
