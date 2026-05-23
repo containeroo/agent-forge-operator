@@ -16,10 +16,6 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
 
-    concurrency:
-      group: agent-forge-operator-tests
-      cancel-in-progress: false
-
     permissions:
       contents: read
 
