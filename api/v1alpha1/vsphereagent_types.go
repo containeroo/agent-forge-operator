@@ -71,7 +71,3 @@ type VsphereAgentList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []VsphereAgent `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&VsphereAgent{}, &VsphereAgentList{})
-}

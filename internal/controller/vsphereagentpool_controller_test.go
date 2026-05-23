@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -70,7 +70,7 @@ func TestReconcilePlansWithoutCallingProvider(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			providerCalled = true
 			return &fakeVMProvider{}, nil
@@ -133,7 +133,7 @@ func TestReconcileReportsAgentMachineDemandCondition(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -181,7 +181,7 @@ func TestReconcileMarksReadyFalseWhenInfraEnvUnavailable(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -242,7 +242,7 @@ func TestPoolDeleteWaitsForVsphereAgentFinalizers(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
 		},
@@ -307,7 +307,7 @@ func TestPoolDeleteCleansUpLegacyStatusVMsAfterChildrenGone(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
 		},
@@ -357,7 +357,7 @@ func TestPoolDeleteRetainsLegacyStatusVMsWhenCleanupPolicyRetain(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
 		},
@@ -492,7 +492,7 @@ func TestVsphereAgentReconcileRetainsVMWhenCleanupPolicyRetain(t *testing.T) {
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
 		},
@@ -549,7 +549,7 @@ func TestReconcileCreatesVsphereAgentInsteadOfCallingProvider(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			providerCalled = true
 			return failingVMProvider{}, nil
@@ -612,7 +612,7 @@ func TestReconcileCreatesVsphereAgentsForMultipleCreates(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
 		},
@@ -720,7 +720,7 @@ func TestReconcileAdoptsExistingMatchingAgents(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
 	if err != nil {
@@ -785,7 +785,7 @@ func TestReconcileCorrectsAdoptedVsphereAgentStatus(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 	err := reconciler.adoptMatchingAgents(ctx, pool, []AgentInfo{{
 		Name:     testAdoptedVM,
@@ -852,7 +852,7 @@ func TestReconcileReusesExistingVsphereAgentForDiscoveredVM(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 	err := reconciler.adoptMatchingAgents(ctx, pool, []AgentInfo{{
 		Name:     "assisted-agent",
@@ -931,7 +931,7 @@ func TestReconcileDeletesDuplicateVsphereAgentForDiscoveredVM(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 	err := reconciler.adoptMatchingAgents(ctx, pool, []AgentInfo{{
 		Name:     "assisted-agent",
@@ -997,7 +997,7 @@ func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
 		},
@@ -1074,7 +1074,7 @@ func TestVsphereAgentReconcileSkipsVMDeleteForDuplicate(t *testing.T) {
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
 		},
@@ -1135,7 +1135,7 @@ func TestVsphereAgentReconcileWaitsForAdoptedStatus(t *testing.T) {
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
 		},
@@ -1189,7 +1189,7 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -1263,7 +1263,7 @@ func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -1503,7 +1503,7 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
 		},
@@ -1566,7 +1566,7 @@ func TestReconcileMarksReturnedAgentReleased(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -1612,7 +1612,7 @@ func TestReconcileAdoptsExistingBoundAgentAsOwnedVM(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -1665,7 +1665,7 @@ func TestReconcileAdoptsInventoryHostnameForCandidateAgent(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -1837,7 +1837,7 @@ func TestReconcileKeepsUnboundAgentsWithoutDeletedMachine(t *testing.T) {
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return &fakeVMProvider{}, nil
 		},

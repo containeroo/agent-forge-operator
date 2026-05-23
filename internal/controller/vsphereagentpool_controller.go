@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -73,7 +73,7 @@ type VsphereAgentPoolReconciler struct {
 	client.Client
 	APIReader       client.Reader
 	Scheme          *runtime.Scheme
-	Recorder        record.EventRecorder
+	Recorder        events.EventRecorder
 	ProviderFactory VMProviderFactory
 }
 
@@ -571,7 +571,7 @@ func (r *VsphereAgentPoolReconciler) ensureISOCache(ctx context.Context, pool *a
 		Message:            message,
 	})
 	if r.Recorder != nil {
-		r.Recorder.Event(pool, corev1.EventTypeNormal, "ISO"+reason, message)
+		recordEvent(r.Recorder, pool, corev1.EventTypeNormal, "ISO"+reason, message)
 	}
 
 	return result.Path, nil
@@ -1051,7 +1051,7 @@ func (r *VsphereAgentPoolReconciler) deleteAgent(ctx context.Context, pool *agen
 		return err
 	}
 	if r.Recorder != nil {
-		r.Recorder.Eventf(pool, corev1.EventTypeNormal, "AgentDeleted", "deleted stale unbound Agent %s", name)
+		recordEventf(r.Recorder, pool, corev1.EventTypeNormal, "AgentDeleted", "deleted stale unbound Agent %s", name)
 	}
 	return nil
 }
@@ -1182,18 +1182,18 @@ func (r *VsphereAgentPoolReconciler) recordPlan(pool *agentforgev1alpha1.Vsphere
 	if len(plan.Actions) == 1 && plan.Actions[0].Type == actionNoop {
 		return
 	}
-	r.Recorder.Eventf(pool, corev1.EventTypeNormal, reason, "planned %d action(s): %s", len(plan.Actions), summarizeActions(plan.Actions))
+	recordEventf(r.Recorder, pool, corev1.EventTypeNormal, reason, "planned %d action(s): %s", len(plan.Actions), summarizeActions(plan.Actions))
 }
 
 func (r *VsphereAgentPoolReconciler) recordWarning(pool *agentforgev1alpha1.VsphereAgentPool, reason, message string) {
 	if r.Recorder != nil {
-		r.Recorder.Event(pool, corev1.EventTypeWarning, reason, message)
+		recordEvent(r.Recorder, pool, corev1.EventTypeWarning, reason, message)
 	}
 }
 
 func (r *VsphereAgentPoolReconciler) recordNormal(pool *agentforgev1alpha1.VsphereAgentPool, reason, message string) {
 	if r.Recorder != nil {
-		r.Recorder.Event(pool, corev1.EventTypeNormal, reason, message)
+		recordEvent(r.Recorder, pool, corev1.EventTypeNormal, reason, message)
 	}
 }
 
@@ -1795,7 +1795,7 @@ func agentMatchesPool(agent *unstructured.Unstructured, pool *agentforgev1alpha1
 // SetupWithManager sets up the controller with the Manager.
 func (r *VsphereAgentPoolReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	if r.Recorder == nil {
-		r.Recorder = mgr.GetEventRecorderFor("vsphereagentpool-controller")
+		r.Recorder = mgr.GetEventRecorder("vsphereagentpool-controller")
 	}
 	if err := mgr.GetFieldIndexer().IndexField(ctx, &agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolControlPlaneNamespaceIndex,
 		func(o client.Object) []string {

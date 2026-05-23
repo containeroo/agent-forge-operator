@@ -77,6 +77,7 @@ UNAME := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 KIND_BINARY := kind-$(UNAME)-amd64
 KIND = $(LOCALBIN)/kind
 KIND_VERSION ?= 0.31.0
+KIND_CLUSTER_NAME ?= agent-forge-operator-test
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -141,12 +142,12 @@ test: manifests generate fmt vet envtest ## Run tests.
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 .PHONY: test-e2e
 test-e2e: ## Run the e2e tests against a Kind k8s instance that is spun up.
-	USE_EXISTING_CLUSTER=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	USE_EXISTING_CLUSTER=true KIND_CLUSTER=$(KIND_CLUSTER_NAME) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 
 .PHONY: kind
 kind: $(KIND) ## Create a Kind cluster.
 	@echo "Setting up Kind cluster..."
-	@$(KIND) create cluster --name agent-forge-operator-test --wait 60s
+	@$(KIND) create cluster --name $(KIND_CLUSTER_NAME) --wait 60s
 	@kubectl cluster-info
 
 .PHONY: kind

@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,7 +42,7 @@ type VsphereAgentReconciler struct {
 	client.Client
 	APIReader       client.Reader
 	Scheme          *runtime.Scheme
-	Recorder        record.EventRecorder
+	Recorder        events.EventRecorder
 	ProviderFactory VMProviderFactory
 }
 
@@ -312,7 +312,7 @@ func (r *VsphereAgentReconciler) requestsForPool(ctx context.Context, o client.O
 
 func (r *VsphereAgentReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	if r.Recorder == nil {
-		r.Recorder = mgr.GetEventRecorderFor("vsphereagent-controller")
+		r.Recorder = mgr.GetEventRecorder("vsphereagent-controller")
 	}
 	if err := mgr.GetFieldIndexer().IndexField(ctx, &agentforgev1alpha1.VsphereAgent{}, vsphereAgentPoolOwnerFieldIndex,
 		func(o client.Object) []string {

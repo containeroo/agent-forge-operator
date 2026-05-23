@@ -456,7 +456,3 @@ type VsphereAgentPoolList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []VsphereAgentPool `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&VsphereAgentPool{}, &VsphereAgentPoolList{})
-}
