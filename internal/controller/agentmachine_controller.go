@@ -86,7 +86,7 @@ func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.C
 	}
 
 	for i := 0; i < 5; i++ {
-		name := vsphereAgentNameForAgentMachine(pool, agentMachine)
+		name := vsphereAgentNameForAgentMachine(pool)
 		agent := &agentforgev1alpha1.VsphereAgent{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: pool.Namespace,
@@ -113,7 +113,7 @@ func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.C
 		}
 		return nil
 	}
-	return apierrors.NewAlreadyExists(agentforgev1alpha1.GroupVersion.WithResource("vsphereagents").GroupResource(), vsphereAgentNameForAgentMachine(pool, agentMachine))
+	return apierrors.NewAlreadyExists(agentforgev1alpha1.GroupVersion.WithResource("vsphereagents").GroupResource(), vsphereAgentNameForAgentMachine(pool))
 }
 
 func (r *AgentMachineReconciler) vsphereAgentExistsForAgentMachine(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) (bool, error) {
@@ -131,7 +131,7 @@ func (r *AgentMachineReconciler) vsphereAgentExistsForAgentMachine(ctx context.C
 	return len(list.Items) > 0, nil
 }
 
-func vsphereAgentNameForAgentMachine(pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) string {
+func vsphereAgentNameForAgentMachine(pool *agentforgev1alpha1.VsphereAgentPool) string {
 	return desiredAgentHostname(pool)
 }
 

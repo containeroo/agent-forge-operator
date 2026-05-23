@@ -23,6 +23,12 @@ import (
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 )
 
+const (
+	poolMetricNamespaceLabel = "namespace"
+	poolMetricPoolLabel      = "pool"
+	poolMetricStateLabel     = "state"
+)
+
 var (
 	vmOperationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "agent_forge_vsphere_vm_operations_total",
@@ -37,7 +43,7 @@ var (
 	poolCapacityGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "agent_forge_pool_capacity",
 		Help: "Observed VsphereAgentPool capacity by pool and state.",
-	}, []string{"namespace", "pool", "state"})
+	}, []string{poolMetricNamespaceLabel, poolMetricPoolLabel, poolMetricStateLabel})
 )
 
 func init() {
@@ -54,8 +60,8 @@ func recordISOOperation(operation string, err error) {
 
 func recordPoolCapacityMetrics(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan) {
 	labels := prometheus.Labels{
-		"namespace": pool.Namespace,
-		"pool":      pool.Name,
+		poolMetricNamespaceLabel: pool.Namespace,
+		poolMetricPoolLabel:      pool.Name,
 	}
 	for state, value := range map[string]int32{
 		"desired":                plan.DesiredReplicas,
@@ -70,9 +76,9 @@ func recordPoolCapacityMetrics(pool *agentforgev1alpha1.VsphereAgentPool, plan P
 		"vms_to_create":          plan.VMsToCreate,
 	} {
 		labelsWithState := prometheus.Labels{
-			"namespace": labels["namespace"],
-			"pool":      labels["pool"],
-			"state":     state,
+			poolMetricNamespaceLabel: labels[poolMetricNamespaceLabel],
+			poolMetricPoolLabel:      labels[poolMetricPoolLabel],
+			poolMetricStateLabel:     state,
 		}
 		poolCapacityGauge.With(labelsWithState).Set(float64(value))
 	}
