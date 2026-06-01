@@ -29,7 +29,7 @@ dockers:
       - --cache-from=type=gha,scope=agent-forge-operator-amd64
       - --cache-to=type=gha,mode=max,scope=agent-forge-operator-amd64
       - --build-arg
-      - GOVC_VERSION=v0.54.0
+      - GOVC_VERSION=v0.54.1
       - --label=org.opencontainers.image.title={{ .ProjectName }}
       - --label=org.opencontainers.image.description={{ .ProjectName }}
       - --label=org.opencontainers.image.url=https://github.com/containeroo/agent-forge-operator
@@ -52,7 +52,7 @@ dockers:
       - --cache-from=type=gha,scope=agent-forge-operator-arm64
       - --cache-to=type=gha,mode=max,scope=agent-forge-operator-arm64
       - --build-arg
-      - GOVC_VERSION=v0.54.0
+      - GOVC_VERSION=v0.54.1
       - --label=org.opencontainers.image.title={{ .ProjectName }}
       - --label=org.opencontainers.image.description={{ .ProjectName }}
       - --label=org.opencontainers.image.url=https://github.com/containeroo/agent-forge-operator
