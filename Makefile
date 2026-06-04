@@ -141,8 +141,8 @@ test: manifests generate fmt vet envtest ## Run tests.
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 .PHONY: test-e2e
-test-e2e: ## Run the e2e tests against a Kind k8s instance that is spun up.
-	USE_EXISTING_CLUSTER=true KIND_CLUSTER=$(KIND_CLUSTER_NAME) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+test-e2e: $(KIND) ## Run the e2e tests against a Kind k8s instance that is spun up.
+	PATH="$(LOCALBIN):$$PATH" USE_EXISTING_CLUSTER=true KIND_CLUSTER=$(KIND_CLUSTER_NAME) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 
 .PHONY: kind
 kind: $(KIND) ## Create a Kind cluster.
