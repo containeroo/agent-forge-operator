@@ -809,6 +809,71 @@ func TestReconcileCorrectsAdoptedVsphereAgentStatus(t *testing.T) {
 	}
 }
 
+func TestAdoptMatchingAgentsDoesNotOverwriteConflictingDemandVMByHostname(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	demandAgent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testAdoptedVM,
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel:   testNodePool,
+				vsphereAgentCreatedForLabel: vsphereAgentCreatedForDemand,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: agentforgev1alpha1.OwnedVMStatus{
+				Name:       testAdoptedVM,
+				Phase:      phaseProvisioning,
+				Reason:     reasonVMCreateRequested,
+				BIOSUUID:   "existing-vm-bios",
+				MACAddress: "00-50-56-aa-bb-cc",
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, demandAgent).
+		WithStatusSubresource(demandAgent).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+	err := reconciler.adoptMatchingAgents(ctx, pool, []AgentInfo{{
+		Name:     "assisted-agent",
+		Bound:    true,
+		Hostname: testAdoptedVM,
+		MAC:      "00-50-56-dd-ee-ff",
+		BIOSUUID: "different-agent-bios",
+	}})
+	if err != nil {
+		t.Fatalf("adoptMatchingAgents returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testAdoptedVM}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.VM.BIOSUUID != "existing-vm-bios" || updated.Status.VM.AgentRef != nil {
+		t.Fatalf("VM status = %#v, want conflicting demand VM status left unchanged", updated.Status.VM)
+	}
+}
+
 func TestReconcileReusesExistingVsphereAgentForDiscoveredVM(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -1428,6 +1493,36 @@ func TestRefreshOwnedVMStatusesMatchesAgentsByBIOSUUIDBeforeHostname(t *testing.
 	}
 	if vms[0].Name != "demo-worker-real" || vms[0].AgentRef == nil || vms[0].AgentRef.Name != "agent-1" {
 		t.Fatalf("owned VM = %#v, want real VM matched to agent by BIOS UUID", vms[0])
+	}
+}
+
+func TestRefreshOwnedVMStatusesDoesNotMatchHostnameWhenIdentityConflicts(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{
+			Name:       "demo-worker-host",
+			Phase:      phaseProvisioning,
+			Reason:     reasonVMCreateRequested,
+			BIOSUUID:   "existing-vm-bios",
+			MACAddress: "00-50-56-aa-bb-cc",
+		},
+	}
+
+	vms := refreshOwnedVMStatuses(pool, []AgentInfo{
+		{
+			Name:     "assisted-agent",
+			Bound:    true,
+			Hostname: "demo-worker-host",
+			BIOSUUID: "different-agent-bios",
+			MAC:      "00-50-56-dd-ee-ff",
+		},
+	}, nil)
+
+	if len(vms) != 1 {
+		t.Fatalf("ownedVMs = %d, want original VM only", len(vms))
+	}
+	if vms[0].AgentRef != nil || vms[0].Phase != phaseProvisioning || vms[0].Reason != reasonAgentNotDiscovered {
+		t.Fatalf("conflicting VM status = %#v, want no Agent match by hostname", vms[0])
 	}
 }
 

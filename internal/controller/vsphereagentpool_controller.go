@@ -300,7 +300,12 @@ func (r *VsphereAgentPoolReconciler) adoptMatchingAgents(ctx context.Context, po
 
 func ownedVMForAgent(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo, hostname string) agentforgev1alpha1.OwnedVMStatus {
 	for _, vm := range pool.Status.OwnedVMs {
-		if vmMatchesAgentIdentity(vm, agent) || vm.Name == hostname || (vm.AgentRef != nil && vm.AgentRef.Name == agent.Name) {
+		if vmMatchesAgentIdentity(vm, agent) || vmMatchesAgentRef(vm, agent) {
+			return vm
+		}
+	}
+	for _, vm := range pool.Status.OwnedVMs {
+		if vm.Name == hostname && !vmIdentityConflictsAgent(vm, agent) {
 			return vm
 		}
 	}
@@ -351,6 +356,18 @@ func (r *VsphereAgentPoolReconciler) ensureVsphereAgentForAdoptedVM(ctx context.
 	if desiredVM.Reason == "" {
 		desiredVM.Reason = reasonVMAdopted
 	}
+	if current.Status.VM.Name != "" &&
+		vmIdentityConflictsAgent(current.Status.VM, agent) &&
+		current.Labels[vsphereAgentCreatedForLabel] != vsphereAgentCreatedForAdopted {
+		existing, findErr := r.findVsphereAgentForAdoptedVM(ctx, pool, agent, desiredVM)
+		if findErr != nil {
+			return findErr
+		}
+		if existing == nil || existing.Name == current.Name {
+			return nil
+		}
+		current = existing
+	}
 	if current.Status.VM.Name != "" && adoptedVMStatusMatches(current.Status.VM, desiredVM) {
 		return r.deleteDuplicateVsphereAgentsForVM(ctx, pool, current, desiredVM)
 	}
@@ -371,13 +388,13 @@ func (r *VsphereAgentPoolReconciler) findVsphereAgentForAdoptedVM(ctx context.Co
 		if current.GetDeletionTimestamp() != nil {
 			continue
 		}
-		if current.Status.VM.Name != "" && current.Status.VM.Name == vm.Name {
+		if current.Status.VM.Name != "" && current.Status.VM.Name == vm.Name && !vmIdentityConflictsAgent(current.Status.VM, agent) {
 			return current, nil
 		}
 		if vmMatchesAgentIdentity(current.Status.VM, agent) {
 			return current, nil
 		}
-		if current.Status.VM.AgentRef != nil && current.Status.VM.AgentRef.Name == agent.Name {
+		if vmMatchesAgentRef(current.Status.VM, agent) {
 			return current, nil
 		}
 	}
@@ -803,10 +820,18 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			agent, matched = byMAC[vm.MACAddress]
 		}
 		if !matched {
-			agent, matched = byHostname[vm.Name]
+			candidate, exists := byHostname[vm.Name]
+			if exists && !vmIdentityConflictsAgent(vm, candidate) {
+				agent = candidate
+				matched = true
+			}
 		}
 		if !matched && vm.AgentRef != nil && vm.AgentRef.Name != "" {
-			agent, matched = byName[vm.AgentRef.Name]
+			candidate, exists := byName[vm.AgentRef.Name]
+			if exists && !vmIdentityConflictsAgent(vm, candidate) {
+				agent = candidate
+				matched = true
+			}
 		}
 		if !matched {
 			hadDiscoveredAgent := vmHadDiscoveredAgent(vm)
@@ -861,6 +886,27 @@ func vmMatchesAgentIdentity(vm agentforgev1alpha1.OwnedVMStatus, agent AgentInfo
 		return true
 	}
 	return vm.MACAddress != "" && agent.MAC != "" && vm.MACAddress == agent.MAC
+}
+
+func vmMatchesAgentRef(vm agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) bool {
+	return vm.AgentRef != nil && vm.AgentRef.Name == agent.Name && !vmIdentityConflictsAgent(vm, agent)
+}
+
+func vmIdentityConflictsAgent(vm agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) bool {
+	checked := false
+	if vm.BIOSUUID != "" && agent.BIOSUUID != "" {
+		checked = true
+		if vm.BIOSUUID == agent.BIOSUUID {
+			return false
+		}
+	}
+	if vm.MACAddress != "" && agent.MAC != "" {
+		checked = true
+		if vm.MACAddress == agent.MAC {
+			return false
+		}
+	}
+	return checked
 }
 
 func applyMachineStateToOwnedVMStatus(vm *agentforgev1alpha1.OwnedVMStatus, machines map[string]MachineInfo) {
