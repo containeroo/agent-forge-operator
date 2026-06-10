@@ -98,7 +98,7 @@ func TestBuildPlanCreatesOnlyRemainingDeficitAfterOwnedProvisioningVMs(t *testin
 	}
 }
 
-func TestBuildPlanPatchesUnapprovedAgents(t *testing.T) {
+func TestBuildPlanDoesNotPatchUnownedAgentsWithDemand(t *testing.T) {
 	pool := testPool()
 
 	plan := buildPlan(pool, PoolSnapshot{
@@ -111,11 +111,11 @@ func TestBuildPlanPatchesUnapprovedAgents(t *testing.T) {
 	if len(plan.Actions) != 1 {
 		t.Fatalf("actions = %d, want 1", len(plan.Actions))
 	}
-	if plan.Actions[0].Type != actionPatchAgent {
-		t.Fatalf("action type = %s, want %s", plan.Actions[0].Type, actionPatchAgent)
+	if plan.Actions[0].Type != actionNoop {
+		t.Fatalf("action type = %s, want %s", plan.Actions[0].Type, actionNoop)
 	}
-	if plan.Actions[0].Name != "agent-1" {
-		t.Fatalf("action name = %s, want agent-1", plan.Actions[0].Name)
+	if len(plan.AgentsToPatch) != 0 {
+		t.Fatalf("AgentsToPatch = %#v, want none for unowned Agent", plan.AgentsToPatch)
 	}
 }
 

@@ -711,9 +711,7 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			break
 		}
 		if assigned[agent.Name] == "" {
-			hostname := desiredAgentHostname(pool)
-			assigned[agent.Name] = hostname
-			reserved[hostname] = struct{}{}
+			continue
 		}
 	}
 	return assigned
@@ -1033,7 +1031,7 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 		return err
 	}
 	if hostname == "" {
-		hostname = desiredAgentHostname(pool)
+		return fmt.Errorf("cannot patch Agent %s/%s without an owned VM hostname", pool.Namespace, name)
 	}
 	if currentHostname, _, _ := unstructured.NestedString(agent.Object, "spec", "hostname"); currentHostname != hostname {
 		if err := unstructured.SetNestedField(agent.Object, hostname, "spec", "hostname"); err != nil {
@@ -1543,21 +1541,6 @@ func agentBelongsToInfraEnv(agent *unstructured.Unstructured, infraEnvName strin
 		}
 	}
 	return false
-}
-
-func desiredAgentHostname(pool *agentforgev1alpha1.VsphereAgentPool) string {
-	return agentHostnameWithSuffix(vmNamePrefix(pool), randomAlphaNumeric(4))
-}
-
-func agentHostnameWithSuffix(prefix, suffix string) string {
-	maxPrefixLen := 63 - len(suffix) - 1
-	if len(prefix) > maxPrefixLen {
-		prefix = strings.TrimRight(prefix[:maxPrefixLen], "-")
-	}
-	if prefix == "" {
-		return suffix
-	}
-	return fmt.Sprintf("%s-%s", prefix, suffix)
 }
 
 func removeOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, name string) []agentforgev1alpha1.OwnedVMStatus {

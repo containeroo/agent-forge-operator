@@ -142,7 +142,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		if !agentNeedsPatch(pool, agent) {
 			continue
 		}
-		if !agentPatchEligible(pool, snapshot, agent) {
+		if !agentPatchEligible(snapshot, agent) {
 			continue
 		}
 		agentsToPatch = append(agentsToPatch, agent)
@@ -226,14 +226,8 @@ func agentNeedsPatch(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo)
 	return !agent.Approved || agent.SpecRole != pool.Spec.Agent.Role || agent.RoleLabel != pool.Spec.Agent.Role || agent.Hostname == ""
 }
 
-func agentPatchEligible(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot, agent AgentInfo) bool {
-	if agentAssociatedWithOwnedVM(snapshot.OwnedVMs, agent) {
-		return true
-	}
-	if desiredPoolLabel, hasPoolLabel := pool.Spec.Agent.Labels[poolLabelKey]; hasPoolLabel {
-		return agent.PoolLabel == desiredPoolLabel
-	}
-	return snapshot.WaitingAgentMachines > 0 || snapshot.AgentMachinesWithoutAgent > 0
+func agentPatchEligible(snapshot PoolSnapshot, agent AgentInfo) bool {
+	return agentAssociatedWithOwnedVM(snapshot.OwnedVMs, agent)
 }
 
 func agentAssociatedWithOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) bool {

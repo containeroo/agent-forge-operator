@@ -1073,11 +1073,16 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 
 	pool := reconcileTestPool()
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
-		newOwnedVMStatus("demo-worker-ab12"),
+		{
+			Name:       "demo-worker-ab12",
+			Phase:      phaseProvisioning,
+			MACAddress: "00-50-56-b2-a1-9f",
+		},
 	}
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testCandidateAgent(testNamespace, "abcdef12-3456-7890-abcd-ef1234567890")
+	setAgentPrimaryMAC(t, agent, "00:50:56:b2:a1:9f")
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).

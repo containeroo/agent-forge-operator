@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -513,13 +512,6 @@ type govcDevice struct {
 	MACAddress string `json:"macAddress"`
 }
 
-func vmNamePrefix(pool *agentforgev1alpha1.VsphereAgentPool) string {
-	if pool.Spec.Template.NamePrefix != "" {
-		return pool.Spec.Template.NamePrefix
-	}
-	return fmt.Sprintf("%s-%s", pool.Spec.HostedClusterRef.Name, pool.Spec.Agent.Role)
-}
-
 func vmFolder(pool *agentforgev1alpha1.VsphereAgentPool) string {
 	if pool.Spec.VSphere.Folder != "" {
 		return pool.Spec.VSphere.Folder
@@ -545,19 +537,4 @@ func isoPathPrefix(pool *agentforgev1alpha1.VsphereAgentPool) string {
 		prefix = fmt.Sprintf("agent-forge/%s/%s", pool.Namespace, pool.Name)
 	}
 	return prefix
-}
-
-func randomAlphaNumeric(length int) string {
-	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-	if length <= 0 {
-		return ""
-	}
-	value := make([]byte, length)
-	if _, err := rand.Read(value); err != nil {
-		return strings.Repeat("x", length)
-	}
-	for i := range value {
-		value[i] = alphabet[int(value[i])%len(alphabet)]
-	}
-	return string(value)
 }
