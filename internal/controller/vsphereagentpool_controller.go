@@ -139,6 +139,16 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	ownedVMs, err := r.listVsphereAgentVMs(ctx, &pool)
+	if err != nil {
+		r.setStatusError(&pool, "VsphereAgentListFailed", err.Error())
+		if statusErr := r.updateStatus(ctx, &pool, PoolPlan{}); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, err
+	}
+	pool.Status.OwnedVMs = ownedVMs
+
 	agents, err := r.listMatchingAgents(ctx, &pool)
 	if err != nil {
 		r.setStatusError(&pool, "AgentListFailed", err.Error())
@@ -163,18 +173,6 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		return ctrl.Result{}, err
 	}
-	ownedVMs, err := r.listVsphereAgentVMs(ctx, &pool)
-	if err != nil {
-		r.setStatusError(&pool, "VsphereAgentListFailed", err.Error())
-		if statusErr := r.updateStatus(ctx, &pool, PoolPlan{}); statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
-		return ctrl.Result{}, err
-	}
-	if len(ownedVMs) == 0 && len(pool.Status.OwnedVMs) > 0 {
-		ownedVMs = pool.Status.OwnedVMs
-	}
-	pool.Status.OwnedVMs = ownedVMs
 	pool.Status.OwnedVMs = refreshOwnedVMStatuses(&pool, agents, machines)
 
 	plan := buildPlan(&pool, PoolSnapshot{
@@ -229,22 +227,6 @@ func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	if cleanupEnabled(pool) && len(pool.Status.OwnedVMs) > 0 {
-		provider, err := r.provider(ctx, pool)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		for _, vm := range pool.Status.OwnedVMs {
-			if vm.Name == "" {
-				continue
-			}
-			if err := provider.DeleteVM(ctx, pool, vm); err != nil {
-				recordVMOperation("delete", err)
-				return ctrl.Result{}, err
-			}
-			recordVMOperation("delete", nil)
-		}
-	}
 	controllerutil.RemoveFinalizer(pool, finalizerName)
 	return ctrl.Result{}, r.patchFinalizer(ctx, pool)
 }

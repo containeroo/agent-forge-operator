@@ -274,75 +274,14 @@ func TestPoolDeleteWaitsForVsphereAgentFinalizers(t *testing.T) {
 	}
 }
 
-func TestPoolDeleteCleansUpLegacyStatusVMsAfterChildrenGone(t *testing.T) {
+func TestPoolDeleteRemovesFinalizerAfterChildrenGone(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
 
 	pool := reconcileTestPool()
-	pool.DeletionTimestamp = &metav1.Time{Time: time.Now()}
-	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{newOwnedVMStatus("legacy-vm")}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
-		Data: map[string][]byte{
-			"server":   []byte("vcenter.example.invalid"),
-			"username": []byte("user"),
-			"password": []byte("pass"),
-		},
-	}
-
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(pool, secret).
-		WithStatusSubresource(pool).
-		Build()
-
-	provider := &fakeVMProvider{}
-	reconciler := &VsphereAgentPoolReconciler{
-		Client:   k8sClient,
-		Scheme:   scheme,
-		Recorder: events.NewFakeRecorder(10),
-		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
-			return provider, nil
-		},
-	}
-
-	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
-	if err != nil {
-		t.Fatalf("reconcile returned error: %v", err)
-	}
-	if provider.deleteVMCalls != 1 || provider.deletedVMNames[0] != "legacy-vm" {
-		t.Fatalf("deleted VMs = %#v, want legacy-vm", provider.deletedVMNames)
-	}
-	var updatedPool agentforgev1alpha1.VsphereAgentPool
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updatedPool); err != nil {
-		if apierrors.IsNotFound(err) {
-			return
-		}
-		t.Fatal(err)
-	}
-	if controllerutil.ContainsFinalizer(&updatedPool, finalizerName) {
-		t.Fatalf("pool finalizers = %#v, want pool finalizer removed after legacy VM cleanup", updatedPool.Finalizers)
-	}
-}
-
-func TestPoolDeleteRetainsLegacyStatusVMsWhenCleanupPolicyRetain(t *testing.T) {
-	ctx := context.Background()
-	scheme := runtime.NewScheme()
-	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-
-	pool := reconcileTestPool()
-	pool.Spec.CleanupPolicy = agentforgev1alpha1.CleanupPolicyRetain
 	pool.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{newOwnedVMStatus("legacy-vm")}
 
@@ -367,7 +306,7 @@ func TestPoolDeleteRetainsLegacyStatusVMsWhenCleanupPolicyRetain(t *testing.T) {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
 	if provider.deleteVMCalls != 0 {
-		t.Fatalf("DeleteVM calls = %d, want retained VM", provider.deleteVMCalls)
+		t.Fatalf("DeleteVM calls = %d, want child VsphereAgents to own VM deletion", provider.deleteVMCalls)
 	}
 	var updatedPool agentforgev1alpha1.VsphereAgentPool
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updatedPool); err != nil {
@@ -377,7 +316,7 @@ func TestPoolDeleteRetainsLegacyStatusVMsWhenCleanupPolicyRetain(t *testing.T) {
 		t.Fatal(err)
 	}
 	if controllerutil.ContainsFinalizer(&updatedPool, finalizerName) {
-		t.Fatalf("pool finalizers = %#v, want pool finalizer removed after retaining legacy VM", updatedPool.Finalizers)
+		t.Fatalf("pool finalizers = %#v, want pool finalizer removed after child cleanup is complete", updatedPool.Finalizers)
 	}
 }
 
@@ -1072,13 +1011,12 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
-		{
-			Name:       "demo-worker-ab12",
-			Phase:      phaseProvisioning,
-			MACAddress: "00-50-56-b2-a1-9f",
-		},
+	ownedVM := agentforgev1alpha1.OwnedVMStatus{
+		Name:       "demo-worker-ab12",
+		Phase:      phaseProvisioning,
+		MACAddress: "00-50-56-b2-a1-9f",
 	}
+	vsphereAgent := testVsphereAgentForVM(pool, ownedVM)
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testCandidateAgent(testNamespace, "abcdef12-3456-7890-abcd-ef1234567890")
@@ -1086,8 +1024,8 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, am, infraEnv, agent).
-		WithStatusSubresource(pool).
+		WithObjects(pool, am, infraEnv, agent, vsphereAgent).
+		WithStatusSubresource(pool, vsphereAgent).
 		Build()
 
 	reconciler := &VsphereAgentPoolReconciler{
@@ -1151,13 +1089,12 @@ func TestReconcilePatchesCandidateAgentWithPoolDiscriminatorLabel(t *testing.T) 
 
 	pool := reconcileTestPool()
 	pool.Spec.Agent.Labels[poolLabelKey] = "worker-32c128g"
-	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
-		{
-			Name:       "demo-worker-32c128g-ab12",
-			Phase:      phaseProvisioning,
-			MACAddress: "00-50-56-b2-a1-9f",
-		},
+	ownedVM := agentforgev1alpha1.OwnedVMStatus{
+		Name:       "demo-worker-32c128g-ab12",
+		Phase:      phaseProvisioning,
+		MACAddress: "00-50-56-b2-a1-9f",
 	}
+	vsphereAgent := testVsphereAgentForVM(pool, ownedVM)
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testCandidateAgent(testNamespace, "abcdef12-3456-7890-abcd-ef1234567890")
@@ -1165,8 +1102,8 @@ func TestReconcilePatchesCandidateAgentWithPoolDiscriminatorLabel(t *testing.T) 
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, am, infraEnv, agent).
-		WithStatusSubresource(pool).
+		WithObjects(pool, am, infraEnv, agent, vsphereAgent).
+		WithStatusSubresource(pool, vsphereAgent).
 		Build()
 
 	reconciler := &VsphereAgentPoolReconciler{
@@ -1473,13 +1410,18 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 	}
 
 	pool := reconcileTestPool()
-	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+	ownedVMs := []agentforgev1alpha1.OwnedVMStatus{
 		{Name: "demo-worker-one1", Phase: phaseBound, AgentRef: testAgentRef("demo-worker-one1")},
 		{Name: "demo-worker-two2", Phase: phaseBound, AgentRef: testAgentRef("demo-worker-two2")},
 		{Name: "demo-worker-thr3", Phase: phaseBound, AgentRef: testAgentRef("demo-worker-thr3")},
 		{Name: "demo-worker-old1", Phase: phaseProvisioning, Reason: "AgentNotDiscovered", LastTransitionTime: metav1.Now()},
 		{Name: "demo-worker-old2", Phase: phaseProvisioning, Reason: "AgentNotDiscovered", LastTransitionTime: metav1.Now()},
 	}
+	vsphereAgent1 := testVsphereAgentForVM(pool, ownedVMs[0])
+	vsphereAgent2 := testVsphereAgentForVM(pool, ownedVMs[1])
+	vsphereAgent3 := testVsphereAgentForVM(pool, ownedVMs[2])
+	vsphereAgent4 := testVsphereAgentForVM(pool, ownedVMs[3])
+	vsphereAgent5 := testVsphereAgentForVM(pool, ownedVMs[4])
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"}}
@@ -1489,8 +1431,8 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, am, infraEnv, secret, agent1, agent2, agent3).
-		WithStatusSubresource(pool).
+		WithObjects(pool, am, infraEnv, secret, agent1, agent2, agent3, vsphereAgent1, vsphereAgent2, vsphereAgent3, vsphereAgent4, vsphereAgent5).
+		WithStatusSubresource(pool, vsphereAgent1, vsphereAgent2, vsphereAgent3, vsphereAgent4, vsphereAgent5).
 		Build()
 
 	provider := &fakeVMProvider{}
@@ -1540,22 +1482,21 @@ func TestReconcileMarksReturnedAgentReleased(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
-	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
-		{
-			Name:     "demo-worker-ab12",
-			Phase:    phaseBound,
-			Reason:   "AgentBound",
-			AgentRef: &corev1.ObjectReference{Name: "demo-worker-ab12"},
-		},
+	ownedVM := agentforgev1alpha1.OwnedVMStatus{
+		Name:     "demo-worker-ab12",
+		Phase:    phaseBound,
+		Reason:   "AgentBound",
+		AgentRef: &corev1.ObjectReference{Name: "demo-worker-ab12"},
 	}
+	vsphereAgent := testVsphereAgentForVM(pool, ownedVM)
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testAgent(testNamespace, "demo-worker-ab12", false, true)
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, am, infraEnv, agent).
-		WithStatusSubresource(pool).
+		WithObjects(pool, am, infraEnv, agent, vsphereAgent).
+		WithStatusSubresource(pool, vsphereAgent).
 		Build()
 
 	reconciler := &VsphereAgentPoolReconciler{
@@ -2230,6 +2171,24 @@ func setAgentPrimaryMAC(t *testing.T, agent *unstructured.Unstructured, mac stri
 	t.Helper()
 	if err := unstructured.SetNestedSlice(agent.Object, []any{map[string]any{"macAddress": mac}}, "status", "inventory", "interfaces"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func testVsphereAgentForVM(pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) *agentforgev1alpha1.VsphereAgent {
+	return &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: pool.Namespace,
+			Name:      vm.Name,
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel: pool.Name,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: vm,
+		},
 	}
 }
 
