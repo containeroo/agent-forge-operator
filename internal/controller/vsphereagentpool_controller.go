@@ -98,6 +98,7 @@ type AgentMachineDemand struct {
 // +kubebuilder:rbac:groups=agent-install.openshift.io,resources=infraenvs;agents,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 
 // Reconcile plans and applies vSphere-backed Agent inventory for one hosted
 // cluster NodePool. Hypershift and CAPI remain the source of truth: this
