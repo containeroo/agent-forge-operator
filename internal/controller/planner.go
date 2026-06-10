@@ -36,6 +36,7 @@ const (
 	phaseReleased     = "Released"
 	defaultAgentRole  = "worker"
 	defaultDatacenter = "dc1"
+	poolLabelKey      = "agent-forge.containeroo.ch/nodepool"
 
 	reasonAgentNotDiscovered   = "AgentNotDiscovered"
 	reasonInfraEnvUnavailable  = "InfraEnvUnavailable"

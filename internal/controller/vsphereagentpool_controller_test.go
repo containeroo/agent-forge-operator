@@ -1437,6 +1437,60 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	}
 }
 
+func TestReconcilePatchesCandidateAgentWithPoolDiscriminatorLabel(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Spec.Agent.Labels[poolLabelKey] = "worker-32c128g"
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		newOwnedVMStatus("demo-worker-32c128g-ab12"),
+	}
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	agent := testCandidateAgent(testNamespace, "abcdef12-3456-7890-abcd-ef1234567890")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, am, infraEnv, agent).
+		WithStatusSubresource(pool).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated unstructured.Unstructured
+	updated.SetGroupVersionKind(agentGVK)
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: agent.GetName()}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	labels := updated.GetLabels()
+	if labels[roleLabelKey] != testWorkerRole {
+		t.Fatalf("role label = %q, want %q", labels[roleLabelKey], testWorkerRole)
+	}
+	if labels[poolLabelKey] != "worker-32c128g" {
+		t.Fatalf("pool label = %q, want worker-32c128g", labels[poolLabelKey])
+	}
+	hostname, _, _ := unstructured.NestedString(updated.Object, "spec", "hostname")
+	if hostname != "demo-worker-32c128g-ab12" {
+		t.Fatalf("spec.hostname = %q, want matching owned VM name", hostname)
+	}
+}
+
 func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()

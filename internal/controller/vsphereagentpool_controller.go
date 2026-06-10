@@ -1691,7 +1691,7 @@ func agentPrimaryMAC(agent *unstructured.Unstructured) string {
 func agentCandidateLabels(pool *agentforgev1alpha1.VsphereAgentPool) map[string]string {
 	labels := map[string]string{}
 	for key, value := range pool.Spec.Agent.Labels {
-		if key == roleLabelKey {
+		if key == roleLabelKey || key == poolLabelKey {
 			continue
 		}
 		labels[key] = value
