@@ -18,6 +18,11 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+	"strconv"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -85,8 +90,20 @@ func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.C
 		return err
 	}
 
-	for i := 0; i < 5; i++ {
-		name := vsphereAgentNameForAgentMachine(pool)
+	for attempt := 0; attempt < 10; attempt++ {
+		name := vsphereAgentNameForAgentMachine(pool, agentMachine, attempt)
+		var existing agentforgev1alpha1.VsphereAgent
+		err := r.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: name}, &existing)
+		if err == nil {
+			if vsphereAgentMatchesAgentMachine(&existing, pool, agentMachine) {
+				return nil
+			}
+			continue
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+
 		agent := &agentforgev1alpha1.VsphereAgent{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: pool.Namespace,
@@ -113,7 +130,7 @@ func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.C
 		}
 		return nil
 	}
-	return apierrors.NewAlreadyExists(agentforgev1alpha1.GroupVersion.WithResource("vsphereagents").GroupResource(), vsphereAgentNameForAgentMachine(pool))
+	return apierrors.NewAlreadyExists(agentforgev1alpha1.GroupVersion.WithResource("vsphereagents").GroupResource(), vsphereAgentNameForAgentMachine(pool, agentMachine, 0))
 }
 
 func (r *AgentMachineReconciler) vsphereAgentExistsForAgentMachine(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) (bool, error) {
@@ -131,8 +148,42 @@ func (r *AgentMachineReconciler) vsphereAgentExistsForAgentMachine(ctx context.C
 	return len(list.Items) > 0, nil
 }
 
-func vsphereAgentNameForAgentMachine(pool *agentforgev1alpha1.VsphereAgentPool) string {
-	return desiredAgentHostname(pool)
+func vsphereAgentMatchesAgentMachine(agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) bool {
+	if agent.Spec.PoolRef.Name != pool.Name && agent.Labels[vsphereAgentPoolNameLabel] != pool.Name {
+		return false
+	}
+	if agent.Labels[vsphereAgentMachineNameLabel] != agentMachine.GetName() {
+		return false
+	}
+	if agentMachine.GetUID() == "" {
+		return true
+	}
+	return agent.Labels[vsphereAgentMachineUIDLabel] == string(agentMachine.GetUID())
+}
+
+func vsphereAgentNameForAgentMachine(pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured, attempt int) string {
+	return agentHostnameWithSuffix(vmNamePrefix(pool), stableAgentMachineSuffix(pool, agentMachine, attempt))
+}
+
+func stableAgentMachineSuffix(pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured, attempt int) string {
+	identity := fmt.Sprintf("%s/%s/%s/%s/%s/%d",
+		pool.Namespace,
+		pool.Name,
+		agentMachine.GetNamespace(),
+		agentMachine.GetName(),
+		agentMachine.GetUID(),
+		attempt,
+	)
+	sum := sha256.Sum256([]byte(identity))
+	value := binary.BigEndian.Uint64(sum[:8]) % (36 * 36 * 36 * 36)
+	return leftPad(strconv.FormatUint(value, 36), 4, "0")
+}
+
+func leftPad(value string, length int, pad string) string {
+	if len(value) >= length {
+		return value
+	}
+	return strings.Repeat(pad, length-len(value)) + value
 }
 
 func (r *AgentMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {

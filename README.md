@@ -32,7 +32,7 @@ Common commands:
 make test
 make lint
 make manifests
-make crd
+make install
 make deploy IMG=<registry>/agent-forge-operator:<tag>
 ```
 

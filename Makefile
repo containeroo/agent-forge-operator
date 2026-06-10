@@ -141,14 +141,19 @@ test: manifests generate fmt vet envtest ## Run tests.
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 .PHONY: test-e2e
-test-e2e: $(KIND) ## Run the e2e tests against a Kind k8s instance that is spun up.
+test-e2e: kind ## Run the e2e tests against a Kind k8s instance that is spun up.
 	PATH="$(LOCALBIN):$$PATH" USE_EXISTING_CLUSTER=true KIND_CLUSTER=$(KIND_CLUSTER_NAME) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 
 .PHONY: kind
 kind: $(KIND) ## Create a Kind cluster.
 	@echo "Setting up Kind cluster..."
-	@$(KIND) create cluster --name $(KIND_CLUSTER_NAME) --wait 60s
-	@kubectl cluster-info
+	@if $(KIND) get clusters | grep -qx "$(KIND_CLUSTER_NAME)"; then \
+		echo "Kind cluster $(KIND_CLUSTER_NAME) already exists."; \
+	else \
+		$(KIND) create cluster --name $(KIND_CLUSTER_NAME) --wait 60s; \
+	fi
+	@$(KUBECTL) config use-context kind-$(KIND_CLUSTER_NAME)
+	@$(KUBECTL) cluster-info
 
 .PHONY: kind
 $(KIND): $(LOCALBIN)

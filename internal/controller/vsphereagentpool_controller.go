@@ -132,32 +132,42 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Reason:             reasonInfraEnvUnavailable,
 			Message:            infraEnvMessage,
 		})
-		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		if err := r.updateStatus(ctx, &pool, PoolPlan{}); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	agents, err := r.listMatchingAgents(ctx, &pool)
 	if err != nil {
 		r.setStatusError(&pool, "AgentListFailed", err.Error())
-		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		if statusErr := r.updateStatus(ctx, &pool, PoolPlan{}); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{}, err
 	}
 	machines, err := r.listNodePoolMachines(ctx, &pool)
 	if err != nil {
 		r.setStatusError(&pool, "MachineListFailed", err.Error())
-		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		if statusErr := r.updateStatus(ctx, &pool, PoolPlan{}); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{}, err
 	}
 	agentMachineDemand, err := r.countAgentMachineDemand(ctx, &pool)
 	if err != nil {
 		r.setStatusError(&pool, "AgentMachineListFailed", err.Error())
-		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		if statusErr := r.updateStatus(ctx, &pool, PoolPlan{}); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{}, err
 	}
 	ownedVMs, err := r.listVsphereAgentVMs(ctx, &pool)
 	if err != nil {
 		r.setStatusError(&pool, "VsphereAgentListFailed", err.Error())
-		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		if statusErr := r.updateStatus(ctx, &pool, PoolPlan{}); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{}, err
 	}
 	if len(ownedVMs) == 0 && len(pool.Status.OwnedVMs) > 0 {
@@ -167,7 +177,9 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	pool.Status.OwnedVMs = refreshOwnedVMStatuses(&pool, agents, machines)
 	if err := r.adoptMatchingAgents(ctx, &pool, agents); err != nil {
 		r.setStatusError(&pool, "VsphereAgentAdoptionFailed", err.Error())
-		_ = r.updateStatus(ctx, &pool, PoolPlan{})
+		if statusErr := r.updateStatus(ctx, &pool, PoolPlan{}); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -259,8 +271,23 @@ func (r *VsphereAgentPoolReconciler) patchFinalizer(ctx context.Context, pool *a
 
 func (r *VsphereAgentPoolReconciler) listVsphereAgentsForPool(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (agentforgev1alpha1.VsphereAgentList, error) {
 	var list agentforgev1alpha1.VsphereAgentList
-	err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name})
-	return list, err
+	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace)); err != nil {
+		return list, err
+	}
+	filtered := agentforgev1alpha1.VsphereAgentList{ListMeta: list.ListMeta}
+	for i := range list.Items {
+		if vsphereAgentBelongsToPool(&list.Items[i], pool.Name) {
+			filtered.Items = append(filtered.Items, list.Items[i])
+		}
+	}
+	return filtered, nil
+}
+
+func vsphereAgentBelongsToPool(agent *agentforgev1alpha1.VsphereAgent, poolName string) bool {
+	if agent.Spec.PoolRef.Name == poolName {
+		return true
+	}
+	return agent.Labels[vsphereAgentPoolNameLabel] == poolName
 }
 
 func (r *VsphereAgentPoolReconciler) listVsphereAgentVMs(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]agentforgev1alpha1.OwnedVMStatus, error) {
@@ -379,8 +406,8 @@ func (r *VsphereAgentPoolReconciler) ensureVsphereAgentForAdoptedVM(ctx context.
 }
 
 func (r *VsphereAgentPoolReconciler) findVsphereAgentForAdoptedVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo, vm agentforgev1alpha1.OwnedVMStatus) (*agentforgev1alpha1.VsphereAgent, error) {
-	var list agentforgev1alpha1.VsphereAgentList
-	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name}); err != nil {
+	list, err := r.listVsphereAgentsForPool(ctx, pool)
+	if err != nil {
 		return nil, err
 	}
 	for i := range list.Items {
@@ -405,8 +432,8 @@ func (r *VsphereAgentPoolReconciler) deleteDuplicateVsphereAgentsForVM(ctx conte
 	if vm.Name == "" || current.Name != vm.Name {
 		return nil
 	}
-	var list agentforgev1alpha1.VsphereAgentList
-	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: pool.Name}); err != nil {
+	list, err := r.listVsphereAgentsForPool(ctx, pool)
+	if err != nil {
 		return err
 	}
 	for i := range list.Items {
@@ -787,27 +814,13 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 }
 
 func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo, machines []MachineInfo) []agentforgev1alpha1.OwnedVMStatus {
-	byHostname := map[string]AgentInfo{}
-	byName := map[string]AgentInfo{}
-	byBIOSUUID := map[string]AgentInfo{}
-	byMAC := map[string]AgentInfo{}
-	for _, agent := range agents {
-		byName[agent.Name] = agent
-		if hostname := agentObservedHostname(agent); hostname != "" {
-			byHostname[hostname] = agent
-		}
-		if agent.BIOSUUID != "" {
-			byBIOSUUID[agent.BIOSUUID] = agent
-		}
-		if agent.MAC != "" {
-			byMAC[agent.MAC] = agent
-		}
-	}
+	agentLookup := newAgentIdentityLookup(agents)
 	machineStates := map[string]MachineInfo{}
 	for _, machine := range machines {
 		machineStates[machine.Name] = machine
 	}
 
+	now := time.Now()
 	vms := make([]agentforgev1alpha1.OwnedVMStatus, 0, len(pool.Status.OwnedVMs))
 	matchedAgents := map[string]struct{}{}
 	knownVMNames := map[string]struct{}{}
@@ -815,35 +828,9 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		if vm.Name != "" {
 			knownVMNames[vm.Name] = struct{}{}
 		}
-		agent, matched := byBIOSUUID[vm.BIOSUUID]
-		if !matched && vm.MACAddress != "" {
-			agent, matched = byMAC[vm.MACAddress]
-		}
+		agent, matched := agentLookup.match(vm)
 		if !matched {
-			candidate, exists := byHostname[vm.Name]
-			if exists && !vmIdentityConflictsAgent(vm, candidate) {
-				agent = candidate
-				matched = true
-			}
-		}
-		if !matched && vm.AgentRef != nil && vm.AgentRef.Name != "" {
-			candidate, exists := byName[vm.AgentRef.Name]
-			if exists && !vmIdentityConflictsAgent(vm, candidate) {
-				agent = candidate
-				matched = true
-			}
-		}
-		if !matched {
-			hadDiscoveredAgent := vmHadDiscoveredAgent(vm)
-			vm.AgentRef = nil
-			vm.MachineRef = nil
-			if hadDiscoveredAgent {
-				setOwnedVMPhase(&vm, phaseOrphaned, "AgentMissing")
-			} else if ownedVMDiscoveryExpired(vm, time.Now()) {
-				setOwnedVMPhase(&vm, phaseOrphaned, "AgentDiscoveryExpired")
-			} else {
-				setOwnedVMPhase(&vm, phaseProvisioning, reasonAgentNotDiscovered)
-			}
+			markOwnedVMWithoutMatchingAgent(&vm, now)
 			vms = append(vms, vm)
 			continue
 		}
@@ -879,6 +866,84 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		knownVMNames[hostname] = struct{}{}
 	}
 	return vms
+}
+
+type agentIdentityLookup struct {
+	byHostname map[string]AgentInfo
+	byName     map[string]AgentInfo
+	byBIOSUUID map[string]AgentInfo
+	byMAC      map[string]AgentInfo
+}
+
+func newAgentIdentityLookup(agents []AgentInfo) agentIdentityLookup {
+	lookup := agentIdentityLookup{
+		byHostname: map[string]AgentInfo{},
+		byName:     map[string]AgentInfo{},
+		byBIOSUUID: map[string]AgentInfo{},
+		byMAC:      map[string]AgentInfo{},
+	}
+	for _, agent := range agents {
+		lookup.byName[agent.Name] = agent
+		if hostname := agentObservedHostname(agent); hostname != "" {
+			lookup.byHostname[hostname] = agent
+		}
+		if agent.BIOSUUID != "" {
+			lookup.byBIOSUUID[agent.BIOSUUID] = agent
+		}
+		if agent.MAC != "" {
+			lookup.byMAC[agent.MAC] = agent
+		}
+	}
+	return lookup
+}
+
+func (l agentIdentityLookup) match(vm agentforgev1alpha1.OwnedVMStatus) (AgentInfo, bool) {
+	if vm.BIOSUUID != "" {
+		if agent, matched := l.byBIOSUUID[vm.BIOSUUID]; matched {
+			return agent, true
+		}
+	}
+	if vm.MACAddress != "" {
+		if agent, matched := l.byMAC[vm.MACAddress]; matched {
+			return agent, true
+		}
+	}
+	if agent, matched := l.matchHostname(vm); matched {
+		return agent, true
+	}
+	return l.matchAgentRef(vm)
+}
+
+func (l agentIdentityLookup) matchHostname(vm agentforgev1alpha1.OwnedVMStatus) (AgentInfo, bool) {
+	candidate, exists := l.byHostname[vm.Name]
+	if exists && !vmIdentityConflictsAgent(vm, candidate) {
+		return candidate, true
+	}
+	return AgentInfo{}, false
+}
+
+func (l agentIdentityLookup) matchAgentRef(vm agentforgev1alpha1.OwnedVMStatus) (AgentInfo, bool) {
+	if vm.AgentRef == nil || vm.AgentRef.Name == "" {
+		return AgentInfo{}, false
+	}
+	candidate, exists := l.byName[vm.AgentRef.Name]
+	if exists && !vmIdentityConflictsAgent(vm, candidate) {
+		return candidate, true
+	}
+	return AgentInfo{}, false
+}
+
+func markOwnedVMWithoutMatchingAgent(vm *agentforgev1alpha1.OwnedVMStatus, now time.Time) {
+	hadDiscoveredAgent := vmHadDiscoveredAgent(*vm)
+	vm.AgentRef = nil
+	vm.MachineRef = nil
+	if hadDiscoveredAgent {
+		setOwnedVMPhase(vm, phaseOrphaned, "AgentMissing")
+	} else if ownedVMDiscoveryExpired(*vm, now) {
+		setOwnedVMPhase(vm, phaseOrphaned, "AgentDiscoveryExpired")
+	} else {
+		setOwnedVMPhase(vm, phaseProvisioning, reasonAgentNotDiscovered)
+	}
 }
 
 func vmMatchesAgentIdentity(vm agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) bool {
@@ -1203,7 +1268,8 @@ func isPoolReconcileCondition(conditionType string) bool {
 		conditionAgentMachineDemand,
 		conditionInfraEnvAvailable,
 		conditionCapacitySatisfied,
-		conditionVsphereReady:
+		conditionVsphereReady,
+		conditionISOReady:
 		return true
 	default:
 		return false
@@ -1574,11 +1640,16 @@ func agentBelongsToInfraEnv(agent *unstructured.Unstructured, infraEnvName strin
 }
 
 func desiredAgentHostname(pool *agentforgev1alpha1.VsphereAgentPool) string {
-	prefix := vmNamePrefix(pool)
-	suffix := randomAlphaNumeric(4)
+	return agentHostnameWithSuffix(vmNamePrefix(pool), randomAlphaNumeric(4))
+}
+
+func agentHostnameWithSuffix(prefix, suffix string) string {
 	maxPrefixLen := 63 - len(suffix) - 1
 	if len(prefix) > maxPrefixLen {
 		prefix = strings.TrimRight(prefix[:maxPrefixLen], "-")
+	}
+	if prefix == "" {
+		return suffix
 	}
 	return fmt.Sprintf("%s-%s", prefix, suffix)
 }
@@ -1807,9 +1878,7 @@ func (r *VsphereAgentPoolReconciler) requestsForAgentChange(ctx context.Context,
 	reqs := make([]reconcile.Request, 0, len(pools.Items))
 	for i := range pools.Items {
 		pool := &pools.Items[i]
-		if agentMatchesPool(agent, pool) {
-			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
-		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
 	}
 	return reqs
 }
@@ -1820,22 +1889,6 @@ func controlPlaneObjectMatchesPool(obj *unstructured.Unstructured, pool *agentfo
 	}
 	expectedNodePool := fmt.Sprintf("%s/%s", pool.Namespace, pool.Spec.NodePoolRef.Name)
 	return obj.GetAnnotations()[nodePoolAnnotation] == expectedNodePool
-}
-
-func agentMatchesPool(agent *unstructured.Unstructured, pool *agentforgev1alpha1.VsphereAgentPool) bool {
-	if agent.GetNamespace() != pool.Namespace {
-		return false
-	}
-	if !agentBelongsToInfraEnv(agent, pool.Spec.InfraEnvRef.Name) {
-		return false
-	}
-	labels := agent.GetLabels()
-	for key, value := range agentCandidateLabels(pool) {
-		if labels[key] != value {
-			return false
-		}
-	}
-	return true
 }
 
 // SetupWithManager sets up the controller with the Manager.

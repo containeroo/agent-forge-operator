@@ -29,6 +29,14 @@
     },
     {
       "customType": "regex",
+      "managerFilePatterns": ["/^Dockerfile$/", "/^Dockerfile\\.goreleaser$/"],
+      "matchStrings": ["ARG GOVC_VERSION=(?<currentValue>v[^\\s]+)"],
+      "depNameTemplate": "vmware/govmomi",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
       "managerFilePatterns": ["/^Makefile$/"],
       "matchStrings": ["KUSTOMIZE_VERSION \\?= (?<currentValue>v[^\\s]+)"],
       "depNameTemplate": "kubernetes-sigs/kustomize",

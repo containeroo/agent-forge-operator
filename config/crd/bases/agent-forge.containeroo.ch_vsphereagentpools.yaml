@@ -105,7 +105,9 @@ spec:
                   ControlPlaneNamespace is the hosted control plane namespace that contains
                   the CAPI AgentMachine and Machine objects rendered by Hypershift, for
                   example demo-demo.
+                maxLength: 63
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               hostedClusterRef:
                 description: HostedClusterRef references the Hypershift HostedCluster

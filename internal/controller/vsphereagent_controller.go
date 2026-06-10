@@ -75,7 +75,9 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				Reason:             "PoolNotFound",
 				Message:            "referenced VsphereAgentPool does not exist",
 			})
-			_ = r.updateStatus(ctx, &agent)
+			if statusErr := r.updateStatus(ctx, &agent); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
 			return ctrl.Result{RequeueAfter: time.Minute}, nil
 		}
 		return ctrl.Result{}, err
@@ -109,7 +111,9 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Reason:             "AdoptionPending",
 			Message:            "waiting for VsphereAgentPool to initialize adopted VM status",
 		})
-		_ = r.updateStatus(ctx, &agent)
+		if statusErr := r.updateStatus(ctx, &agent); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
@@ -123,7 +127,9 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Reason:             reasonInfraEnvUnavailable,
 			Message:            infraEnvMessage,
 		})
-		_ = r.updateStatus(ctx, &agent)
+		if statusErr := r.updateStatus(ctx, &agent); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -136,7 +142,9 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Reason:             "ProviderUnavailable",
 			Message:            stableErrorMessage(err),
 		})
-		_ = r.updateStatus(ctx, &agent)
+		if statusErr := r.updateStatus(ctx, &agent); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	isoPath, err := poolOps.ensureISOCache(ctx, &pool, provider, infraEnvISOURL)
@@ -148,7 +156,9 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Reason:             "ISORefreshFailed",
 			Message:            stableErrorMessage(err),
 		})
-		_ = r.updateStatus(ctx, &agent)
+		if statusErr := r.updateStatus(ctx, &agent); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if err := r.patchPoolISOStatus(ctx, &pool); err != nil {
@@ -165,7 +175,9 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Reason:             "VMCreateFailed",
 			Message:            stableErrorMessage(err),
 		})
-		_ = r.updateStatus(ctx, &agent)
+		if statusErr := r.updateStatus(ctx, &agent); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	recordVMOperation("create", nil)
@@ -210,12 +222,15 @@ func (r *VsphereAgentReconciler) vmManagedByAnotherVsphereAgent(ctx context.Cont
 		return false, nil
 	}
 	var list agentforgev1alpha1.VsphereAgentList
-	if err := r.List(ctx, &list, client.InNamespace(agent.Namespace), client.MatchingLabels{vsphereAgentPoolNameLabel: agent.Spec.PoolRef.Name}); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(agent.Namespace)); err != nil {
 		return false, err
 	}
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.Name == agent.Name || other.GetDeletionTimestamp() != nil {
+			continue
+		}
+		if !vsphereAgentBelongsToPool(other, agent.Spec.PoolRef.Name) {
 			continue
 		}
 		if other.Status.VM.Name == agent.Status.VM.Name {
@@ -265,14 +280,18 @@ func (r *VsphereAgentReconciler) patchPoolISOStatus(ctx context.Context, pool *a
 		if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
 			return err
 		}
+		before := *current.Status.DeepCopy()
 		current.Status.ISO = pool.Status.ISO
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type:               conditionISOReady,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: current.Generation,
-			Reason:             "ISOReady",
+			Reason:             conditionISOReady,
 			Message:            "InfraEnv discovery ISO is cached for new vSphere VMs",
 		})
+		if reflect.DeepEqual(before, current.Status) {
+			return nil
+		}
 		return r.Status().Update(ctx, &current)
 	})
 }

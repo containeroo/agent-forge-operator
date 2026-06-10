@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -419,6 +420,46 @@ func TestPoolStatusUpdatePreservesISOStatus(t *testing.T) {
 	}
 }
 
+func TestPoolStatusUpdatePreservesISOReadyCondition(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	current := reconcileTestPool()
+	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+		Type:               conditionISOReady,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: current.Generation,
+		Reason:             "ISOReady",
+		Message:            "cached",
+	})
+	stale := current.DeepCopy()
+	stale.Status.Conditions = nil
+	setPlanConditions(stale, PoolPlan{AgentMachines: 1}, "")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(current).
+		WithStatusSubresource(current).
+		Build()
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+
+	if err := reconciler.updateStatus(ctx, stale, PoolPlan{AgentMachines: 1, DesiredReplicas: 1}); err != nil {
+		t.Fatalf("updateStatus returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	isoReady := findCondition(updated.Status.Conditions, conditionISOReady)
+	if isoReady == nil || isoReady.Status != metav1.ConditionTrue || isoReady.Reason != "ISOReady" {
+		t.Fatalf("ISOReady condition = %#v, want preserved True condition", isoReady)
+	}
+}
+
 func TestPoolPatchFinalizerPreservesForeignFinalizers(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -682,7 +723,7 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 		t.Fatalf("poolRef = %q, want %q", created.Spec.PoolRef.Name, testNodePool)
 	}
 	if !agentHostnamePattern.MatchString(created.Name) {
-		t.Fatalf("VsphereAgent name = %q, want VM-style name with pool prefix and 4-character suffix", created.Name)
+		t.Fatalf("VsphereAgent name = %q, want VM-style name with pool prefix and stable 4-character suffix", created.Name)
 	}
 
 	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: testNodePool}})
@@ -694,6 +735,66 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	}
 	if len(vsphereAgents.Items) != 1 {
 		t.Fatalf("VsphereAgents after second reconcile = %d, want 1", len(vsphereAgents.Items))
+	}
+}
+
+func TestAgentMachineVsphereAgentNameIsStablePerDemand(t *testing.T) {
+	pool := reconcileTestPool()
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+	am.SetUID(types.UID("agent-machine-uid"))
+	other := testAgentMachine(testControlPlaneNamespace, testNodePool+"-2", "demo/demo-worker")
+	other.SetUID(types.UID("other-agent-machine-uid"))
+
+	name := vsphereAgentNameForAgentMachine(pool, am, 0)
+	if name != vsphereAgentNameForAgentMachine(pool, am, 0) {
+		t.Fatalf("VsphereAgent name was not stable for the same AgentMachine")
+	}
+	if name == vsphereAgentNameForAgentMachine(pool, other, 0) {
+		t.Fatalf("VsphereAgent name %q was reused for different AgentMachine UIDs", name)
+	}
+	if !agentHostnamePattern.MatchString(name) {
+		t.Fatalf("VsphereAgent name = %q, want pool prefix plus stable 4-character suffix", name)
+	}
+}
+
+func TestAgentMachineReconcileUsesNextStableNameOnCollision(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+	am.SetUID(types.UID("agent-machine-uid"))
+	collidingName := vsphereAgentNameForAgentMachine(pool, am, 0)
+	nextName := vsphereAgentNameForAgentMachine(pool, am, 1)
+	collidingAgent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      collidingName,
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: "other-worker"},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, collidingAgent).
+		Build()
+
+	reconciler := &AgentMachineReconciler{Client: k8sClient, Scheme: scheme}
+	if err := reconciler.ensureVsphereAgentForAgentMachine(ctx, pool, am); err != nil {
+		t.Fatalf("ensureVsphereAgentForAgentMachine returned error: %v", err)
+	}
+
+	var created agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: nextName}, &created); err != nil {
+		t.Fatalf("expected colliding AgentMachine to use next stable name %q: %v", nextName, err)
+	}
+	if created.Labels[vsphereAgentMachineUIDLabel] != string(am.GetUID()) {
+		t.Fatalf("created labels = %#v, want AgentMachine UID label", created.Labels)
 	}
 }
 
@@ -1015,6 +1116,42 @@ func TestReconcileDeletesDuplicateVsphereAgentForDiscoveredVM(t *testing.T) {
 	}
 	if len(vsphereAgents.Items) != 1 || vsphereAgents.Items[0].Name != testAdoptedVM {
 		t.Fatalf("VsphereAgents = %#v, want only named VM object retained", vsphereAgents.Items)
+	}
+}
+
+func TestListVsphereAgentsForPoolUsesSpecPoolRefWhenLabelMissing(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	agent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      "demo-worker-unlabeled",
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+	}
+	other := agent.DeepCopy()
+	other.Name = "other-worker-unlabeled"
+	other.Spec.PoolRef.Name = "other-worker"
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, agent, other).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+	agents, err := reconciler.listVsphereAgentsForPool(ctx, pool)
+	if err != nil {
+		t.Fatalf("listVsphereAgentsForPool returned error: %v", err)
+	}
+	if len(agents.Items) != 1 || agents.Items[0].Name != agent.Name {
+		t.Fatalf("VsphereAgents = %#v, want only spec.poolRef match", agents.Items)
 	}
 }
 
@@ -1868,11 +2005,20 @@ func TestRequestsForAgentChangeFindsMatchingPool(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
 	reqs := reconciler.requestsForAgentChange(ctx, agent)
-	if len(reqs) != 1 {
-		t.Fatalf("requests = %#v, want one request", reqs)
+	if len(reqs) != 2 {
+		t.Fatalf("requests = %#v, want namespace-local pools", reqs)
 	}
-	if reqs[0].NamespacedName != (types.NamespacedName{Namespace: testNamespace, Name: testNodePool}) {
-		t.Fatalf("request = %s, want demo/demo-worker", reqs[0].NamespacedName)
+	got := map[types.NamespacedName]struct{}{}
+	for _, req := range reqs {
+		got[req.NamespacedName] = struct{}{}
+	}
+	for _, want := range []types.NamespacedName{
+		{Namespace: testNamespace, Name: testNodePool},
+		{Namespace: testNamespace, Name: "other-worker"},
+	} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("requests = %#v, missing %s", reqs, want)
+		}
 	}
 }
 

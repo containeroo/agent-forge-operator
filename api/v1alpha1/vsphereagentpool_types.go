@@ -236,6 +236,8 @@ type VsphereAgentPoolSpec struct {
 	// the CAPI AgentMachine and Machine objects rendered by Hypershift, for
 	// example demo-demo.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	ControlPlaneNamespace string `json:"controlPlaneNamespace"`
 
 	// VSphere configures placement and VM platform settings.
