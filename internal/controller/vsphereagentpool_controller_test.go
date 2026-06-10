@@ -149,6 +149,7 @@ func TestReconcileReportsAgentMachineDemandCondition(t *testing.T) {
 	condition := findCondition(updated.Status.Conditions, conditionAgentMachineDemand)
 	if condition == nil {
 		t.Fatal("AgentMachineDemandFound condition was not set")
+		return
 	}
 	if condition.Status != metav1.ConditionTrue {
 		t.Fatalf("AgentMachineDemandFound status = %s, want True", condition.Status)
@@ -696,7 +697,8 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	}
 
 	pool := reconcileTestPool()
-	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+	agentMachineName := testNodePool + "-8phl4"
+	am := testAgentMachine(testControlPlaneNamespace, agentMachineName, "demo/demo-worker")
 	am.SetUID(types.UID("agent-machine-uid"))
 
 	k8sClient := fake.NewClientBuilder().
@@ -706,7 +708,7 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 		Build()
 
 	reconciler := &AgentMachineReconciler{Client: k8sClient, Scheme: scheme}
-	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: testNodePool}})
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: agentMachineName}})
 	if err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
@@ -722,11 +724,11 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	if created.Spec.PoolRef.Name != testNodePool {
 		t.Fatalf("poolRef = %q, want %q", created.Spec.PoolRef.Name, testNodePool)
 	}
-	if !agentHostnamePattern.MatchString(created.Name) {
-		t.Fatalf("VsphereAgent name = %q, want VM-style name with pool prefix and stable 4-character suffix", created.Name)
+	if created.Name != agentMachineName {
+		t.Fatalf("VsphereAgent name = %q, want AgentMachine name %q", created.Name, agentMachineName)
 	}
 
-	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: testNodePool}})
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: agentMachineName}})
 	if err != nil {
 		t.Fatalf("second reconcile returned error: %v", err)
 	}
@@ -735,66 +737,6 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	}
 	if len(vsphereAgents.Items) != 1 {
 		t.Fatalf("VsphereAgents after second reconcile = %d, want 1", len(vsphereAgents.Items))
-	}
-}
-
-func TestAgentMachineVsphereAgentNameIsStablePerDemand(t *testing.T) {
-	pool := reconcileTestPool()
-	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
-	am.SetUID(types.UID("agent-machine-uid"))
-	other := testAgentMachine(testControlPlaneNamespace, testNodePool+"-2", "demo/demo-worker")
-	other.SetUID(types.UID("other-agent-machine-uid"))
-
-	name := vsphereAgentNameForAgentMachine(pool, am, 0)
-	if name != vsphereAgentNameForAgentMachine(pool, am, 0) {
-		t.Fatalf("VsphereAgent name was not stable for the same AgentMachine")
-	}
-	if name == vsphereAgentNameForAgentMachine(pool, other, 0) {
-		t.Fatalf("VsphereAgent name %q was reused for different AgentMachine UIDs", name)
-	}
-	if !agentHostnamePattern.MatchString(name) {
-		t.Fatalf("VsphereAgent name = %q, want pool prefix plus stable 4-character suffix", name)
-	}
-}
-
-func TestAgentMachineReconcileUsesNextStableNameOnCollision(t *testing.T) {
-	ctx := context.Background()
-	scheme := runtime.NewScheme()
-	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-
-	pool := reconcileTestPool()
-	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
-	am.SetUID(types.UID("agent-machine-uid"))
-	collidingName := vsphereAgentNameForAgentMachine(pool, am, 0)
-	nextName := vsphereAgentNameForAgentMachine(pool, am, 1)
-	collidingAgent := &agentforgev1alpha1.VsphereAgent{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      collidingName,
-		},
-		Spec: agentforgev1alpha1.VsphereAgentSpec{
-			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: "other-worker"},
-		},
-	}
-
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(pool, collidingAgent).
-		Build()
-
-	reconciler := &AgentMachineReconciler{Client: k8sClient, Scheme: scheme}
-	if err := reconciler.ensureVsphereAgentForAgentMachine(ctx, pool, am); err != nil {
-		t.Fatalf("ensureVsphereAgentForAgentMachine returned error: %v", err)
-	}
-
-	var created agentforgev1alpha1.VsphereAgent
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: nextName}, &created); err != nil {
-		t.Fatalf("expected colliding AgentMachine to use next stable name %q: %v", nextName, err)
-	}
-	if created.Labels[vsphereAgentMachineUIDLabel] != string(am.GetUID()) {
-		t.Fatalf("created labels = %#v, want AgentMachine UID label", created.Labels)
 	}
 }
 
@@ -1905,6 +1847,7 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 	condition := findCondition(updated.Status.Conditions, conditionCapacitySatisfied)
 	if condition == nil {
 		t.Fatal("CapacitySatisfied condition missing")
+		return
 	}
 	if condition.Message != "agentMachines=1 waitingAgentMachines=1 unreadyAgentMachines=1 agentMachinesWithoutAgent=1 matchingAgents=3 pendingOwnedVMs=2 boundAgents=3 availableAgents=0" {
 		t.Fatalf("CapacitySatisfied message = %q, want retained pending VMs", condition.Message)
