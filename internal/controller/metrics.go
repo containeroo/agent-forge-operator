@@ -73,7 +73,7 @@ func recordPoolCapacityMetrics(pool *agentforgev1alpha1.VsphereAgentPool, plan P
 		"bound_agents":           plan.BoundAgents,
 		"available_agents":       plan.AvailableAgents,
 		"pending_owned_vms":      plan.PendingOwnedVMs,
-		"vms_to_create":          plan.VMsToCreate,
+		"demand_deficit":         plan.DemandDeficit,
 	} {
 		labelsWithState := prometheus.Labels{
 			poolMetricNamespaceLabel: labels[poolMetricNamespaceLabel],

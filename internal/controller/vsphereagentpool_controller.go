@@ -1246,9 +1246,9 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               conditionCapacitySatisfied,
-		Status:             conditionStatus(plan.VMsToCreate == 0),
+		Status:             conditionStatus(plan.DemandDeficit == 0),
 		ObservedGeneration: pool.Generation,
-		Reason:             boolReason(plan.VMsToCreate == 0, "Satisfied", "Deficit"),
+		Reason:             boolReason(plan.DemandDeficit == 0, "Satisfied", "Deficit"),
 		Message:            fmt.Sprintf("agentMachines=%d waitingAgentMachines=%d unreadyAgentMachines=%d agentMachinesWithoutAgent=%d matchingAgents=%d pendingOwnedVMs=%d boundAgents=%d availableAgents=%d", plan.AgentMachines, plan.WaitingAgentMachines, plan.UnreadyAgentMachines, plan.AgentMachinesWithoutAgent, plan.MatchingAgents, plan.PendingOwnedVMs, plan.BoundAgents, plan.AvailableAgents),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{

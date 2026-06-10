@@ -622,7 +622,7 @@ spec:
                       type: string
                     type:
                       description: |-
-                        Type is the action type, such as CreateVM, DeleteVM, DeleteAgent,
+                        Type is the action type, such as DemandDeficit, DeleteVM, DeleteAgent,
                         PatchAgent, or Noop.
                       type: string
                   required:

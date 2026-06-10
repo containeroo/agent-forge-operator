@@ -105,8 +105,8 @@ func TestReconcilePlansWithoutCallingProvider(t *testing.T) {
 	if len(updated.Status.PlannedActions) != 1 {
 		t.Fatalf("planned actions = %d, want 1", len(updated.Status.PlannedActions))
 	}
-	if updated.Status.PlannedActions[0].Type != actionCreateVM {
-		t.Fatalf("first action = %s, want %s", updated.Status.PlannedActions[0].Type, actionCreateVM)
+	if updated.Status.PlannedActions[0].Type != actionDemandDeficit {
+		t.Fatalf("first action = %s, want %s", updated.Status.PlannedActions[0].Type, actionDemandDeficit)
 	}
 }
 

@@ -23,11 +23,11 @@ import (
 )
 
 const (
-	actionCreateVM    = "CreateVM"
-	actionDeleteVM    = "DeleteVM"
-	actionDeleteAgent = "DeleteAgent"
-	actionPatchAgent  = "PatchAgent"
-	actionNoop        = "Noop"
+	actionDemandDeficit = "DemandDeficit"
+	actionDeleteVM      = "DeleteVM"
+	actionDeleteAgent   = "DeleteAgent"
+	actionPatchAgent    = "PatchAgent"
+	actionNoop          = "Noop"
 
 	phaseAvailable    = "Available"
 	phaseBound        = "Bound"
@@ -99,7 +99,7 @@ type PoolPlan struct {
 	BoundAgents               int32
 	AvailableAgents           int32
 	PendingOwnedVMs           int32
-	VMsToCreate               int32
+	DemandDeficit             int32
 	VMsToDelete               []agentforgev1alpha1.OwnedVMStatus
 	AgentsToDelete            []AgentInfo
 	AgentsToPatch             []AgentInfo
@@ -124,12 +124,10 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 	if deficit < 0 {
 		deficit = 0
 	}
-	vmsToCreate := deficit
-
 	var actions []agentforgev1alpha1.PlannedActionStatus
-	for i := int32(0); i < vmsToCreate; i++ {
+	for i := int32(0); i < deficit; i++ {
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
-			Type:   actionCreateVM,
+			Type:   actionDemandDeficit,
 			Reason: fmt.Sprintf("%d AgentMachines are waiting for suitable Agents, with %d available Agents and %d owned provisioning VMs", snapshot.WaitingAgentMachines, availableAgents, pendingOwnedVMs),
 		})
 	}
@@ -211,7 +209,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		BoundAgents:               boundAgents,
 		AvailableAgents:           availableAgents,
 		PendingOwnedVMs:           pendingOwnedVMs,
-		VMsToCreate:               vmsToCreate,
+		DemandDeficit:             deficit,
 		VMsToDelete:               vmsToDelete,
 		AgentsToDelete:            agentsToDelete,
 		AgentsToPatch:             agentsToPatch,

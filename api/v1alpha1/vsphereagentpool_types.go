@@ -299,7 +299,7 @@ type OwnedVMStatus struct {
 // PlannedActionStatus records the latest create/delete/patch actions the
 // operator planned or executed.
 type PlannedActionStatus struct {
-	// Type is the action type, such as CreateVM, DeleteVM, DeleteAgent,
+	// Type is the action type, such as DemandDeficit, DeleteVM, DeleteAgent,
 	// PatchAgent, or Noop.
 	Type string `json:"type"`
 

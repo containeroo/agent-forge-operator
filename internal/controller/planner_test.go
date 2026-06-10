@@ -36,15 +36,15 @@ func TestBuildPlanCreatesVMsForMachineDeficit(t *testing.T) {
 	if plan.DesiredReplicas != 8 {
 		t.Fatalf("desired replicas = %d, want 8", plan.DesiredReplicas)
 	}
-	if plan.VMsToCreate != 5 {
-		t.Fatalf("VMsToCreate = %d, want full deficit 5", plan.VMsToCreate)
+	if plan.DemandDeficit != 5 {
+		t.Fatalf("DemandDeficit = %d, want full deficit 5", plan.DemandDeficit)
 	}
 	if len(plan.Actions) != 5 {
 		t.Fatalf("actions = %d, want 5", len(plan.Actions))
 	}
 	for _, action := range plan.Actions {
-		if action.Type != actionCreateVM {
-			t.Fatalf("action type = %s, want %s", action.Type, actionCreateVM)
+		if action.Type != actionDemandDeficit {
+			t.Fatalf("action type = %s, want %s", action.Type, actionDemandDeficit)
 		}
 	}
 }
@@ -65,8 +65,8 @@ func TestBuildPlanCountsOwnedProvisioningVMsAsPendingCapacity(t *testing.T) {
 		},
 	})
 
-	if plan.VMsToCreate != 0 {
-		t.Fatalf("VMsToCreate = %d, want 0 because owned provisioning VMs already cover the deficit", plan.VMsToCreate)
+	if plan.DemandDeficit != 0 {
+		t.Fatalf("DemandDeficit = %d, want 0 because owned provisioning VMs already cover the deficit", plan.DemandDeficit)
 	}
 	if plan.PendingOwnedVMs != 2 {
 		t.Fatalf("PendingOwnedVMs = %d, want 2", plan.PendingOwnedVMs)
@@ -93,8 +93,8 @@ func TestBuildPlanCreatesOnlyRemainingDeficitAfterOwnedProvisioningVMs(t *testin
 		},
 	})
 
-	if plan.VMsToCreate != 2 {
-		t.Fatalf("VMsToCreate = %d, want remaining deficit 2", plan.VMsToCreate)
+	if plan.DemandDeficit != 2 {
+		t.Fatalf("DemandDeficit = %d, want remaining deficit 2", plan.DemandDeficit)
 	}
 }
 
@@ -175,8 +175,8 @@ func TestBuildPlanDeletesOrphanedOwnedVMsWithoutExcessAgents(t *testing.T) {
 	if plan.PendingOwnedVMs != 0 {
 		t.Fatalf("PendingOwnedVMs = %d, want 0 for orphaned VMs", plan.PendingOwnedVMs)
 	}
-	if plan.VMsToCreate != 0 {
-		t.Fatalf("VMsToCreate = %d, want 0 because matching Agents satisfy demand", plan.VMsToCreate)
+	if plan.DemandDeficit != 0 {
+		t.Fatalf("DemandDeficit = %d, want 0 because matching Agents satisfy demand", plan.DemandDeficit)
 	}
 	if len(plan.VMsToDelete) != 2 {
 		t.Fatalf("VMsToDelete = %d, want 2 orphaned VMs", len(plan.VMsToDelete))
@@ -205,8 +205,8 @@ func TestBuildPlanDoesNotDeleteSurplusProvisioningVMs(t *testing.T) {
 		},
 	})
 
-	if plan.VMsToCreate != 0 {
-		t.Fatalf("VMsToCreate = %d, want 0 because matching Agents satisfy demand", plan.VMsToCreate)
+	if plan.DemandDeficit != 0 {
+		t.Fatalf("DemandDeficit = %d, want 0 because matching Agents satisfy demand", plan.DemandDeficit)
 	}
 	if plan.PendingOwnedVMs != 2 {
 		t.Fatalf("PendingOwnedVMs = %d, want 2 before applying cleanup", plan.PendingOwnedVMs)
