@@ -2139,8 +2139,8 @@ func TestListMatchingAgentsRequiresConfiguredPoolLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listMatchingAgents returned error for default pool: %v", err)
 	}
-	if len(defaultAgents) != 2 {
-		t.Fatalf("default pool matching agents = %#v, want both worker Agents", defaultAgents)
+	if len(defaultAgents) != 1 || defaultAgents[0].Name != defaultAgent.GetName() {
+		t.Fatalf("default pool matching agents = %#v, want only unlabeled default pool Agent", defaultAgents)
 	}
 }
 

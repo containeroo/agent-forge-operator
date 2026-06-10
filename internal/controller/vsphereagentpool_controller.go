@@ -777,7 +777,7 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 func agentMatchesPoolDiscriminator(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo) bool {
 	desiredPoolLabel, hasPoolLabel := pool.Spec.Agent.Labels[poolLabelKey]
 	if !hasPoolLabel {
-		return true
+		return agent.PoolLabel == ""
 	}
 	if agent.PoolLabel == desiredPoolLabel {
 		return true
