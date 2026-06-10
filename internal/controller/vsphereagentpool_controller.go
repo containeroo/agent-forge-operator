@@ -373,6 +373,16 @@ func (r *VsphereAgentPoolReconciler) ensureVsphereAgentForAdoptedVM(ctx context.
 			}
 		}
 	}
+	if err == nil && !vsphereAgentBelongsToPool(current, pool.Name) {
+		existing, findErr := r.findVsphereAgentForAdoptedVM(ctx, pool, agent, vm)
+		if findErr != nil {
+			return findErr
+		}
+		if existing == nil {
+			return nil
+		}
+		current = existing
+	}
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
@@ -755,7 +765,68 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 			BIOSUUID:          normalizeVMwareSerialUUID(serialNumber),
 		})
 	}
-	return agents, nil
+	return r.filterAgentsClaimedByOtherPools(ctx, pool, agents)
+}
+
+func (r *VsphereAgentPoolReconciler) filterAgentsClaimedByOtherPools(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo) ([]AgentInfo, error) {
+	if len(agents) == 0 {
+		return agents, nil
+	}
+
+	var vsphereAgents agentforgev1alpha1.VsphereAgentList
+	if err := r.List(ctx, &vsphereAgents, client.InNamespace(pool.Namespace)); err != nil {
+		return nil, err
+	}
+	if len(vsphereAgents.Items) == 0 {
+		return agents, nil
+	}
+
+	filtered := agents[:0]
+	for _, agent := range agents {
+		if agentClaimedByOtherPool(agent, pool, vsphereAgents.Items) {
+			continue
+		}
+		filtered = append(filtered, agent)
+	}
+	return filtered, nil
+}
+
+func agentClaimedByOtherPool(agent AgentInfo, pool *agentforgev1alpha1.VsphereAgentPool, vsphereAgents []agentforgev1alpha1.VsphereAgent) bool {
+	for i := range vsphereAgents {
+		vsphereAgent := &vsphereAgents[i]
+		if vsphereAgent.GetDeletionTimestamp() != nil ||
+			!vsphereAgentHasPoolRef(vsphereAgent) ||
+			vsphereAgentBelongsToPool(vsphereAgent, pool.Name) {
+			continue
+		}
+		if vsphereAgentClaimsAgent(vsphereAgent, agent) {
+			return true
+		}
+	}
+	return false
+}
+
+func vsphereAgentHasPoolRef(agent *agentforgev1alpha1.VsphereAgent) bool {
+	return agent.Spec.PoolRef.Name != "" || agent.Labels[vsphereAgentPoolNameLabel] != ""
+}
+
+func vsphereAgentClaimsAgent(vsphereAgent *agentforgev1alpha1.VsphereAgent, agent AgentInfo) bool {
+	vm := vsphereAgent.Status.VM
+	if objectReferenceName(vm.AgentRef) == agent.Name {
+		return true
+	}
+	if vmMatchesAgentIdentity(vm, agent) {
+		return true
+	}
+
+	hostname := agentObservedHostname(agent)
+	if hostname == "" {
+		return false
+	}
+	if vm.Name == hostname && !vmIdentityConflictsAgent(vm, agent) {
+		return true
+	}
+	return vsphereAgent.Name == hostname && !vmIdentityConflictsAgent(vm, agent)
 }
 
 func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo) map[string]string {

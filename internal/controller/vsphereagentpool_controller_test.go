@@ -1956,6 +1956,71 @@ func TestListMatchingAgentsSkipsForeignClusterDeployment(t *testing.T) {
 	}
 }
 
+func TestReconcileDoesNotRecordAgentClaimedByOtherPool(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	otherPool := reconcileTestPool()
+	otherPool.Name = "other-worker"
+	otherPool.Spec.NodePoolRef.Name = "other-worker"
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	otherAgent := testAgent(testNamespace, "other-agent", false, true)
+	otherVsphereAgent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      "other-agent",
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel: otherPool.Name,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: otherPool.Name},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: agentforgev1alpha1.OwnedVMStatus{
+				Name:     "other-agent",
+				Phase:    phaseAvailable,
+				Reason:   "AgentAvailable",
+				AgentRef: agentObjectReference(otherPool, "other-agent"),
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, otherPool, infraEnv, otherAgent, otherVsphereAgent).
+		WithStatusSubresource(pool, otherPool, otherVsphereAgent).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.MatchingAgents != 0 {
+		t.Fatalf("matching agents = %d, want other pool Agent ignored", updated.Status.MatchingAgents)
+	}
+	if len(updated.Status.OwnedVMs) != 0 {
+		t.Fatalf("owned VMs = %#v, want other pool Agent absent from status", updated.Status.OwnedVMs)
+	}
+}
+
 func TestRequestsForAgentMachineChangeFindsMatchingPool(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
