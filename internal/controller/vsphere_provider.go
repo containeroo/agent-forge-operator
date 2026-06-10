@@ -121,7 +121,7 @@ type govcVMProvider struct {
 func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		name = desiredAgentHostname(pool)
+		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("VM name is required")
 	}
 	if req.ISOPath == "" {
 		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("cached ISO path is empty")

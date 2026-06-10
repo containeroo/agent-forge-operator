@@ -40,7 +40,7 @@ exit 0
 	}
 
 	pool := providerTestPool()
-	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err != nil {
+	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err != nil {
 		t.Fatalf("CreateVM returned error: %v", err)
 	}
 
@@ -70,8 +70,8 @@ exit 0
 	}
 	createFields := strings.Fields(createArgs)
 	vmName := createFields[len(createFields)-1]
-	if !agentHostnamePattern.MatchString(vmName) {
-		t.Fatalf("vm.create name = %q, want demo-worker plus 4 random lowercase alphanumeric characters", vmName)
+	if vmName != "demo-worker-ab12" {
+		t.Fatalf("vm.create name = %q, want explicit request name", vmName)
 	}
 	if !strings.Contains(string(logBytes), "device.cdrom.insert") ||
 		!strings.Contains(string(logBytes), "-ds iso-datastore") ||
@@ -106,7 +106,7 @@ exit 0
 
 	pool := providerTestPool()
 	pool.Spec.VSphere.DiskEagerlyScrub = true
-	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err != nil {
+	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err != nil {
 		t.Fatalf("CreateVM returned error: %v", err)
 	}
 
@@ -155,7 +155,7 @@ exit 0
 		},
 	}
 
-	vm, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{ISOPath: "agent-forge/demo/demo-worker/cached.iso"})
+	vm, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso"})
 	if err != nil {
 		t.Fatalf("CreateVM returned error: %v", err)
 	}
@@ -501,7 +501,7 @@ exit 0
 		},
 	}
 
-	if _, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err == nil {
+	if _, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err == nil {
 		t.Fatal("CreateVM succeeded despite cdrom insert failure")
 	}
 	logBytes, err := os.ReadFile(commandLog)
@@ -509,7 +509,7 @@ exit 0
 		t.Fatal(err)
 	}
 	calls := string(logBytes)
-	if !strings.Contains(calls, "vm.destroy -dc dc1 -vm.ipath /dc1/vm/demo/demo-worker-") {
+	if !strings.Contains(calls, "vm.destroy -dc dc1 -vm.ipath /dc1/vm/demo/demo-worker-ab12") {
 		t.Fatalf("partial VM was not destroyed after configuration failure; calls:\n%s", calls)
 	}
 }

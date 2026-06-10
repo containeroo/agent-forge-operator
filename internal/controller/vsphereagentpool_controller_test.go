@@ -4,7 +4,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"testing"
 	"time"
 
@@ -35,8 +34,6 @@ const (
 	testKindKey               = "kind"
 	testAdoptedVM             = "demo-worker-adopted"
 )
-
-var agentHostnamePattern = regexp.MustCompile(`^demo-worker-[a-z0-9]{4}$`)
 
 func TestReconcilePlansWithoutCallingProvider(t *testing.T) {
 	ctx := context.Background()
@@ -2365,14 +2362,13 @@ func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereA
 	return ISOEnsureResult{Path: p.isoPath, SHA256: "abc", SizeBytes: 3, Uploaded: true}, nil
 }
 
-func (p *fakeVMProvider) CreateVM(_ context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
+func (p *fakeVMProvider) CreateVM(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
 	p.createVMCalls++
 	p.createISOPaths = append(p.createISOPaths, req.ISOPath)
-	name := req.Name
-	if name == "" {
-		name = desiredAgentHostname(pool)
+	if req.Name == "" {
+		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("VM name is required")
 	}
-	return newOwnedVMStatus(name), nil
+	return newOwnedVMStatus(req.Name), nil
 }
 
 func (p *fakeVMProvider) DeleteVM(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
