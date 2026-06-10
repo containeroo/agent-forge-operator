@@ -32,8 +32,6 @@ import (
 
 const (
 	vsphereAgentPoolNameLabel       = "agent-forge.containeroo.ch/vsphere-agent-pool"
-	vsphereAgentMachineNameLabel    = "agent-forge.containeroo.ch/agent-machine"
-	vsphereAgentMachineUIDLabel     = "agent-forge.containeroo.ch/agent-machine-uid"
 	vsphereAgentCreatedForLabel     = "agent-forge.containeroo.ch/created-for"
 	vsphereAgentCreatedForAdopted   = "adopted"
 	vsphereAgentCreatedForDemand    = "agent-machine"
@@ -80,20 +78,13 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) error {
-	exists, err := r.vsphereAgentExistsForAgentMachine(ctx, pool, agentMachine)
-	if err != nil || exists {
-		return err
-	}
-
 	agent := &agentforgev1alpha1.VsphereAgent{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: pool.Namespace,
 			Name:      agentMachine.GetName(),
 			Labels: map[string]string{
-				vsphereAgentPoolNameLabel:    pool.Name,
-				vsphereAgentMachineNameLabel: agentMachine.GetName(),
-				vsphereAgentMachineUIDLabel:  string(agentMachine.GetUID()),
-				vsphereAgentCreatedForLabel:  vsphereAgentCreatedForDemand,
+				vsphereAgentPoolNameLabel:   pool.Name,
+				vsphereAgentCreatedForLabel: vsphereAgentCreatedForDemand,
 			},
 		},
 		Spec: agentforgev1alpha1.VsphereAgentSpec{
@@ -107,21 +98,6 @@ func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.C
 		return err
 	}
 	return nil
-}
-
-func (r *AgentMachineReconciler) vsphereAgentExistsForAgentMachine(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) (bool, error) {
-	labels := map[string]string{
-		vsphereAgentPoolNameLabel:    pool.Name,
-		vsphereAgentMachineNameLabel: agentMachine.GetName(),
-	}
-	if agentMachine.GetUID() != "" {
-		labels[vsphereAgentMachineUIDLabel] = string(agentMachine.GetUID())
-	}
-	var list agentforgev1alpha1.VsphereAgentList
-	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace), client.MatchingLabels(labels)); err != nil {
-		return false, err
-	}
-	return len(list.Items) > 0, nil
 }
 
 func (r *AgentMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
