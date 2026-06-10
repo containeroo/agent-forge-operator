@@ -219,9 +219,6 @@ func (r *VsphereAgentReconciler) vmManagedByAnotherVsphereAgent(ctx context.Cont
 	if agent.Status.VM.Name == "" || agent.Spec.PoolRef.Name == "" {
 		return false, nil
 	}
-	if agent.Name == agent.Status.VM.Name {
-		return false, nil
-	}
 	var list agentforgev1alpha1.VsphereAgentList
 	if err := r.List(ctx, &list, client.InNamespace(agent.Namespace)); err != nil {
 		return false, err
@@ -237,8 +234,27 @@ func (r *VsphereAgentReconciler) vmManagedByAnotherVsphereAgent(ctx context.Cont
 		if other.Status.VM.Name == agent.Status.VM.Name {
 			return true, nil
 		}
+		if sameVMIdentity(other.Status.VM, agent.Status.VM) && duplicateCanBeDeletedWithoutVMDelete(agent, other) {
+			return true, nil
+		}
 	}
 	return false, nil
+}
+
+func sameVMIdentity(a, b agentforgev1alpha1.OwnedVMStatus) bool {
+	if a.BIOSUUID != "" && b.BIOSUUID != "" && a.BIOSUUID == b.BIOSUUID {
+		return true
+	}
+	return a.MACAddress != "" && b.MACAddress != "" && a.MACAddress == b.MACAddress
+}
+
+func duplicateCanBeDeletedWithoutVMDelete(current, other *agentforgev1alpha1.VsphereAgent) bool {
+	currentCreatedFor := current.Labels[vsphereAgentCreatedForLabel]
+	otherCreatedFor := other.Labels[vsphereAgentCreatedForLabel]
+	if currentCreatedFor == vsphereAgentCreatedForAdopted && otherCreatedFor != vsphereAgentCreatedForAdopted {
+		return true
+	}
+	return current.Name != current.Status.VM.Name
 }
 
 func (r *VsphereAgentReconciler) patchFinalizer(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent) error {

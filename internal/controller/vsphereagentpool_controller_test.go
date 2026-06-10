@@ -1301,6 +1301,91 @@ func TestVsphereAgentReconcileSkipsVMDeleteForDuplicate(t *testing.T) {
 	}
 }
 
+func TestVsphereAgentReconcileSkipsVMDeleteForAdoptedDuplicateByIdentity(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
+		Data: map[string][]byte{
+			"server":   []byte("vcenter.example.invalid"),
+			"username": []byte("user"),
+			"password": []byte("pass"),
+		},
+	}
+	staleAdopted := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         testNamespace,
+			Name:              "demo-worker-stale",
+			Finalizers:        []string{vsphereAgentFinalizerName},
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel:   testNodePool,
+				vsphereAgentCreatedForLabel: vsphereAgentCreatedForAdopted,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: agentforgev1alpha1.OwnedVMStatus{
+				Name:     "demo-worker-stale",
+				BIOSUUID: "shared-bios",
+			},
+		},
+	}
+	demandAgent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      "demo-worker-current",
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel:   testNodePool,
+				vsphereAgentCreatedForLabel: vsphereAgentCreatedForDemand,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: agentforgev1alpha1.OwnedVMStatus{
+				Name:     "demo-worker-current",
+				BIOSUUID: "shared-bios",
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, secret, staleAdopted, demandAgent).
+		WithStatusSubresource(staleAdopted, demandAgent).
+		Build()
+
+	provider := &fakeVMProvider{}
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: staleAdopted.Name}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if provider.deleteVMCalls != 0 {
+		t.Fatalf("DeleteVM calls = %d, want 0 for adopted duplicate with shared identity", provider.deleteVMCalls)
+	}
+}
+
 func TestVsphereAgentReconcileWaitsForAdoptedStatus(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
