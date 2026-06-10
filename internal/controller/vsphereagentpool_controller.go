@@ -753,7 +753,7 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 			continue
 		}
 		machineName := labels[agentMachineRefKey]
-		agents = append(agents, AgentInfo{
+		agent := AgentInfo{
 			Name:              obj.GetName(),
 			Bound:             machineName != "" || clusterName != "",
 			MachineName:       machineName,
@@ -765,9 +765,27 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 			InventoryHostname: inventoryHostname,
 			MAC:               normalizeMAC(agentPrimaryMAC(obj)),
 			BIOSUUID:          normalizeVMwareSerialUUID(serialNumber),
-		})
+		}
+		if !agentMatchesPoolDiscriminator(pool, agent) {
+			continue
+		}
+		agents = append(agents, agent)
 	}
 	return r.filterAgentsClaimedByOtherPools(ctx, pool, agents)
+}
+
+func agentMatchesPoolDiscriminator(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo) bool {
+	desiredPoolLabel, hasPoolLabel := pool.Spec.Agent.Labels[poolLabelKey]
+	if !hasPoolLabel {
+		return true
+	}
+	if agent.PoolLabel == desiredPoolLabel {
+		return true
+	}
+	if agent.PoolLabel != "" || agent.Bound {
+		return false
+	}
+	return agentAssociatedWithOwnedVM(pool.Status.OwnedVMs, agent)
 }
 
 func (r *VsphereAgentPoolReconciler) filterAgentsClaimedByOtherPools(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agents []AgentInfo) ([]AgentInfo, error) {

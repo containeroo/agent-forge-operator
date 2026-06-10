@@ -2101,6 +2101,49 @@ func TestListMatchingAgentsSkipsForeignClusterDeployment(t *testing.T) {
 	}
 }
 
+func TestListMatchingAgentsRequiresConfiguredPoolLabel(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	defaultPool := reconcileTestPool()
+	customPool := reconcileTestPool()
+	customPool.Name = "demo-worker-32c128g"
+	customPool.Spec.NodePoolRef.Name = "demo-worker-32c128g"
+	customPool.Spec.Agent.Labels[poolLabelKey] = "worker-32c128g"
+
+	defaultAgent := testAgent(testNamespace, "default-worker-agent", true, true)
+	customAgent := testAgent(testNamespace, "custom-worker-agent", true, true)
+	customLabels := customAgent.GetLabels()
+	customLabels[poolLabelKey] = "worker-32c128g"
+	customAgent.SetLabels(customLabels)
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(defaultAgent, customAgent).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+
+	customAgents, err := reconciler.listMatchingAgents(ctx, customPool)
+	if err != nil {
+		t.Fatalf("listMatchingAgents returned error for custom pool: %v", err)
+	}
+	if len(customAgents) != 1 || customAgents[0].Name != customAgent.GetName() {
+		t.Fatalf("custom pool matching agents = %#v, want only custom pool Agent", customAgents)
+	}
+
+	defaultAgents, err := reconciler.listMatchingAgents(ctx, defaultPool)
+	if err != nil {
+		t.Fatalf("listMatchingAgents returned error for default pool: %v", err)
+	}
+	if len(defaultAgents) != 2 {
+		t.Fatalf("default pool matching agents = %#v, want both worker Agents", defaultAgents)
+	}
+}
+
 func TestReconcileDoesNotRecordAgentClaimedByOtherPool(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
