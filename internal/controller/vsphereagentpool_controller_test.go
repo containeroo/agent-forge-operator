@@ -1450,11 +1450,16 @@ func TestReconcilePatchesCandidateAgentWithPoolDiscriminatorLabel(t *testing.T) 
 	pool := reconcileTestPool()
 	pool.Spec.Agent.Labels[poolLabelKey] = "worker-32c128g"
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
-		newOwnedVMStatus("demo-worker-32c128g-ab12"),
+		{
+			Name:       "demo-worker-32c128g-ab12",
+			Phase:      phaseProvisioning,
+			MACAddress: "00-50-56-b2-a1-9f",
+		},
 	}
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testCandidateAgent(testNamespace, "abcdef12-3456-7890-abcd-ef1234567890")
+	setAgentPrimaryMAC(t, agent, "00:50:56:b2:a1:9f")
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1726,6 +1731,7 @@ func TestAssignedAgentHostnamesUsesVMIdentityBeforeFreeSlot(t *testing.T) {
 
 	hostnames := assignedAgentHostnames(pool, []AgentInfo{{
 		Name:     "agent-1",
+		Hostname: "demo-worker-stale",
 		BIOSUUID: "22222222-2222-2222-2222-222222222222",
 	}})
 
@@ -2471,6 +2477,13 @@ func testCandidateAgent(namespace, name string) *unstructured.Unstructured {
 func setAgentInventoryHostname(t *testing.T, agent *unstructured.Unstructured, hostname string) {
 	t.Helper()
 	if err := unstructured.SetNestedField(agent.Object, hostname, "status", "inventory", "hostname"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setAgentPrimaryMAC(t *testing.T, agent *unstructured.Unstructured, mac string) {
+	t.Helper()
+	if err := unstructured.SetNestedSlice(agent.Object, []any{map[string]any{"macAddress": mac}}, "status", "inventory", "interfaces"); err != nil {
 		t.Fatal(err)
 	}
 }

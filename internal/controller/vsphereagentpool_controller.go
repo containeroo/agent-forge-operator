@@ -760,6 +760,7 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 			Approved:          approved,
 			SpecRole:          specRole,
 			RoleLabel:         labels[roleLabelKey],
+			PoolLabel:         labels[poolLabelKey],
 			Hostname:          specHostname,
 			InventoryHostname: inventoryHostname,
 			MAC:               normalizeMAC(agentPrimaryMAC(obj)),
@@ -834,17 +835,6 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 	assigned := map[string]string{}
 	reserved := map[string]struct{}{}
 	for _, agent := range agents {
-		if agent.Hostname == "" {
-			continue
-		}
-		assigned[agent.Name] = agent.Hostname
-		reserved[agent.Hostname] = struct{}{}
-	}
-
-	for _, agent := range agents {
-		if assigned[agent.Name] != "" {
-			continue
-		}
 		for _, vm := range pool.Status.OwnedVMs {
 			if vm.Name == "" || vm.Phase == phaseBound {
 				continue
@@ -859,6 +849,17 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			reserved[vm.Name] = struct{}{}
 			break
 		}
+	}
+
+	for _, agent := range agents {
+		if assigned[agent.Name] != "" || agent.Hostname == "" {
+			continue
+		}
+		assigned[agent.Name] = agent.Hostname
+		reserved[agent.Hostname] = struct{}{}
+	}
+
+	for _, agent := range agents {
 		if assigned[agent.Name] != "" {
 			continue
 		}

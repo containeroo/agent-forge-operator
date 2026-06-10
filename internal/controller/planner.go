@@ -71,6 +71,7 @@ type AgentInfo struct {
 	Approved          bool
 	SpecRole          string
 	RoleLabel         string
+	PoolLabel         string
 	Hostname          string
 	InventoryHostname string
 	MAC               string
@@ -138,7 +139,10 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		if agent.Bound {
 			continue
 		}
-		if agent.Approved && agent.SpecRole == pool.Spec.Agent.Role && agent.RoleLabel == pool.Spec.Agent.Role && agent.Hostname != "" {
+		if !agentNeedsPatch(pool, agent) {
+			continue
+		}
+		if !agentPatchEligible(pool, snapshot, agent) {
 			continue
 		}
 		agentsToPatch = append(agentsToPatch, agent)
@@ -213,6 +217,39 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		AgentsToPatch:             agentsToPatch,
 		Actions:                   actions,
 	}
+}
+
+func agentNeedsPatch(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo) bool {
+	if desiredPoolLabel, hasPoolLabel := pool.Spec.Agent.Labels[poolLabelKey]; hasPoolLabel && agent.PoolLabel != desiredPoolLabel {
+		return true
+	}
+	return !agent.Approved || agent.SpecRole != pool.Spec.Agent.Role || agent.RoleLabel != pool.Spec.Agent.Role || agent.Hostname == ""
+}
+
+func agentPatchEligible(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot, agent AgentInfo) bool {
+	if agentAssociatedWithOwnedVM(snapshot.OwnedVMs, agent) {
+		return true
+	}
+	if desiredPoolLabel, hasPoolLabel := pool.Spec.Agent.Labels[poolLabelKey]; hasPoolLabel {
+		return agent.PoolLabel == desiredPoolLabel
+	}
+	return snapshot.WaitingAgentMachines > 0 || snapshot.AgentMachinesWithoutAgent > 0
+}
+
+func agentAssociatedWithOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) bool {
+	hostname := agentObservedHostname(agent)
+	for _, vm := range vms {
+		if vm.Name == "" {
+			continue
+		}
+		if vmMatchesAgentIdentity(vm, agent) || vmMatchesAgentRef(vm, agent) {
+			return true
+		}
+		if hostname != "" && vm.Name == hostname && !vmIdentityConflictsAgent(vm, agent) {
+			return true
+		}
+	}
+	return false
 }
 
 func countPendingOwnedVMs(vms []agentforgev1alpha1.OwnedVMStatus) int32 {

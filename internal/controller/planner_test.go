@@ -119,6 +119,42 @@ func TestBuildPlanPatchesUnapprovedAgents(t *testing.T) {
 	}
 }
 
+func TestBuildPlanDoesNotPatchUnownedAgentsWithoutDemand(t *testing.T) {
+	pool := testPool()
+
+	plan := buildPlan(pool, PoolSnapshot{
+		WaitingAgentMachines: 0,
+		MatchingAgents: []AgentInfo{
+			{Name: "agent-1", Bound: false, Approved: false, RoleLabel: ""},
+		},
+	})
+
+	if len(plan.AgentsToPatch) != 0 {
+		t.Fatalf("AgentsToPatch = %#v, want none for unowned Agent without demand", plan.AgentsToPatch)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Type != actionNoop {
+		t.Fatalf("actions = %#v, want one Noop", plan.Actions)
+	}
+}
+
+func TestBuildPlanPatchesAgentAssociatedWithOwnedVMWithoutDemand(t *testing.T) {
+	pool := testPool()
+
+	plan := buildPlan(pool, PoolSnapshot{
+		WaitingAgentMachines: 0,
+		MatchingAgents: []AgentInfo{
+			{Name: "agent-1", Bound: false, Approved: false, RoleLabel: "", MAC: "00-50-56-b2-a1-9f"},
+		},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{
+			{Name: "owned-vm", Phase: phaseProvisioning, MACAddress: "00-50-56-b2-a1-9f"},
+		},
+	})
+
+	if len(plan.AgentsToPatch) != 1 || plan.AgentsToPatch[0].Name != "agent-1" {
+		t.Fatalf("AgentsToPatch = %#v, want owned Agent patched", plan.AgentsToPatch)
+	}
+}
+
 func TestBuildPlanDeletesOrphanedOwnedVMsWithoutExcessAgents(t *testing.T) {
 	pool := testPool()
 
