@@ -94,6 +94,9 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if agent.Status.VM.Name != "" {
+		if vm, found := ownedVMStatusForVsphereAgent(&pool, &agent); found {
+			agent.Status.VM = vm
+		}
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
 			Status:             metav1.ConditionTrue,
@@ -191,6 +194,18 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Message:            "vSphere VM has been created",
 	})
 	return ctrl.Result{RequeueAfter: time.Minute}, r.updateStatus(ctx, &agent)
+}
+
+func ownedVMStatusForVsphereAgent(pool *agentforgev1alpha1.VsphereAgentPool, agent *agentforgev1alpha1.VsphereAgent) (agentforgev1alpha1.OwnedVMStatus, bool) {
+	if agent.Status.VM.Name == "" {
+		return agentforgev1alpha1.OwnedVMStatus{}, false
+	}
+	for _, vm := range pool.Status.OwnedVMs {
+		if vm.Name == agent.Status.VM.Name {
+			return vm, true
+		}
+	}
+	return agentforgev1alpha1.OwnedVMStatus{}, false
 }
 
 func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {

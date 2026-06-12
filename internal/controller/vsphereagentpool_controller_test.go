@@ -776,6 +776,78 @@ func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	}
 }
 
+func TestVsphereAgentReconcileSyncsVMStatusFromPool(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{{
+		Name:       "demo-worker-agent",
+		Phase:      phaseBound,
+		Reason:     "AgentBound",
+		BIOSUUID:   "42324d21-274c-03a8-b6fe-f9e8edb55e33",
+		MACAddress: "00-50-56-b2-db-c8",
+		AgentRef:   agentObjectReference(pool, "214d3242-4c27-a803-b6fe-f9e8edb55e33"),
+		MachineRef: machineObjectReference(pool, "demo-worker-agent"),
+	}}
+	vsphereAgent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  testNamespace,
+			Name:       "demo-worker-agent",
+			Finalizers: []string{vsphereAgentFinalizerName},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: agentforgev1alpha1.OwnedVMStatus{
+				Name:       "demo-worker-agent",
+				Phase:      phaseProvisioning,
+				Reason:     "CreateRequested",
+				BIOSUUID:   "42324d21-274c-03a8-b6fe-f9e8edb55e33",
+				MACAddress: "00-50-56-b2-db-c8",
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, vsphereAgent).
+		WithStatusSubresource(pool, vsphereAgent).
+		Build()
+
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "demo-worker-agent"}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "demo-worker-agent"}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.VM.Phase != phaseBound || updated.Status.VM.Reason != "AgentBound" {
+		t.Fatalf("VM status = %s/%s, want %s/%s", updated.Status.VM.Phase, updated.Status.VM.Reason, phaseBound, "AgentBound")
+	}
+	if updated.Status.VM.AgentRef == nil || updated.Status.VM.AgentRef.Name != "214d3242-4c27-a803-b6fe-f9e8edb55e33" {
+		t.Fatalf("AgentRef = %#v, want synced AgentRef", updated.Status.VM.AgentRef)
+	}
+	if updated.Status.VM.MachineRef == nil || updated.Status.VM.MachineRef.Name != "demo-worker-agent" {
+		t.Fatalf("MachineRef = %#v, want synced MachineRef", updated.Status.VM.MachineRef)
+	}
+}
+
 func TestVsphereAgentReconcileSkipsVMDeleteForDuplicate(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
