@@ -74,6 +74,8 @@ exit 0
 		t.Fatalf("vm.create name = %q, want explicit request name", vmName)
 	}
 	if !strings.Contains(string(logBytes), "device.cdrom.insert") ||
+		!strings.Contains(string(logBytes), "-dc dc1") ||
+		!strings.Contains(string(logBytes), "-vm /dc1/vm/demo/demo-worker-ab12") ||
 		!strings.Contains(string(logBytes), "-ds iso-datastore") ||
 		!strings.Contains(string(logBytes), "agent-forge/demo/demo-worker/cached.iso") {
 		t.Fatalf("cdrom insertion did not use iso datastore; calls:\n%s", string(logBytes))
@@ -218,7 +220,9 @@ exit 0
 	if !strings.Contains(calls, "vm.info") {
 		t.Fatalf("vm.info was not called to recover existing VM; calls:\n%s", calls)
 	}
-	if !strings.Contains(calls, "device.cdrom.add") || !strings.Contains(calls, "device.cdrom.insert") || !strings.Contains(calls, "vm.power -on demo-worker-ab12") {
+	if !strings.Contains(calls, "device.cdrom.add -dc dc1 -vm /dc1/vm/demo/demo-worker-ab12") ||
+		!strings.Contains(calls, "device.cdrom.insert -dc dc1 -vm /dc1/vm/demo/demo-worker-ab12") ||
+		!strings.Contains(calls, "vm.power -on -dc dc1 -vm.ipath /dc1/vm/demo/demo-worker-ab12") {
 		t.Fatalf("existing VM recovery did not reconcile VM configuration; calls:\n%s", calls)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
@@ -57,6 +59,8 @@ type VsphereAgentReconciler struct {
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 
 func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
 	var agent agentforgev1alpha1.VsphereAgent
 	if err := r.apiReader().Get(ctx, req.NamespacedName, &agent); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -65,7 +69,10 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	var pool agentforgev1alpha1.VsphereAgentPool
 	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Spec.PoolRef.Name}, &pool); err != nil {
 		if apierrors.IsNotFound(err) {
-			if !agent.DeletionTimestamp.IsZero() && agent.Status.VM.Name == "" {
+			if !agent.DeletionTimestamp.IsZero() {
+				if agent.Status.VM.Name != "" && r.Recorder != nil {
+					recordEvent(r.Recorder, &agent, corev1.EventTypeWarning, "PoolNotFound", "referenced VsphereAgentPool is gone; retaining VM and removing finalizer")
+				}
 				controllerutil.RemoveFinalizer(&agent, vsphereAgentFinalizerName)
 				return ctrl.Result{}, r.patchFinalizer(ctx, &agent)
 			}
@@ -97,6 +104,14 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if vm, found := ownedVMStatusForVsphereAgent(&pool, &agent); found {
 			agent.Status.VM = vm
 		}
+		if agent.Status.VM.BIOSUUID == "" || agent.Status.VM.MACAddress == "" {
+			if vm, err := r.refreshVMIdentity(ctx, &pool, agent.Status.VM); err == nil {
+				agent.Status.VM.BIOSUUID = vm.BIOSUUID
+				agent.Status.VM.MACAddress = vm.MACAddress
+			} else {
+				log.Error(err, "failed to refresh VM identity", "vm", agent.Status.VM.Name)
+			}
+		}
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
 			Status:             metav1.ConditionTrue,
@@ -108,17 +123,19 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if agent.Labels[vsphereAgentCreatedForLabel] == vsphereAgentCreatedForAdopted {
+		agent.Status.VM = newOwnedVMStatus(agent.Name)
+		agent.Status.VM.Reason = reasonVMAdopted
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
-			Status:             metav1.ConditionFalse,
+			Status:             metav1.ConditionTrue,
 			ObservedGeneration: agent.Generation,
-			Reason:             "AdoptionPending",
-			Message:            "waiting for VsphereAgentPool to initialize adopted VM status",
+			Reason:             reasonVMAdopted,
+			Message:            "vSphere VM has been adopted",
 		})
 		if statusErr := r.updateStatus(ctx, &agent); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
 	poolOps := r.poolReconciler()
@@ -194,6 +211,27 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Message:            "vSphere VM has been created",
 	})
 	return ctrl.Result{RequeueAfter: time.Minute}, r.updateStatus(ctx, &agent)
+}
+
+func (r *VsphereAgentReconciler) refreshVMIdentity(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) (agentforgev1alpha1.OwnedVMStatus, error) {
+	if vm.Name == "" {
+		return vm, nil
+	}
+	provider, err := r.poolReconciler().provider(ctx, pool)
+	if err != nil {
+		return vm, err
+	}
+	discovered, err := provider.VMStatus(ctx, pool, vm.Name)
+	if err != nil {
+		return vm, err
+	}
+	if discovered.BIOSUUID != "" {
+		vm.BIOSUUID = discovered.BIOSUUID
+	}
+	if discovered.MACAddress != "" {
+		vm.MACAddress = discovered.MACAddress
+	}
+	return vm, nil
 }
 
 func ownedVMStatusForVsphereAgent(pool *agentforgev1alpha1.VsphereAgentPool, agent *agentforgev1alpha1.VsphereAgent) (agentforgev1alpha1.OwnedVMStatus, bool) {

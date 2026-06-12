@@ -139,6 +139,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	previousOwnedVMs := append([]agentforgev1alpha1.OwnedVMStatus(nil), pool.Status.OwnedVMs...)
 	ownedVMs, err := r.listVsphereAgentVMs(ctx, &pool)
 	if err != nil {
 		r.setStatusError(&pool, "VsphereAgentListFailed", err.Error())
@@ -147,7 +148,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		return ctrl.Result{}, err
 	}
-	pool.Status.OwnedVMs = ownedVMs
+	pool.Status.OwnedVMs = mergeOwnedVMStatuses(previousOwnedVMs, ownedVMs)
 
 	agents, err := r.listMatchingAgents(ctx, &pool)
 	if err != nil {
@@ -228,6 +229,7 @@ func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *
 	}
 
 	controllerutil.RemoveFinalizer(pool, finalizerName)
+	deletePoolCapacityMetrics(pool)
 	return ctrl.Result{}, r.patchFinalizer(ctx, pool)
 }
 
@@ -285,6 +287,76 @@ func (r *VsphereAgentPoolReconciler) listVsphereAgentVMs(ctx context.Context, po
 		vms = append(vms, vm)
 	}
 	return vms, nil
+}
+
+func mergeOwnedVMStatuses(previous, current []agentforgev1alpha1.OwnedVMStatus) []agentforgev1alpha1.OwnedVMStatus {
+	if len(previous) == 0 || len(current) == 0 {
+		return current
+	}
+	lookup := newOwnedVMLookup(previous)
+	merged := make([]agentforgev1alpha1.OwnedVMStatus, 0, len(current))
+	for _, vm := range current {
+		if previousVM, ok := lookup.match(vm); ok {
+			vm.Phase = previousVM.Phase
+			vm.Reason = previousVM.Reason
+			vm.LastTransitionTime = previousVM.LastTransitionTime
+			vm.AgentRef = previousVM.AgentRef
+			vm.MachineRef = previousVM.MachineRef
+			if vm.BIOSUUID == "" {
+				vm.BIOSUUID = previousVM.BIOSUUID
+			}
+			if vm.MACAddress == "" {
+				vm.MACAddress = previousVM.MACAddress
+			}
+		}
+		merged = append(merged, vm)
+	}
+	return merged
+}
+
+type ownedVMLookup struct {
+	byName     map[string]agentforgev1alpha1.OwnedVMStatus
+	byBIOSUUID map[string]agentforgev1alpha1.OwnedVMStatus
+	byMAC      map[string]agentforgev1alpha1.OwnedVMStatus
+}
+
+func newOwnedVMLookup(vms []agentforgev1alpha1.OwnedVMStatus) ownedVMLookup {
+	lookup := ownedVMLookup{
+		byName:     map[string]agentforgev1alpha1.OwnedVMStatus{},
+		byBIOSUUID: map[string]agentforgev1alpha1.OwnedVMStatus{},
+		byMAC:      map[string]agentforgev1alpha1.OwnedVMStatus{},
+	}
+	for _, vm := range vms {
+		if vm.Name != "" {
+			lookup.byName[vm.Name] = vm
+		}
+		if vm.BIOSUUID != "" {
+			lookup.byBIOSUUID[vm.BIOSUUID] = vm
+		}
+		if vm.MACAddress != "" {
+			lookup.byMAC[vm.MACAddress] = vm
+		}
+	}
+	return lookup
+}
+
+func (l ownedVMLookup) match(vm agentforgev1alpha1.OwnedVMStatus) (agentforgev1alpha1.OwnedVMStatus, bool) {
+	if vm.Name != "" {
+		if previous, ok := l.byName[vm.Name]; ok {
+			return previous, true
+		}
+	}
+	if vm.BIOSUUID != "" {
+		if previous, ok := l.byBIOSUUID[vm.BIOSUUID]; ok {
+			return previous, true
+		}
+	}
+	if vm.MACAddress != "" {
+		if previous, ok := l.byMAC[vm.MACAddress]; ok {
+			return previous, true
+		}
+	}
+	return agentforgev1alpha1.OwnedVMStatus{}, false
 }
 
 func objectReferenceName(ref *corev1.ObjectReference) string {
@@ -678,6 +750,28 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		if assigned[agent.Name] != "" {
 			continue
 		}
+		if hostname := agentObservedHostname(agent); hostname != "" {
+			for _, vm := range pool.Status.OwnedVMs {
+				if vm.Name != hostname || vm.Phase == phaseBound {
+					continue
+				}
+				if vm.AgentRef != nil && vm.AgentRef.Name != "" && vm.AgentRef.Name != agent.Name {
+					continue
+				}
+				if vmIdentityConflictsAgent(vm, agent) {
+					continue
+				}
+				if _, exists := reserved[vm.Name]; exists {
+					continue
+				}
+				assigned[agent.Name] = vm.Name
+				reserved[vm.Name] = struct{}{}
+				break
+			}
+			if assigned[agent.Name] != "" {
+				continue
+			}
+		}
 		for _, vm := range pool.Status.OwnedVMs {
 			if vm.Name == "" || vm.Phase == phaseBound {
 				continue
@@ -691,9 +785,6 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 			assigned[agent.Name] = vm.Name
 			reserved[vm.Name] = struct{}{}
 			break
-		}
-		if assigned[agent.Name] == "" {
-			continue
 		}
 	}
 	return assigned
@@ -1411,7 +1502,7 @@ func updatedISOHistory(history []agentforgev1alpha1.ISOCacheHistoryEntry, curren
 	}
 	result := []agentforgev1alpha1.ISOCacheHistoryEntry{current}
 	for _, entry := range history {
-		if entry.Path == "" || entry.Path == current.Path || entry.SHA256 == current.SHA256 {
+		if entry.Path == "" || entry.Path == current.Path {
 			continue
 		}
 		result = append(result, entry)
@@ -1439,9 +1530,17 @@ func staleISOPaths(history []agentforgev1alpha1.ISOCacheHistoryEntry, previousPa
 		keptCount++
 	}
 	var stale []string
+	staleSet := map[string]struct{}{}
+	addStale := func(path string) {
+		if _, exists := staleSet[path]; exists {
+			return
+		}
+		staleSet[path] = struct{}{}
+		stale = append(stale, path)
+	}
 	if previousPath != "" && previousPath != currentPath {
 		if _, ok := kept[previousPath]; !ok {
-			stale = append(stale, previousPath)
+			addStale(previousPath)
 		}
 	}
 	for _, entry := range history {
@@ -1452,7 +1551,7 @@ func staleISOPaths(history []agentforgev1alpha1.ISOCacheHistoryEntry, previousPa
 			continue
 		}
 		kept[entry.Path] = struct{}{}
-		stale = append(stale, entry.Path)
+		addStale(entry.Path)
 	}
 	return stale
 }

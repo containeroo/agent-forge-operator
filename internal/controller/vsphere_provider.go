@@ -34,6 +34,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 )
@@ -72,6 +73,7 @@ type VMProviderFactory func(context.Context, *agentforgev1alpha1.VsphereAgentPoo
 type VMProvider interface {
 	EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, ISOEnsureRequest) (ISOEnsureResult, error)
 	CreateVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error)
+	VMStatus(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (agentforgev1alpha1.OwnedVMStatus, error)
 	DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error
 	DeleteISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) error
 }
@@ -164,45 +166,49 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 		}
 		return agentforgev1alpha1.OwnedVMStatus{}, cause
 	}
-	if err := p.run(ctx, "vm.change", "-vm", name, "-e", "disk.enableUUID=TRUE"); err != nil {
+	vmPath := vmInventoryPath(pool, name)
+	if err := p.run(ctx, "vm.change", "-dc", pool.Spec.VSphere.Datacenter, "-vm", vmPath, "-e", "disk.enableUUID=TRUE"); err != nil {
 		return cleanupPartialVM(err)
 	}
-	if err := p.ensureCDROM(ctx, name); err != nil {
+	if err := p.ensureCDROM(ctx, pool, name); err != nil {
 		return cleanupPartialVM(err)
 	}
-	if err := p.run(ctx, "device.cdrom.insert", "-vm", name, "-ds", pool.Spec.VSphere.ISODatastore, req.ISOPath); err != nil {
+	if err := p.run(ctx, "device.cdrom.insert", "-dc", pool.Spec.VSphere.Datacenter, "-vm", vmPath, "-ds", pool.Spec.VSphere.ISODatastore, req.ISOPath); err != nil {
 		return cleanupPartialVM(err)
 	}
 	for _, tag := range pool.Spec.VSphere.VMTags {
-		if err := p.run(ctx, "tags.attach", tag, name); err != nil {
+		if err := p.run(ctx, "tags.attach", "-dc", pool.Spec.VSphere.Datacenter, tag, vmPath); err != nil {
 			if !isGovcTagAlreadyAttached(err) {
 				return cleanupPartialVM(err)
 			}
 		}
 	}
-	if err := p.run(ctx, "vm.power", "-on", name); err != nil {
+	if err := p.run(ctx, "vm.power", "-on", "-dc", pool.Spec.VSphere.Datacenter, "-vm.ipath", vmPath); err != nil {
 		if !isGovcVMAlreadyPoweredOn(err) {
 			return cleanupPartialVM(err)
 		}
 	}
 
 	vm := newOwnedVMStatus(name)
-	if discovered, err := p.vmStatus(ctx, pool, name); err == nil {
+	if discovered, err := p.VMStatus(ctx, pool, name); err == nil {
 		vm.BIOSUUID = discovered.BIOSUUID
 		vm.MACAddress = discovered.MACAddress
+	} else {
+		logf.FromContext(ctx).Error(err, "failed to discover VM identity after create", "vm", name)
 	}
 	return vm, nil
 }
 
-func (p *govcVMProvider) ensureCDROM(ctx context.Context, name string) error {
-	output, err := p.runOutput(ctx, "device.ls", "-vm", name)
+func (p *govcVMProvider) ensureCDROM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) error {
+	vmPath := vmInventoryPath(pool, name)
+	output, err := p.runOutput(ctx, "device.ls", "-dc", pool.Spec.VSphere.Datacenter, "-vm", vmPath)
 	if err != nil {
 		return err
 	}
 	if hasCDROMDevice(output) {
 		return nil
 	}
-	if err := p.run(ctx, "device.cdrom.add", "-vm", name); err != nil && !isGovcDeviceAlreadyExists(err) {
+	if err := p.run(ctx, "device.cdrom.add", "-dc", pool.Spec.VSphere.Datacenter, "-vm", vmPath); err != nil && !isGovcDeviceAlreadyExists(err) {
 		return err
 	}
 	return nil
@@ -466,7 +472,7 @@ func newOwnedVMStatus(name string) agentforgev1alpha1.OwnedVMStatus {
 	}
 }
 
-func (p *govcVMProvider) vmStatus(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) (agentforgev1alpha1.OwnedVMStatus, error) {
+func (p *govcVMProvider) VMStatus(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) (agentforgev1alpha1.OwnedVMStatus, error) {
 	output, err := p.runOutput(ctx, "vm.info", "-json", "-dc", pool.Spec.VSphere.Datacenter, "-vm.ipath", vmInventoryPath(pool, name))
 	if err != nil {
 		return agentforgev1alpha1.OwnedVMStatus{}, err

@@ -84,6 +84,13 @@ func recordPoolCapacityMetrics(pool *agentforgev1alpha1.VsphereAgentPool, plan P
 	}
 }
 
+func deletePoolCapacityMetrics(pool *agentforgev1alpha1.VsphereAgentPool) {
+	poolCapacityGauge.DeletePartialMatch(prometheus.Labels{
+		poolMetricNamespaceLabel: pool.Namespace,
+		poolMetricPoolLabel:      pool.Name,
+	})
+}
+
 func metricResult(err error) string {
 	if err != nil {
 		return "error"

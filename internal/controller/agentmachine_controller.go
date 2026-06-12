@@ -66,6 +66,9 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	for i := range pools.Items {
 		pool := &pools.Items[i]
+		if !pool.DeletionTimestamp.IsZero() {
+			continue
+		}
 		applySpecDefaults(pool)
 		if !controlPlaneObjectMatchesPool(&agentMachine, pool) {
 			continue

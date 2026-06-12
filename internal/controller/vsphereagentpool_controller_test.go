@@ -670,6 +670,41 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	}
 }
 
+func TestAgentMachineReconcileSkipsDeletingPool(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	agentMachineName := testNodePool + "-8phl4"
+	am := testAgentMachine(testControlPlaneNamespace, agentMachineName, "demo/demo-worker")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, am).
+		WithIndex(&agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolControlPlaneNamespaceIndex, controlPlaneNamespaceIndexFunc).
+		Build()
+
+	reconciler := &AgentMachineReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: agentMachineName}}); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var vsphereAgents agentforgev1alpha1.VsphereAgentList
+	if err := k8sClient.List(ctx, &vsphereAgents, client.InNamespace(testNamespace), client.MatchingLabels{vsphereAgentPoolNameLabel: testNodePool}); err != nil {
+		t.Fatal(err)
+	}
+	if len(vsphereAgents.Items) != 0 {
+		t.Fatalf("VsphereAgents = %d, want none while pool is deleting", len(vsphereAgents.Items))
+	}
+}
+
 func TestListVsphereAgentsForPoolUsesSpecPoolRefWhenLabelMissing(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -1009,7 +1044,7 @@ func TestVsphereAgentReconcileSkipsVMDeleteForAdoptedDuplicateByIdentity(t *test
 	}
 }
 
-func TestVsphereAgentReconcileWaitsForAdoptedStatus(t *testing.T) {
+func TestVsphereAgentReconcileInitializesAdoptedStatus(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -1055,8 +1090,8 @@ func TestVsphereAgentReconcileWaitsForAdoptedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
-	if result.RequeueAfter != 10*time.Second {
-		t.Fatalf("requeueAfter = %s, want 10s", result.RequeueAfter)
+	if result.RequeueAfter != time.Minute {
+		t.Fatalf("requeueAfter = %s, want 1m", result.RequeueAfter)
 	}
 	if provider.createVMCalls != 0 {
 		t.Fatalf("CreateVM calls = %d, want 0 for adopted VsphereAgent without status", provider.createVMCalls)
@@ -1066,9 +1101,65 @@ func TestVsphereAgentReconcileWaitsForAdoptedStatus(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testAdoptedVM}, &updated); err != nil {
 		t.Fatal(err)
 	}
+	if updated.Status.VM.Name != testAdoptedVM || updated.Status.VM.Reason != reasonVMAdopted {
+		t.Fatalf("VM status = %#v, want adopted VM status", updated.Status.VM)
+	}
 	ready := findCondition(updated.Status.Conditions, conditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "AdoptionPending" {
-		t.Fatalf("Ready condition = %#v, want AdoptionPending False", ready)
+	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != reasonVMAdopted {
+		t.Fatalf("Ready condition = %#v, want VMAdopted True", ready)
+	}
+}
+
+func TestVsphereAgentDeleteDropsFinalizerWhenPoolMissing(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	vsphereAgent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         testNamespace,
+			Name:              "demo-worker-orphaned",
+			Finalizers:        []string{vsphereAgentFinalizerName},
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+		Status: agentforgev1alpha1.VsphereAgentStatus{
+			VM: newOwnedVMStatus("demo-worker-orphaned"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(vsphereAgent).
+		WithStatusSubresource(vsphereAgent).
+		Build()
+
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: vsphereAgent.Name}}); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: vsphereAgent.Name}, &updated); err != nil {
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		t.Fatal(err)
+	}
+	if controllerutil.ContainsFinalizer(&updated, vsphereAgentFinalizerName) {
+		t.Fatalf("finalizers = %#v, want VsphereAgent finalizer removed", updated.Finalizers)
 	}
 }
 
@@ -1292,6 +1383,114 @@ func TestRefreshOwnedVMStatusesMarksExpiredUndiscoveredVMOrphaned(t *testing.T) 
 	}
 }
 
+func TestReconcilePreservesOwnedVMTransitionState(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{{
+		Name:               "demo-worker-old1",
+		Phase:              phaseProvisioning,
+		Reason:             reasonAgentNotDiscovered,
+		LastTransitionTime: metav1.NewTime(time.Now().Add(-orphanedOwnedVMGracePeriod - time.Minute)),
+	}}
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	am := testAgentMachine(testControlPlaneNamespace, "demo-worker-new1", "demo/demo-worker")
+	vsphereAgent := testVsphereAgentForVM(pool, agentforgev1alpha1.OwnedVMStatus{
+		Name:               "demo-worker-old1",
+		Phase:              phaseProvisioning,
+		Reason:             reasonVMCreateRequested,
+		LastTransitionTime: metav1.Now(),
+	})
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, infraEnv, am, vsphereAgent).
+		WithStatusSubresource(pool, vsphereAgent).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}}); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Status.OwnedVMs) != 1 {
+		t.Fatalf("ownedVMs = %d, want 1", len(updated.Status.OwnedVMs))
+	}
+	vm := updated.Status.OwnedVMs[0]
+	if vm.Phase != phaseOrphaned || vm.Reason != "AgentDiscoveryExpired" {
+		t.Fatalf("owned VM phase/reason = %s/%s, want Orphaned/AgentDiscoveryExpired", vm.Phase, vm.Reason)
+	}
+}
+
+func TestReconcilePreservesMachineDeletingStateForCleanup(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{{
+		Name:       "demo-worker-gone",
+		Phase:      phaseReleased,
+		Reason:     reasonMachineDeleting,
+		AgentRef:   testAgentRef("demo-worker-gone"),
+		MachineRef: testMachineRef("demo-worker-gone-machine"),
+	}}
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	agent := testAgent(testNamespace, "demo-worker-gone", false, true)
+	vsphereAgent := testVsphereAgentForVM(pool, agentforgev1alpha1.OwnedVMStatus{
+		Name:               "demo-worker-gone",
+		Phase:              phaseProvisioning,
+		Reason:             reasonVMCreateRequested,
+		LastTransitionTime: metav1.Now(),
+	})
+	vsphereAgent.Finalizers = []string{vsphereAgentFinalizerName}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, infraEnv, agent, vsphereAgent).
+		WithStatusSubresource(pool, vsphereAgent).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}}); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var deletingAgent agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: vsphereAgent.Name}, &deletingAgent); err != nil {
+		t.Fatal(err)
+	}
+	if deletingAgent.GetDeletionTimestamp() == nil {
+		t.Fatal("VsphereAgent was not marked for deletion after remembered MachineDeleting transitioned to MachineDeleted")
+	}
+}
+
 func TestRefreshOwnedVMStatusesMarksMissingDiscoveredAgentOrphaned(t *testing.T) {
 	pool := reconcileTestPool()
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
@@ -1448,6 +1647,23 @@ func TestAssignedAgentHostnamesUsesVMIdentityBeforeFreeSlot(t *testing.T) {
 
 	if hostnames["agent-1"] != "demo-worker-match" {
 		t.Fatalf("assigned hostname = %q, want identity-matched VM name", hostnames["agent-1"])
+	}
+}
+
+func TestAssignedAgentHostnamesPrefersObservedHostnameBeforeFreeSlot(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{Name: "demo-worker-first", Phase: phaseProvisioning},
+		{Name: "demo-worker-observed", Phase: phaseProvisioning},
+	}
+
+	hostnames := assignedAgentHostnames(pool, []AgentInfo{{
+		Name:     "agent-1",
+		Hostname: "demo-worker-observed",
+	}})
+
+	if hostnames["agent-1"] != "demo-worker-observed" {
+		t.Fatalf("assigned hostname = %q, want observed VM name", hostnames["agent-1"])
 	}
 }
 
@@ -2036,6 +2252,26 @@ func TestISOHistoryRetainsNewestAndPrunesStalePaths(t *testing.T) {
 	}
 }
 
+func TestISOHistoryRetainsSameDigestAtDifferentPath(t *testing.T) {
+	history := []agentforgev1alpha1.ISOCacheHistoryEntry{
+		{Path: "cache-old/abc.iso", SHA256: "abc"},
+	}
+	current := agentforgev1alpha1.ISOCacheHistoryEntry{Path: "cache-new/abc.iso", SHA256: "abc"}
+
+	updated := updatedISOHistory(history, current, 2)
+	if len(updated) != 2 {
+		t.Fatalf("history length = %d, want current and previous path with same digest", len(updated))
+	}
+	if updated[0].Path != "cache-new/abc.iso" || updated[1].Path != "cache-old/abc.iso" {
+		t.Fatalf("history = %#v, want both same-digest paths retained by path", updated)
+	}
+
+	stale := staleISOPaths(history, "cache-old/abc.iso", "cache-new/abc.iso", 1)
+	if len(stale) != 1 || stale[0] != "cache-old/abc.iso" {
+		t.Fatalf("stale paths = %#v, want previous path pruned when retain=1", stale)
+	}
+}
+
 type fakeVMProvider struct {
 	ensureISOCalls int
 	createVMCalls  int
@@ -2062,6 +2298,13 @@ func (p *fakeVMProvider) CreateVM(_ context.Context, _ *agentforgev1alpha1.Vsphe
 	return newOwnedVMStatus(req.Name), nil
 }
 
+func (*fakeVMProvider) VMStatus(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, name string) (agentforgev1alpha1.OwnedVMStatus, error) {
+	vm := newOwnedVMStatus(name)
+	vm.BIOSUUID = "423297c6-d72e-28bb-b279-1209c29ab72b"
+	vm.MACAddress = "00-50-56-aa-bb-cc"
+	return vm, nil
+}
+
 func (p *fakeVMProvider) DeleteVM(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
 	p.deleteVMCalls++
 	p.deletedVMNames = append(p.deletedVMNames, vm.Name)
@@ -2079,6 +2322,10 @@ func (failingVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereA
 }
 
 func (failingVMProvider) CreateVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
+	return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("provider failed")
+}
+
+func (failingVMProvider) VMStatus(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (agentforgev1alpha1.OwnedVMStatus, error) {
 	return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("provider failed")
 }
 
