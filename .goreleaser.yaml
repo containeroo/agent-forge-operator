@@ -15,69 +15,34 @@ builds:
     ldflags:
       - -s -w
       - -X main.Version={{ .Tag }}
-dockers:
-  - image_templates:
-      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-amd64
-      - containeroo/agent-forge-operator:{{ .Tag }}-amd64
-    use: buildx
+dockers_v2:
+  - images:
+      - ghcr.io/containeroo/agent-forge-operator
+      - containeroo/agent-forge-operator
+    tags:
+      - "{{ .Tag }}"
+      - latest
     dockerfile: Dockerfile.goreleaser
     ids:
       - manager
-    build_flag_templates:
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    build_args:
+      GOVC_VERSION: v0.54.1
+    flags:
       - --pull
-      - --platform=linux/amd64
-      - --cache-from=type=gha,scope=agent-forge-operator-amd64
-      - --cache-to=type=gha,mode=max,scope=agent-forge-operator-amd64
-      - --build-arg
-      - GOVC_VERSION=v0.54.1
-      - --label=org.opencontainers.image.title={{ .ProjectName }}
-      - --label=org.opencontainers.image.description={{ .ProjectName }}
-      - --label=org.opencontainers.image.url=https://github.com/containeroo/agent-forge-operator
-      - --label=org.opencontainers.image.source=https://github.com/containeroo/agent-forge-operator
-      - --label=org.opencontainers.image.version={{ .Version }}
-      - --label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}
-      - --label=org.opencontainers.image.revision={{ .FullCommit }}
-      - --label=org.opencontainers.image.licenses="Apache License 2.0"
-  - image_templates:
-      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-arm64
-      - containeroo/agent-forge-operator:{{ .Tag }}-arm64
-    use: buildx
-    dockerfile: Dockerfile.goreleaser
-    ids:
-      - manager
-    goarch: arm64
-    build_flag_templates:
-      - --pull
-      - --platform=linux/arm64
-      - --cache-from=type=gha,scope=agent-forge-operator-arm64
-      - --cache-to=type=gha,mode=max,scope=agent-forge-operator-arm64
-      - --build-arg
-      - GOVC_VERSION=v0.54.1
-      - --label=org.opencontainers.image.title={{ .ProjectName }}
-      - --label=org.opencontainers.image.description={{ .ProjectName }}
-      - --label=org.opencontainers.image.url=https://github.com/containeroo/agent-forge-operator
-      - --label=org.opencontainers.image.source=https://github.com/containeroo/agent-forge-operator
-      - --label=org.opencontainers.image.version={{ .Version }}
-      - --label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}
-      - --label=org.opencontainers.image.revision={{ .FullCommit }}
-      - --label=org.opencontainers.image.licenses="Apache License 2.0"
-docker_manifests:
-  - name_template: containeroo/agent-forge-operator:{{ .Tag }}
-    image_templates:
-      - containeroo/agent-forge-operator:{{ .Tag }}-amd64
-      - containeroo/agent-forge-operator:{{ .Tag }}-arm64
-  - name_template: ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}
-    image_templates:
-      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-amd64
-      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-arm64
-  - name_template: containeroo/agent-forge-operator:latest
-    image_templates:
-      - containeroo/agent-forge-operator:{{ .Tag }}-amd64
-      - containeroo/agent-forge-operator:{{ .Tag }}-arm64
-  - name_template: ghcr.io/containeroo/agent-forge-operator:latest
-    image_templates:
-      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-amd64
-      - ghcr.io/containeroo/agent-forge-operator:{{ .Tag }}-arm64
+      - --cache-from=type=gha,scope=agent-forge-operator
+      - --cache-to=type=gha,mode=max,scope=agent-forge-operator
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "{{ .ProjectName }}"
+      org.opencontainers.image.url: https://github.com/containeroo/agent-forge-operator
+      org.opencontainers.image.source: https://github.com/containeroo/agent-forge-operator
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.created: '{{ time "2006-01-02T15:04:05Z07:00" }}'
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: Apache License 2.0
 release:
   extra_files:
     - glob: ./crds.yaml

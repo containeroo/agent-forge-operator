@@ -15,8 +15,9 @@ RUN set -eux; \
       | tar -xz -C /tmp govc
 
 FROM gcr.io/distroless/static:nonroot
+ARG TARGETPLATFORM
 WORKDIR /
-COPY manager .
+COPY $TARGETPLATFORM/manager .
 COPY --from=govc /tmp/govc /usr/local/bin/govc
 USER 65532:65532
 
