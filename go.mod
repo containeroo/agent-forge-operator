@@ -3,7 +3,7 @@ module github.com/containeroo/agent-forge-operator
 go 1.26.0
 
 require (
-	github.com/onsi/ginkgo/v2 v2.31.0
+	github.com/onsi/ginkgo/v2 v2.32.0
 	github.com/onsi/gomega v1.42.1
 	github.com/prometheus/client_golang v1.23.2
 	k8s.io/api v0.36.2
