@@ -44,10 +44,25 @@ var (
 		Name: "agent_forge_pool_capacity",
 		Help: "Observed VsphereAgentPool capacity by pool and state.",
 	}, []string{poolMetricNamespaceLabel, poolMetricPoolLabel, poolMetricStateLabel})
+
+	poolVMCPUCoresGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "agent_forge_pool_vm_cpu_cores",
+		Help: "Configured CPU cores per VM for a VsphereAgentPool.",
+	}, []string{poolMetricNamespaceLabel, poolMetricPoolLabel})
+
+	poolVMMemoryBytesGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "agent_forge_pool_vm_memory_bytes",
+		Help: "Configured memory bytes per VM for a VsphereAgentPool.",
+	}, []string{poolMetricNamespaceLabel, poolMetricPoolLabel})
+
+	poolVMDiskBytesGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "agent_forge_pool_vm_disk_bytes",
+		Help: "Configured disk bytes per VM for a VsphereAgentPool.",
+	}, []string{poolMetricNamespaceLabel, poolMetricPoolLabel})
 )
 
 func init() {
-	metrics.Registry.MustRegister(vmOperationsTotal, isoOperationsTotal, poolCapacityGauge)
+	metrics.Registry.MustRegister(vmOperationsTotal, isoOperationsTotal, poolCapacityGauge, poolVMCPUCoresGauge, poolVMMemoryBytesGauge, poolVMDiskBytesGauge)
 }
 
 func recordVMOperation(operation string, err error) {
@@ -82,13 +97,21 @@ func recordPoolCapacityMetrics(pool *agentforgev1alpha1.VsphereAgentPool, plan P
 		}
 		poolCapacityGauge.With(labelsWithState).Set(float64(value))
 	}
+
+	poolVMCPUCoresGauge.With(labels).Set(float64(pool.Spec.Template.NumCPUs))
+	poolVMMemoryBytesGauge.With(labels).Set(float64(pool.Spec.Template.MemoryMiB) * 1024 * 1024)
+	poolVMDiskBytesGauge.With(labels).Set(float64(pool.Spec.Template.DiskGiB) * 1024 * 1024 * 1024)
 }
 
 func deletePoolCapacityMetrics(pool *agentforgev1alpha1.VsphereAgentPool) {
-	poolCapacityGauge.DeletePartialMatch(prometheus.Labels{
+	labels := prometheus.Labels{
 		poolMetricNamespaceLabel: pool.Namespace,
 		poolMetricPoolLabel:      pool.Name,
-	})
+	}
+	poolCapacityGauge.DeletePartialMatch(labels)
+	poolVMCPUCoresGauge.Delete(labels)
+	poolVMMemoryBytesGauge.Delete(labels)
+	poolVMDiskBytesGauge.Delete(labels)
 }
 
 func metricResult(err error) string {
