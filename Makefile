@@ -66,6 +66,10 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GEN_CRD_API_REFERENCE_DOCS ?= $(LOCALBIN)/gen-crd-api-reference-docs
 GEN_API_REF_DOCS_VERSION ?= v0.3.0
+GOVC ?= $(LOCALBIN)/govc
+VCSIM ?= $(LOCALBIN)/vcsim
+GOVC_VERSIONED := $(GOVC)-$(GOVC_VERSION)
+VCSIM_VERSIONED := $(VCSIM)-$(GOVC_VERSION)
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
@@ -138,6 +142,10 @@ vet: ## Run go vet against code.
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+
+.PHONY: test-vcsim
+test-vcsim: govc vcsim ## Run govc provider tests against govmomi vcsim.
+	GOVC_PATH="$(GOVC)" VCSIM_PATH="$(VCSIM)" go test -tags=vcsim ./internal/controller -run Vcsim -count=1 -v
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 .PHONY: test-e2e
@@ -275,6 +283,60 @@ gen-crd-api-reference-docs: ## Download gen-crd-api-reference-docs locally if ne
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+
+.PHONY: govc
+govc: $(GOVC_VERSIONED) ## Download govc locally if necessary.
+	ln -sf "$$(basename "$(GOVC_VERSIONED)")" "$(GOVC)"
+$(GOVC_VERSIONED): | $(LOCALBIN)
+	@set -e; \
+	os="$$(go env GOOS)"; \
+	arch="$$(go env GOARCH)"; \
+	case "$$os" in \
+		darwin) asset_os="Darwin" ;; \
+		linux) asset_os="Linux" ;; \
+		freebsd) asset_os="Freebsd" ;; \
+		*) echo "unsupported govc OS: $$os" >&2; exit 1 ;; \
+	esac; \
+	case "$$arch" in \
+		amd64) asset_arch="x86_64" ;; \
+		arm64) asset_arch="arm64" ;; \
+		arm) asset_arch="arm" ;; \
+		s390x) asset_arch="s390x" ;; \
+		mips64le) asset_arch="mips64le" ;; \
+		*) echo "unsupported govc architecture: $$arch" >&2; exit 1 ;; \
+	esac; \
+	tmp_dir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	curl -fsSL "https://github.com/vmware/govmomi/releases/download/$(GOVC_VERSION)/govc_$${asset_os}_$${asset_arch}.tar.gz" | tar -xz -C "$$tmp_dir" govc; \
+	mv "$$tmp_dir/govc" "$(GOVC_VERSIONED)"; \
+	chmod +x "$(GOVC_VERSIONED)"
+
+.PHONY: vcsim
+vcsim: $(VCSIM_VERSIONED) ## Download vcsim locally if necessary.
+	ln -sf "$$(basename "$(VCSIM_VERSIONED)")" "$(VCSIM)"
+$(VCSIM_VERSIONED): | $(LOCALBIN)
+	@set -e; \
+	os="$$(go env GOOS)"; \
+	arch="$$(go env GOARCH)"; \
+	case "$$os" in \
+		darwin) asset_os="Darwin" ;; \
+		linux) asset_os="Linux" ;; \
+		freebsd) asset_os="Freebsd" ;; \
+		*) echo "unsupported vcsim OS: $$os" >&2; exit 1 ;; \
+	esac; \
+	case "$$arch" in \
+		amd64) asset_arch="x86_64" ;; \
+		arm64) asset_arch="arm64" ;; \
+		arm) asset_arch="arm" ;; \
+		s390x) asset_arch="s390x" ;; \
+		mips64le) asset_arch="mips64le" ;; \
+		*) echo "unsupported vcsim architecture: $$arch" >&2; exit 1 ;; \
+	esac; \
+	tmp_dir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	curl -fsSL "https://github.com/vmware/govmomi/releases/download/$(GOVC_VERSION)/vcsim_$${asset_os}_$${asset_arch}.tar.gz" | tar -xz -C "$$tmp_dir" vcsim; \
+	mv "$$tmp_dir/vcsim" "$(VCSIM_VERSIONED)"; \
+	chmod +x "$(VCSIM_VERSIONED)"
 
 .PHONY: operator-sdk
 OPERATOR_SDK ?= $(LOCALBIN)/operator-sdk

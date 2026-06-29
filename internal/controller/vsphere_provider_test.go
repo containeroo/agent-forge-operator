@@ -338,6 +338,15 @@ exit 0
 	if !strings.Contains(string(logBytes), "datastore.upload") || !strings.Contains(string(logBytes), result.Path) {
 		t.Fatalf("upload was not called for content-addressed path; calls:\n%s", string(logBytes))
 	}
+	for _, dir := range []string{
+		"datastore.mkdir -dc dc1 -ds iso-datastore agent-forge",
+		"datastore.mkdir -dc dc1 -ds iso-datastore agent-forge/demo",
+		"datastore.mkdir -dc dc1 -ds iso-datastore agent-forge/demo/demo-worker",
+	} {
+		if !strings.Contains(string(logBytes), dir) {
+			t.Fatalf("datastore directory %q was not created; calls:\n%s", dir, string(logBytes))
+		}
+	}
 }
 
 func TestGovcEnsureISOStopsOnDatastoreLookupErrors(t *testing.T) {

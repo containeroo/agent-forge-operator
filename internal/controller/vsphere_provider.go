@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -251,15 +252,32 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 		return ISOEnsureResult{}, err
 	}
 
-	if dir := filepath.Dir(isoPath); dir != "." && dir != "" {
-		if err := p.run(ctx, "datastore.mkdir", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, dir); err != nil && !isGovcDatastorePathAlreadyExists(err) {
-			return ISOEnsureResult{}, err
-		}
+	if err := p.ensureDatastoreDirectory(ctx, pool, path.Dir(isoPath)); err != nil {
+		return ISOEnsureResult{}, err
 	}
 	if err := p.run(ctx, "datastore.upload", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, tmpFile, isoPath); err != nil {
 		return ISOEnsureResult{}, err
 	}
 	return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: true}, nil
+}
+
+func (p *govcVMProvider) ensureDatastoreDirectory(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, dir string) error {
+	dir = strings.Trim(path.Clean("/"+strings.TrimSpace(dir)), "/")
+	if dir == "" || dir == "." {
+		return nil
+	}
+
+	var current string
+	for _, part := range strings.Split(dir, "/") {
+		if part == "" {
+			continue
+		}
+		current = path.Join(current, part)
+		if err := p.run(ctx, "datastore.mkdir", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, current); err != nil && !isGovcDatastorePathAlreadyExists(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *govcVMProvider) DeleteVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
@@ -411,6 +429,7 @@ func isGovcDatastorePathNotFound(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "no such file") ||
+		strings.Contains(message, "filenotfound") ||
 		strings.Contains(message, "not found") ||
 		strings.Contains(message, "no such object")
 }
