@@ -100,6 +100,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.reconcileDelete(ctx, &agent, &pool)
 	}
 
+	vmName := vsphereAgentVMName(&agent)
 	if agent.Status.VM.Name != "" {
 		if vm, found := ownedVMStatusForVsphereAgent(&pool, &agent); found {
 			agent.Status.VM = vm
@@ -123,7 +124,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if agent.Labels[vsphereAgentCreatedForLabel] == vsphereAgentCreatedForAdopted {
-		agent.Status.VM = newOwnedVMStatus(agent.Name)
+		agent.Status.VM = newOwnedVMStatus(vmName)
 		agent.Status.VM.Reason = reasonVMAdopted
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
@@ -186,7 +187,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	vm, err := provider.CreateVM(ctx, &pool, VMCreateRequest{Name: agent.Name, ISOPath: isoPath})
+	vm, err := provider.CreateVM(ctx, &pool, VMCreateRequest{Name: vmName, ISOPath: isoPath})
 	if err != nil {
 		recordVMOperation("create", err)
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{

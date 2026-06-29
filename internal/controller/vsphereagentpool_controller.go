@@ -289,7 +289,7 @@ func (r *VsphereAgentPoolReconciler) listVsphereAgentVMs(ctx context.Context, po
 		}
 		vm := agent.Status.VM
 		if vm.Name == "" {
-			vm = newOwnedVMStatus(agent.Name)
+			vm = newOwnedVMStatus(vsphereAgentVMName(agent))
 			vm.Reason = "VMCreatePending"
 		}
 		vms = append(vms, vm)
@@ -430,7 +430,7 @@ func (r *VsphereAgentPoolReconciler) deleteVsphereAgentForVM(ctx context.Context
 	}
 	for i := range list.Items {
 		agent := &list.Items[i]
-		if agent.Status.VM.Name != vm.Name && agent.Name != vm.Name {
+		if agent.Status.VM.Name != vm.Name && vsphereAgentVMName(agent) != vm.Name && agent.Name != vm.Name {
 			continue
 		}
 		if err := r.Delete(ctx, agent); err != nil && !apierrors.IsNotFound(err) {

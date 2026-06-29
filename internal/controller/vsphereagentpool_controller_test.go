@@ -657,6 +657,12 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	if created.Name != agentMachineName {
 		t.Fatalf("VsphereAgent name = %q, want AgentMachine name %q", created.Name, agentMachineName)
 	}
+	if created.Labels[agentMachineSelectionLabel] != agentMachineName {
+		t.Fatalf("VsphereAgent AgentMachine label = %q, want %q", created.Labels[agentMachineSelectionLabel], agentMachineName)
+	}
+	if created.Annotations[vsphereAgentVMNameAnnotation] != agentMachineName {
+		t.Fatalf("VsphereAgent VM name annotation = %q, want %q", created.Annotations[vsphereAgentVMNameAnnotation], agentMachineName)
+	}
 	var updatedAgentMachine unstructured.Unstructured
 	updatedAgentMachine.SetGroupVersionKind(agentMachineGVK)
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testControlPlaneNamespace, Name: agentMachineName}, &updatedAgentMachine); err != nil {
@@ -679,6 +685,109 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	}
 	if len(vsphereAgents.Items) != 1 {
 		t.Fatalf("VsphereAgents after second reconcile = %d, want 1", len(vsphereAgents.Items))
+	}
+}
+
+func TestAgentMachineReconcileCreatesAlternateVsphereAgentWhenNameConflicts(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	agentMachineName := testNodePool + "-8phl4"
+	am := testAgentMachine(testControlPlaneNamespace, agentMachineName, "demo/demo-worker")
+	conflicting := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      agentMachineName,
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel:   "other-worker",
+				vsphereAgentCreatedForLabel: vsphereAgentCreatedForDemand,
+				agentMachineSelectionLabel:  agentMachineName,
+			},
+			Annotations: map[string]string{
+				vsphereAgentVMNameAnnotation: agentMachineName,
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: "other-worker"},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, am, conflicting).
+		WithIndex(&agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolControlPlaneNamespaceIndex, controlPlaneNamespaceIndexFunc).
+		Build()
+
+	reconciler := &AgentMachineReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: agentMachineName}}); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	var vsphereAgents agentforgev1alpha1.VsphereAgentList
+	if err := k8sClient.List(ctx, &vsphereAgents, client.InNamespace(testNamespace)); err != nil {
+		t.Fatal(err)
+	}
+	var created *agentforgev1alpha1.VsphereAgent
+	for i := range vsphereAgents.Items {
+		if vsphereAgents.Items[i].Spec.PoolRef.Name == testNodePool {
+			created = &vsphereAgents.Items[i]
+			break
+		}
+	}
+	if created == nil {
+		t.Fatalf("VsphereAgents = %#v, want alternate VsphereAgent for pool %q", vsphereAgents.Items, testNodePool)
+	}
+	if created.Name == agentMachineName {
+		t.Fatalf("created VsphereAgent reused conflicting name %q", agentMachineName)
+	}
+	if created.Labels[agentMachineSelectionLabel] != agentMachineName {
+		t.Fatalf("AgentMachine label = %q, want %q", created.Labels[agentMachineSelectionLabel], agentMachineName)
+	}
+	if created.Annotations[vsphereAgentVMNameAnnotation] != agentMachineName {
+		t.Fatalf("VM name annotation = %q, want %q", created.Annotations[vsphereAgentVMNameAnnotation], agentMachineName)
+	}
+}
+
+func TestAgentMachineReconcileFailsWhenMultiplePoolsMatch(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	duplicatePool := reconcileTestPool()
+	duplicatePool.Name = "duplicate-worker"
+	agentMachineName := testNodePool + "-8phl4"
+	am := testAgentMachine(testControlPlaneNamespace, agentMachineName, "demo/demo-worker")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, duplicatePool, am).
+		WithIndex(&agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolControlPlaneNamespaceIndex, controlPlaneNamespaceIndexFunc).
+		Build()
+
+	reconciler := &AgentMachineReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: agentMachineName}}); err == nil {
+		t.Fatal("reconcile returned nil error, want ambiguous pool match error")
+	}
+
+	var vsphereAgents agentforgev1alpha1.VsphereAgentList
+	if err := k8sClient.List(ctx, &vsphereAgents, client.InNamespace(testNamespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(vsphereAgents.Items) != 0 {
+		t.Fatalf("VsphereAgents = %#v, want none for ambiguous pool match", vsphereAgents.Items)
 	}
 }
 
@@ -820,6 +929,76 @@ func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	}
 	if updated.Status.VM.Name != "demo-worker-agent" || updated.Status.VM.Phase != phaseProvisioning {
 		t.Fatalf("VM status = %#v, want created provisioning VM named after VsphereAgent", updated.Status.VM)
+	}
+}
+
+func TestVsphereAgentReconcileUsesAnnotatedVMName(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
+		Data: map[string][]byte{
+			"server":   []byte("vcenter.example.invalid"),
+			"username": []byte("user"),
+			"password": []byte("pass"),
+		},
+	}
+	vsphereAgent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  testNamespace,
+			Name:       "demo-worker-8phl4-demo-worker-a1b2c3d4e5",
+			Finalizers: []string{vsphereAgentFinalizerName},
+			Labels: map[string]string{
+				vsphereAgentPoolNameLabel:   testNodePool,
+				vsphereAgentCreatedForLabel: vsphereAgentCreatedForDemand,
+			},
+			Annotations: map[string]string{
+				vsphereAgentVMNameAnnotation: "demo-worker-8phl4",
+			},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: testNodePool},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, infraEnv, secret, vsphereAgent).
+		WithStatusSubresource(pool, vsphereAgent).
+		Build()
+
+	provider := &fakeVMProvider{isoPath: "agent-forge/demo/demo-worker/abc.iso"}
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: vsphereAgent.Name}}); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if len(provider.createVMNames) != 1 || provider.createVMNames[0] != "demo-worker-8phl4" {
+		t.Fatalf("CreateVM names = %#v, want annotated VM name", provider.createVMNames)
+	}
+
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: vsphereAgent.Name}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.VM.Name != "demo-worker-8phl4" {
+		t.Fatalf("VM status name = %q, want annotated VM name", updated.Status.VM.Name)
 	}
 }
 
@@ -2328,6 +2507,7 @@ type fakeVMProvider struct {
 	createVMCalls  int
 	deleteVMCalls  int
 	createISOPaths []string
+	createVMNames  []string
 	deletedVMNames []string
 	isoPath        string
 }
@@ -2343,6 +2523,7 @@ func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereA
 func (p *fakeVMProvider) CreateVM(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
 	p.createVMCalls++
 	p.createISOPaths = append(p.createISOPaths, req.ISOPath)
+	p.createVMNames = append(p.createVMNames, req.Name)
 	if req.Name == "" {
 		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("VM name is required")
 	}

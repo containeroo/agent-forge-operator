@@ -18,6 +18,10 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +42,7 @@ const (
 	vsphereAgentFinalizerName       = "agent-forge.containeroo.ch/vsphere-agent"
 	vsphereAgentPoolOwnerFieldIndex = ".spec.poolRef.name"
 	agentMachineSelectionLabel      = "agent-forge.containeroo.ch/agent-machine"
+	vsphereAgentVMNameAnnotation    = "agent-forge.containeroo.ch/vm-name"
 )
 
 // AgentMachineReconciler creates VsphereAgent resources when CAPI reports that
@@ -65,6 +70,7 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.List(ctx, &pools, client.MatchingFields{vsphereAgentPoolControlPlaneNamespaceIndex: req.Namespace}); err != nil {
 		return ctrl.Result{}, err
 	}
+	var matchingPools []*agentforgev1alpha1.VsphereAgentPool
 	for i := range pools.Items {
 		pool := &pools.Items[i]
 		if !pool.DeletionTimestamp.IsZero() {
@@ -74,12 +80,20 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if !controlPlaneObjectMatchesPool(&agentMachine, pool) {
 			continue
 		}
-		if err := ensureAgentMachineSelectorPinned(ctx, r.Client, &agentMachine); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.ensureVsphereAgentForAgentMachine(ctx, pool, &agentMachine); err != nil {
-			return ctrl.Result{}, err
-		}
+		matchingPools = append(matchingPools, pool)
+	}
+	if len(matchingPools) == 0 {
+		return ctrl.Result{}, nil
+	}
+	if len(matchingPools) > 1 {
+		return ctrl.Result{}, fmt.Errorf("AgentMachine %s/%s matches multiple VsphereAgentPools: %s", agentMachine.GetNamespace(), agentMachine.GetName(), matchingPoolNames(matchingPools))
+	}
+	pool := matchingPools[0]
+	if err := ensureAgentMachineSelectorPinned(ctx, r.Client, &agentMachine); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureVsphereAgentForAgentMachine(ctx, pool, &agentMachine); err != nil {
+		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
@@ -105,26 +119,112 @@ func ensureAgentMachineSelectorPinned(ctx context.Context, c client.Client, agen
 }
 
 func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) error {
-	agent := &agentforgev1alpha1.VsphereAgent{
+	if existing, err := r.findVsphereAgentForAgentMachine(ctx, pool, agentMachine); err != nil {
+		return err
+	} else if existing != nil {
+		return nil
+	}
+
+	for _, name := range []string{agentMachine.GetName(), alternateVsphereAgentName(pool, agentMachine)} {
+		agent := newVsphereAgentForAgentMachine(name, pool, agentMachine)
+		if err := controllerutil.SetControllerReference(pool, agent, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, agent); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return err
+			}
+			var existing agentforgev1alpha1.VsphereAgent
+			if getErr := r.Get(ctx, client.ObjectKey{Namespace: agent.Namespace, Name: agent.Name}, &existing); getErr != nil {
+				return getErr
+			}
+			if vsphereAgentCreatedForAgentMachine(&existing, pool, agentMachine) {
+				return nil
+			}
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("could not create VsphereAgent for AgentMachine %s/%s because deterministic names are already used by other demand", agentMachine.GetNamespace(), agentMachine.GetName())
+}
+
+func (r *AgentMachineReconciler) findVsphereAgentForAgentMachine(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) (*agentforgev1alpha1.VsphereAgent, error) {
+	var list agentforgev1alpha1.VsphereAgentList
+	if err := r.List(ctx, &list, client.InNamespace(pool.Namespace)); err != nil {
+		return nil, err
+	}
+	for i := range list.Items {
+		agent := &list.Items[i]
+		if agent.GetDeletionTimestamp() != nil {
+			continue
+		}
+		if vsphereAgentCreatedForAgentMachine(agent, pool, agentMachine) {
+			return agent, nil
+		}
+	}
+	return nil, nil
+}
+
+func newVsphereAgentForAgentMachine(name string, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) *agentforgev1alpha1.VsphereAgent {
+	return &agentforgev1alpha1.VsphereAgent{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: pool.Namespace,
-			Name:      agentMachine.GetName(),
+			Name:      name,
 			Labels: map[string]string{
 				vsphereAgentPoolNameLabel:   pool.Name,
 				vsphereAgentCreatedForLabel: vsphereAgentCreatedForDemand,
+				agentMachineSelectionLabel:  agentMachine.GetName(),
+			},
+			Annotations: map[string]string{
+				vsphereAgentVMNameAnnotation: agentMachine.GetName(),
 			},
 		},
 		Spec: agentforgev1alpha1.VsphereAgentSpec{
 			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name},
 		},
 	}
-	if err := controllerutil.SetControllerReference(pool, agent, r.Scheme); err != nil {
-		return err
+}
+
+func vsphereAgentCreatedForAgentMachine(agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) bool {
+	if !vsphereAgentBelongsToPool(agent, pool.Name) {
+		return false
 	}
-	if err := r.Create(ctx, agent); err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
+	if agent.Labels[agentMachineSelectionLabel] == agentMachine.GetName() {
+		return true
 	}
-	return nil
+	if agent.Annotations[vsphereAgentVMNameAnnotation] == agentMachine.GetName() {
+		return true
+	}
+	return agent.Labels[vsphereAgentCreatedForLabel] == vsphereAgentCreatedForDemand && agent.Name == agentMachine.GetName()
+}
+
+func alternateVsphereAgentName(pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) string {
+	sum := sha256.Sum256([]byte(pool.Namespace + "/" + pool.Name + "/" + agentMachine.GetNamespace() + "/" + agentMachine.GetName()))
+	suffix := hex.EncodeToString(sum[:])[:10]
+	base := strings.Trim(agentMachine.GetName()+"-"+pool.Name, "-")
+	maxBaseLength := 253 - len(suffix) - 1
+	if len(base) > maxBaseLength {
+		base = strings.Trim(base[:maxBaseLength], "-")
+	}
+	if base == "" {
+		return suffix
+	}
+	return base + "-" + suffix
+}
+
+func matchingPoolNames(pools []*agentforgev1alpha1.VsphereAgentPool) string {
+	names := make([]string, 0, len(pools))
+	for _, pool := range pools {
+		names = append(names, pool.Namespace+"/"+pool.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+func vsphereAgentVMName(agent *agentforgev1alpha1.VsphereAgent) string {
+	if agent.Annotations != nil && agent.Annotations[vsphereAgentVMNameAnnotation] != "" {
+		return agent.Annotations[vsphereAgentVMNameAnnotation]
+	}
+	return agent.Name
 }
 
 func (r *AgentMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
