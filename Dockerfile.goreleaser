@@ -1,6 +1,6 @@
 FROM --platform=${BUILDPLATFORM} debian:bookworm-slim AS govc
 ARG TARGETARCH
-ARG GOVC_VERSION=v0.54.1
+ARG GOVC_VERSION=v0.55.0
 
 RUN set -eux; \
     apt-get update; \
