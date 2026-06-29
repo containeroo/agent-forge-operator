@@ -37,6 +37,7 @@ const (
 	vsphereAgentCreatedForDemand    = "agent-machine"
 	vsphereAgentFinalizerName       = "agent-forge.containeroo.ch/vsphere-agent"
 	vsphereAgentPoolOwnerFieldIndex = ".spec.poolRef.name"
+	agentMachineSelectionLabel      = "agent-forge.containeroo.ch/agent-machine"
 )
 
 // AgentMachineReconciler creates VsphereAgent resources when CAPI reports that
@@ -46,7 +47,7 @@ type AgentMachineReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=capi-provider.agent-install.openshift.io,resources=agentmachines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=capi-provider.agent-install.openshift.io,resources=agentmachines,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents,verbs=get;list;watch;create
 
@@ -73,11 +74,34 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if !controlPlaneObjectMatchesPool(&agentMachine, pool) {
 			continue
 		}
+		if err := ensureAgentMachineSelectorPinned(ctx, r.Client, &agentMachine); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := r.ensureVsphereAgentForAgentMachine(ctx, pool, &agentMachine); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+func ensureAgentMachineSelectorPinned(ctx context.Context, c client.Client, agentMachine *unstructured.Unstructured) error {
+	matchLabels, _, err := unstructured.NestedStringMap(agentMachine.Object, "spec", "agentLabelSelector", "matchLabels")
+	if err != nil {
+		return err
+	}
+	if matchLabels == nil {
+		matchLabels = map[string]string{}
+	}
+	if matchLabels[agentMachineSelectionLabel] == agentMachine.GetName() {
+		return nil
+	}
+
+	before := agentMachine.DeepCopy()
+	matchLabels[agentMachineSelectionLabel] = agentMachine.GetName()
+	if err := unstructured.SetNestedStringMap(agentMachine.Object, matchLabels, "spec", "agentLabelSelector", "matchLabels"); err != nil {
+		return err
+	}
+	return c.Patch(ctx, agentMachine, client.MergeFrom(before))
 }
 
 func (r *AgentMachineReconciler) ensureVsphereAgentForAgentMachine(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, agentMachine *unstructured.Unstructured) error {

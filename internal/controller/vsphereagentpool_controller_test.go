@@ -657,6 +657,18 @@ func TestAgentMachineReconcileCreatesVsphereAgentForNoSuitableAgents(t *testing.
 	if created.Name != agentMachineName {
 		t.Fatalf("VsphereAgent name = %q, want AgentMachine name %q", created.Name, agentMachineName)
 	}
+	var updatedAgentMachine unstructured.Unstructured
+	updatedAgentMachine.SetGroupVersionKind(agentMachineGVK)
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testControlPlaneNamespace, Name: agentMachineName}, &updatedAgentMachine); err != nil {
+		t.Fatal(err)
+	}
+	matchLabels, _, err := unstructured.NestedStringMap(updatedAgentMachine.Object, "spec", "agentLabelSelector", "matchLabels")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matchLabels[agentMachineSelectionLabel] != agentMachineName {
+		t.Fatalf("AgentMachine selector label = %q, want %q", matchLabels[agentMachineSelectionLabel], agentMachineName)
+	}
 
 	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testControlPlaneNamespace, Name: agentMachineName}})
 	if err != nil {
@@ -1226,6 +1238,9 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	if labels[testCustomerKey] != testCustomer {
 		t.Fatalf("customer label = %q, want %q", labels[testCustomerKey], testCustomer)
 	}
+	if labels[agentMachineSelectionLabel] != "demo-worker-ab12" {
+		t.Fatalf("agent machine selector label = %q, want demo-worker-ab12", labels[agentMachineSelectionLabel])
+	}
 
 	var updatedPool agentforgev1alpha1.VsphereAgentPool
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updatedPool); err != nil {
@@ -1291,6 +1306,9 @@ func TestReconcilePatchesCandidateAgentWithPoolDiscriminatorLabel(t *testing.T) 
 	}
 	if labels[poolLabelKey] != "worker-32c128g" {
 		t.Fatalf("pool label = %q, want worker-32c128g", labels[poolLabelKey])
+	}
+	if labels[agentMachineSelectionLabel] != "demo-worker-32c128g-ab12" {
+		t.Fatalf("agent machine selector label = %q, want demo-worker-32c128g-ab12", labels[agentMachineSelectionLabel])
 	}
 	hostname, _, _ := unstructured.NestedString(updated.Object, "spec", "hostname")
 	if hostname != "demo-worker-32c128g-ab12" {
@@ -1664,6 +1682,39 @@ func TestAssignedAgentHostnamesPrefersObservedHostnameBeforeFreeSlot(t *testing.
 
 	if hostnames["agent-1"] != "demo-worker-observed" {
 		t.Fatalf("assigned hostname = %q, want observed VM name", hostnames["agent-1"])
+	}
+}
+
+func TestAssignedAgentHostnamesUsesAgentRefBeforeFreeSlot(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{Name: "demo-worker-first", Phase: phaseProvisioning},
+		{Name: "demo-worker-match", Phase: phaseAvailable, AgentRef: testAgentRef("agent-1")},
+	}
+
+	hostnames := assignedAgentHostnames(pool, []AgentInfo{{
+		Name: "agent-1",
+	}})
+
+	if hostnames["agent-1"] != "demo-worker-match" {
+		t.Fatalf("assigned hostname = %q, want AgentRef-matched VM name", hostnames["agent-1"])
+	}
+}
+
+func TestAssignedAgentHostnamesDoesNotUseAmbiguousFreeVM(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
+		{Name: "demo-worker-first", Phase: phaseProvisioning},
+		{Name: "demo-worker-second", Phase: phaseProvisioning},
+	}
+
+	hostnames := assignedAgentHostnames(pool, []AgentInfo{
+		{Name: "agent-1", InventoryHostname: "00-50-56-aa-bb-01"},
+		{Name: "agent-2", InventoryHostname: "00-50-56-aa-bb-02"},
+	})
+
+	if len(hostnames) != 0 {
+		t.Fatalf("assigned hostnames = %#v, want no assignment without identity, AgentRef, or matching hostname", hostnames)
 	}
 }
 

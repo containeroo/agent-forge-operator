@@ -94,7 +94,7 @@ type AgentMachineDemand struct {
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch
-// +kubebuilder:rbac:groups=capi-provider.agent-install.openshift.io,resources=agentmachines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=capi-provider.agent-install.openshift.io,resources=agentmachines,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=agent-install.openshift.io,resources=infraenvs;agents,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -149,6 +149,14 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 	pool.Status.OwnedVMs = mergeOwnedVMStatuses(previousOwnedVMs, ownedVMs)
+
+	if err := r.ensureAgentMachineSelectorsPinned(ctx, &pool); err != nil {
+		r.setStatusError(&pool, "AgentMachinePatchFailed", err.Error())
+		if statusErr := r.updateStatus(ctx, &pool, PoolPlan{}); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, err
+	}
 
 	agents, err := r.listMatchingAgents(ctx, &pool)
 	if err != nil {
@@ -558,6 +566,27 @@ func (r *VsphereAgentPoolReconciler) countAgentMachineDemand(ctx context.Context
 	return demand, nil
 }
 
+func (r *VsphereAgentPoolReconciler) ensureAgentMachineSelectorsPinned(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) error {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(agentMachineGVK)
+	if err := r.List(ctx, list, client.InNamespace(pool.Spec.ControlPlaneNamespace)); err != nil {
+		return err
+	}
+	for i := range list.Items {
+		agentMachine := &list.Items[i]
+		if agentMachine.GetDeletionTimestamp() != nil {
+			continue
+		}
+		if !controlPlaneObjectMatchesPool(agentMachine, pool) {
+			continue
+		}
+		if err := ensureAgentMachineSelectorPinned(ctx, r.Client, agentMachine); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *VsphereAgentPoolReconciler) listNodePoolMachines(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]MachineInfo, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(machineGVK)
@@ -630,6 +659,7 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 			SpecRole:          specRole,
 			RoleLabel:         labels[roleLabelKey],
 			PoolLabel:         labels[poolLabelKey],
+			SelectionLabel:    labels[agentMachineSelectionLabel],
 			Hostname:          specHostname,
 			InventoryHostname: inventoryHostname,
 			MAC:               normalizeMAC(agentPrimaryMAC(obj)),
@@ -742,41 +772,55 @@ func assignedAgentHostnames(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		if assigned[agent.Name] != "" || agent.Hostname == "" {
 			continue
 		}
-		assigned[agent.Name] = agent.Hostname
-		reserved[agent.Hostname] = struct{}{}
+		for _, vm := range pool.Status.OwnedVMs {
+			if vm.Name != agent.Hostname || vm.Phase == phaseBound {
+				continue
+			}
+			if vmIdentityConflictsAgent(vm, agent) {
+				continue
+			}
+			if _, exists := reserved[vm.Name]; exists {
+				continue
+			}
+			assigned[agent.Name] = vm.Name
+			reserved[vm.Name] = struct{}{}
+			break
+		}
 	}
 
 	for _, agent := range agents {
 		if assigned[agent.Name] != "" {
 			continue
 		}
-		if hostname := agentObservedHostname(agent); hostname != "" {
-			for _, vm := range pool.Status.OwnedVMs {
-				if vm.Name != hostname || vm.Phase == phaseBound {
-					continue
-				}
-				if vm.AgentRef != nil && vm.AgentRef.Name != "" && vm.AgentRef.Name != agent.Name {
-					continue
-				}
-				if vmIdentityConflictsAgent(vm, agent) {
-					continue
-				}
-				if _, exists := reserved[vm.Name]; exists {
-					continue
-				}
-				assigned[agent.Name] = vm.Name
-				reserved[vm.Name] = struct{}{}
-				break
-			}
-			if assigned[agent.Name] != "" {
-				continue
-			}
-		}
 		for _, vm := range pool.Status.OwnedVMs {
 			if vm.Name == "" || vm.Phase == phaseBound {
 				continue
 			}
-			if vm.AgentRef != nil && vm.AgentRef.Name != "" && vm.AgentRef.Name != agent.Name {
+			if !vmMatchesAgentRef(vm, agent) {
+				continue
+			}
+			if _, exists := reserved[vm.Name]; exists {
+				continue
+			}
+			assigned[agent.Name] = vm.Name
+			reserved[vm.Name] = struct{}{}
+			break
+		}
+	}
+
+	for _, agent := range agents {
+		if assigned[agent.Name] != "" {
+			continue
+		}
+		hostname := agentObservedHostname(agent)
+		if hostname == "" {
+			continue
+		}
+		for _, vm := range pool.Status.OwnedVMs {
+			if vm.Name != hostname || vm.Phase == phaseBound {
+				continue
+			}
+			if vmIdentityConflictsAgent(vm, agent) {
 				continue
 			}
 			if _, exists := reserved[vm.Name]; exists {
@@ -1099,13 +1143,14 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 		labels[key] = value
 	}
 	labels[roleLabelKey] = pool.Spec.Agent.Role
-	agent.SetLabels(labels)
 	if err := unstructured.SetNestedField(agent.Object, pool.Spec.Agent.Role, "spec", "role"); err != nil {
 		return err
 	}
 	if hostname == "" {
 		return fmt.Errorf("cannot patch Agent %s/%s without an owned VM hostname", pool.Namespace, name)
 	}
+	labels[agentMachineSelectionLabel] = hostname
+	agent.SetLabels(labels)
 	if currentHostname, _, _ := unstructured.NestedString(agent.Object, "spec", "hostname"); currentHostname != hostname {
 		if err := unstructured.SetNestedField(agent.Object, hostname, "spec", "hostname"); err != nil {
 			return err

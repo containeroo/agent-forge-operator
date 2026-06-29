@@ -72,6 +72,7 @@ type AgentInfo struct {
 	SpecRole          string
 	RoleLabel         string
 	PoolLabel         string
+	SelectionLabel    string
 	Hostname          string
 	InventoryHostname string
 	MAC               string
@@ -137,7 +138,11 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		if agent.Bound {
 			continue
 		}
-		if !agentNeedsPatch(pool, agent) {
+		needsPatch := agentNeedsPatch(pool, agent)
+		if !needsPatch && snapshot.WaitingAgentMachines > 0 && agentNeedsSelectionLabelPatch(agent) && agentAssociatedWithActiveOwnedVM(snapshot.OwnedVMs, agent) {
+			needsPatch = true
+		}
+		if !needsPatch {
 			continue
 		}
 		if !agentPatchEligible(snapshot, agent) {
@@ -224,8 +229,28 @@ func agentNeedsPatch(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo)
 	return !agent.Approved || agent.SpecRole != pool.Spec.Agent.Role || agent.RoleLabel != pool.Spec.Agent.Role || agent.Hostname == ""
 }
 
+func agentNeedsSelectionLabelPatch(agent AgentInfo) bool {
+	return agent.Hostname != "" && agent.SelectionLabel != agent.Hostname
+}
+
 func agentPatchEligible(snapshot PoolSnapshot, agent AgentInfo) bool {
 	return agentAssociatedWithOwnedVM(snapshot.OwnedVMs, agent)
+}
+
+func agentAssociatedWithActiveOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) bool {
+	hostname := agentObservedHostname(agent)
+	for _, vm := range vms {
+		if vm.Name == "" || vm.Phase == phaseReleased || vm.Phase == phaseOrphaned {
+			continue
+		}
+		if vmMatchesAgentIdentity(vm, agent) || vmMatchesAgentRef(vm, agent) {
+			return true
+		}
+		if hostname != "" && vm.Name == hostname && !vmIdentityConflictsAgent(vm, agent) {
+			return true
+		}
+	}
+	return false
 }
 
 func agentAssociatedWithOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) bool {
