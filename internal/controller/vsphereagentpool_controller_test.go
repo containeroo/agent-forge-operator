@@ -1246,6 +1246,9 @@ func TestVsphereAgentReconcileInitializesAdoptedStatus(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
+	}
 	vsphereAgent := &agentforgev1alpha1.VsphereAgent{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:  testNamespace,
@@ -1263,7 +1266,7 @@ func TestVsphereAgentReconcileInitializesAdoptedStatus(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, vsphereAgent).
+		WithObjects(pool, secret, vsphereAgent).
 		WithStatusSubresource(vsphereAgent).
 		Build()
 
@@ -1286,6 +1289,9 @@ func TestVsphereAgentReconcileInitializesAdoptedStatus(t *testing.T) {
 	}
 	if provider.createVMCalls != 0 {
 		t.Fatalf("CreateVM calls = %d, want 0 for adopted VsphereAgent without status", provider.createVMCalls)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testAdoptedVM}}); err != nil {
+		t.Fatalf("second reconcile returned error: %v", err)
 	}
 
 	var updated agentforgev1alpha1.VsphereAgent
@@ -1365,6 +1371,9 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	}
 
 	pool := reconcileTestPool()
+	pool.Spec.Agent.Labels[roleLabelKey] = "user-supplied-role"
+	pool.Spec.Agent.Labels[agentMachineSelectionLabel] = "user-supplied-selection"
+	pool.Spec.Agent.Labels[agentMachineRefKey] = "user-supplied-binding"
 	ownedVM := agentforgev1alpha1.OwnedVMStatus{
 		Name:       "demo-worker-ab12",
 		Phase:      phaseProvisioning,
@@ -1419,6 +1428,9 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 	}
 	if labels[agentMachineSelectionLabel] != "demo-worker-ab12" {
 		t.Fatalf("agent machine selector label = %q, want demo-worker-ab12", labels[agentMachineSelectionLabel])
+	}
+	if labels[agentMachineRefKey] != "" {
+		t.Fatalf("controller wrote reserved Agent binding label %q", labels[agentMachineRefKey])
 	}
 
 	var updatedPool agentforgev1alpha1.VsphereAgentPool
@@ -1799,6 +1811,29 @@ func TestRefreshOwnedVMStatusesMatchesAgentsByBIOSUUIDBeforeHostname(t *testing.
 	}
 }
 
+func TestRefreshOwnedVMStatusesDoesNotChooseAmbiguousAgentIdentity(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{{
+		Name:               "worker-vm",
+		BIOSUUID:           "duplicate-bios",
+		Phase:              phaseProvisioning,
+		Reason:             reasonAgentNotDiscovered,
+		LastTransitionTime: metav1.Now(),
+	}}
+	agents := []AgentInfo{
+		{Name: "agent-a", Hostname: "worker-a", BIOSUUID: "duplicate-bios"},
+		{Name: "agent-b", Hostname: "worker-b", BIOSUUID: "duplicate-bios"},
+	}
+
+	vms := refreshOwnedVMStatuses(pool, agents, nil)
+	if len(vms) != 3 {
+		t.Fatalf("owned VMs = %#v, want original VM plus independently observed Agents", vms)
+	}
+	if vms[0].AgentRef != nil {
+		t.Fatalf("ambiguous identity selected AgentRef %#v, want no arbitrary match", vms[0].AgentRef)
+	}
+}
+
 func TestRefreshOwnedVMStatusesDoesNotMatchHostnameWhenIdentityConflicts(t *testing.T) {
 	pool := reconcileTestPool()
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
@@ -2082,7 +2117,7 @@ func TestReconcileAdoptsExistingBoundAgentAsOwnedVM(t *testing.T) {
 		t.Fatalf("ownedVMs = %d, want adopted existing VM", len(updated.Status.OwnedVMs))
 	}
 	vm := updated.Status.OwnedVMs[0]
-	if vm.Name != "demo-worker-ab12" || vm.Phase != "Bound" || vm.AgentRef == nil || vm.AgentRef.Name != agent.GetName() {
+	if vm.Name != "demo-worker-ab12" || vm.Source != vmSourceDiscoveredAgent || vm.Phase != "Bound" || vm.AgentRef == nil || vm.AgentRef.Name != agent.GetName() {
 		t.Fatalf("owned VM status = %#v, want adopted bound Agent", vm)
 	}
 }
@@ -2091,6 +2126,30 @@ func TestNormalizeVMwareSerialUUID(t *testing.T) {
 	uuid := normalizeVMwareSerialUUID("VMware-42 32 97 c6 d7 2e 28 bb-b2 79 12 09 c2 9a b7 2b")
 	if uuid != "423297c6-d72e-28bb-b279-1209c29ab72b" {
 		t.Fatalf("uuid = %q, want normalized VMware BIOS UUID", uuid)
+	}
+}
+
+func TestNormalizeVMwareSerialUUIDRejectsNonHexSerial(t *testing.T) {
+	if got := normalizeVMwareSerialUUID("VMware-zz zz zz zz zz zz zz zz-zz zz zz zz zz zz zz zz"); got != "" {
+		t.Fatalf("normalized invalid UUID = %q, want empty", got)
+	}
+}
+
+func TestAgentCandidateLabelsExcludeControllerManagedKeys(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Spec.Agent.Labels[roleLabelKey] = "stale-role"
+	pool.Spec.Agent.Labels[poolLabelKey] = "pool-a"
+	pool.Spec.Agent.Labels[agentMachineSelectionLabel] = "stale-machine"
+	pool.Spec.Agent.Labels[agentMachineRefKey] = "bound-machine"
+
+	labels := agentCandidateLabels(pool)
+	for _, key := range []string{roleLabelKey, poolLabelKey, agentMachineSelectionLabel, agentMachineRefKey} {
+		if _, found := labels[key]; found {
+			t.Fatalf("controller-managed key %q leaked into candidate selector %#v", key, labels)
+		}
+	}
+	if labels[testCustomerKey] != testCustomer {
+		t.Fatalf("candidate selector = %#v, want user discriminator retained", labels)
 	}
 }
 
@@ -2460,6 +2519,23 @@ func TestISOCacheDueDetectsStableURLIntervalAndForceRefresh(t *testing.T) {
 	}
 }
 
+func TestEnsureISOCacheDoesNotPersistDownloadCredentials(t *testing.T) {
+	pool := reconcileTestPool()
+	provider := &fakeVMProvider{isoPath: "agent-forge/demo/demo-worker/abc.iso"}
+	reconciler := &VsphereAgentPoolReconciler{Recorder: events.NewFakeRecorder(10)}
+	rawURL := "https://user:password@example.invalid/discovery.iso?token=super-secret#fragment"
+
+	if _, err := reconciler.ensureISOCache(context.Background(), pool, provider, rawURL); err != nil {
+		t.Fatalf("ensureISOCache returned error: %v", err)
+	}
+	if got, want := pool.Status.ISO.URL, "https://example.invalid/discovery.iso"; got != want {
+		t.Fatalf("stored ISO URL = %q, want %q", got, want)
+	}
+	if isoCacheDue(pool, rawURL, "", time.Now()) {
+		t.Fatal("redacted URL did not match the same credentialed download URL")
+	}
+}
+
 func TestISOHistoryRetainsNewestAndPrunesStalePaths(t *testing.T) {
 	history := []agentforgev1alpha1.ISOCacheHistoryEntry{
 		{Path: "cache/old-1.iso", SHA256: "old-1"},
@@ -2502,14 +2578,236 @@ func TestISOHistoryRetainsSameDigestAtDifferentPath(t *testing.T) {
 	}
 }
 
+func TestVsphereAgentPoolReferenceOverridesStaleLabel(t *testing.T) {
+	agent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{vsphereAgentPoolNameLabel: "stale-pool"}},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{
+			PoolRef: agentforgev1alpha1.LocalObjectReference{Name: "current-pool"},
+		},
+	}
+
+	if !vsphereAgentBelongsToPool(agent, "current-pool") {
+		t.Fatal("authoritative spec.poolRef did not match current pool")
+	}
+	if vsphereAgentBelongsToPool(agent, "stale-pool") {
+		t.Fatal("stale compatibility label made VsphereAgent belong to a second pool")
+	}
+}
+
+func TestEnsureISOCacheRetriesFailedPrunes(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Spec.ISO.RetainVersions = 1
+	pool.Status.ISO = agentforgev1alpha1.ISOCacheStatus{
+		URL:        "https://example.invalid/old.iso",
+		Path:       "cache/old-1.iso",
+		SHA256:     "old-1",
+		SizeBytes:  5,
+		CheckedAt:  metav1.NewTime(time.Now().Add(-time.Hour)),
+		UploadedAt: metav1.NewTime(time.Now().Add(-2 * time.Hour)),
+		History: []agentforgev1alpha1.ISOCacheHistoryEntry{
+			{Path: "cache/old-1.iso", SHA256: "old-1"},
+			{Path: "cache/old-2.iso", SHA256: "old-2"},
+		},
+	}
+	provider := &fakeVMProvider{
+		isoPath:      "cache/current.iso",
+		deleteISOErr: fmt.Errorf("datastore busy"),
+	}
+	reconciler := &VsphereAgentPoolReconciler{Recorder: events.NewFakeRecorder(10)}
+
+	if _, err := reconciler.ensureISOCache(context.Background(), pool, provider, "https://example.invalid/current.iso"); err != nil {
+		t.Fatalf("ensureISOCache returned error: %v", err)
+	}
+	if len(provider.deletedISOPaths) != 2 {
+		t.Fatalf("DeleteISO calls = %#v, want both stale paths", provider.deletedISOPaths)
+	}
+	if len(pool.Status.ISO.History) != 3 {
+		t.Fatalf("history = %#v, want retained current entry and two failed prunes", pool.Status.ISO.History)
+	}
+
+	provider.deleteISOErr = nil
+	provider.deletedISOPaths = nil
+	pool.Status.ISO.CheckedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+	if _, err := reconciler.ensureISOCache(context.Background(), pool, provider, "https://example.invalid/current.iso"); err != nil {
+		t.Fatalf("second ensureISOCache returned error: %v", err)
+	}
+	if len(provider.deletedISOPaths) != 2 {
+		t.Fatalf("retried DeleteISO calls = %#v, want both previously failed paths", provider.deletedISOPaths)
+	}
+	if len(pool.Status.ISO.History) != 1 || pool.Status.ISO.History[0].Path != "cache/current.iso" {
+		t.Fatalf("history after successful retry = %#v, want only retained current ISO", pool.Status.ISO.History)
+	}
+}
+
+func TestVsphereAgentReconcileRecreatesMissingManagedVM(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"}}
+	agent := testVsphereAgentForVM(pool, newOwnedVMStatus("missing-worker"))
+	agent.Name = "missing-worker"
+	agent.Finalizers = []string{vsphereAgentFinalizerName}
+	agent.Labels[vsphereAgentCreatedForLabel] = vsphereAgentCreatedForDemand
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, secret, agent).
+		WithStatusSubresource(agent).
+		Build()
+	provider := &fakeVMProvider{vmStatusErr: fmt.Errorf("%w: missing-worker", errVMNotFound)}
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("requeueAfter = %s, want 30s", result.RequeueAfter)
+	}
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.VM.Name != "" {
+		t.Fatalf("VM status = %#v, want missing managed VM cleared so it can be recreated", updated.Status.VM)
+	}
+	ready := findCondition(updated.Status.Conditions, conditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "VMNotFound" {
+		t.Fatalf("Ready condition = %#v, want VMNotFound False", ready)
+	}
+}
+
+func TestVsphereAgentReconcileRejectsVMOwnedByAnotherAgent(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"}}
+	vm := newOwnedVMStatus("owned-worker")
+	vm.OwnerUID = "owned-worker-uid"
+	agent := testVsphereAgentForVM(pool, vm)
+	agent.UID = types.UID(vm.OwnerUID)
+	agent.Finalizers = []string{vsphereAgentFinalizerName}
+	agent.Labels[vsphereAgentCreatedForLabel] = vsphereAgentCreatedForDemand
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, secret, agent).
+		WithStatusSubresource(agent).
+		Build()
+	provider := &fakeVMProvider{vmStatusOwnerUID: "another-agent-uid"}
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}})
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("requeueAfter = %s, want 30s", result.RequeueAfter)
+	}
+	var updated agentforgev1alpha1.VsphereAgent
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.VM.OwnerUID != vm.OwnerUID {
+		t.Fatalf("VM owner UID = %q, want original %q", updated.Status.VM.OwnerUID, vm.OwnerUID)
+	}
+	ready := findCondition(updated.Status.Conditions, conditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "VMOwnershipMismatch" {
+		t.Fatalf("Ready condition = %#v, want VMOwnershipMismatch False", ready)
+	}
+}
+
+func TestVsphereAgentDeleteCleansUpVMWhenStatusWasNeverPersisted(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"}}
+	agent := &agentforgev1alpha1.VsphereAgent{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         testNamespace,
+			Name:              "status-write-lost",
+			UID:               types.UID("status-write-lost-uid"),
+			Finalizers:        []string{vsphereAgentFinalizerName},
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			Labels:            map[string]string{vsphereAgentPoolNameLabel: pool.Name},
+		},
+		Spec: agentforgev1alpha1.VsphereAgentSpec{PoolRef: agentforgev1alpha1.LocalObjectReference{Name: pool.Name}},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, secret, agent).
+		WithStatusSubresource(agent).
+		Build()
+	provider := &fakeVMProvider{}
+	reconciler := &VsphereAgentReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+			return provider, nil
+		},
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}}); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if len(provider.deletedVMNames) != 1 || provider.deletedVMNames[0] != agent.Name {
+		t.Fatalf("deleted VMs = %#v, want fallback cleanup for %q", provider.deletedVMNames, agent.Name)
+	}
+	if provider.deletedVMs[0].OwnerUID != string(agent.UID) {
+		t.Fatalf("deleted VM owner UID = %q, want %q", provider.deletedVMs[0].OwnerUID, agent.UID)
+	}
+}
+
 type fakeVMProvider struct {
-	ensureISOCalls int
-	createVMCalls  int
-	deleteVMCalls  int
-	createISOPaths []string
-	createVMNames  []string
-	deletedVMNames []string
-	isoPath        string
+	ensureISOCalls   int
+	createVMCalls    int
+	deleteVMCalls    int
+	createISOPaths   []string
+	createVMNames    []string
+	deletedVMNames   []string
+	deletedVMs       []agentforgev1alpha1.OwnedVMStatus
+	deletedISOPaths  []string
+	isoPath          string
+	vmStatusErr      error
+	vmStatusOwnerUID string
+	deleteISOErr     error
 }
 
 func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, ISOEnsureRequest) (ISOEnsureResult, error) {
@@ -2530,21 +2828,27 @@ func (p *fakeVMProvider) CreateVM(_ context.Context, _ *agentforgev1alpha1.Vsphe
 	return newOwnedVMStatus(req.Name), nil
 }
 
-func (*fakeVMProvider) VMStatus(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, name string) (agentforgev1alpha1.OwnedVMStatus, error) {
+func (p *fakeVMProvider) VMStatus(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, name string) (agentforgev1alpha1.OwnedVMStatus, error) {
+	if p.vmStatusErr != nil {
+		return agentforgev1alpha1.OwnedVMStatus{}, p.vmStatusErr
+	}
 	vm := newOwnedVMStatus(name)
 	vm.BIOSUUID = "423297c6-d72e-28bb-b279-1209c29ab72b"
 	vm.MACAddress = "00-50-56-aa-bb-cc"
+	vm.OwnerUID = p.vmStatusOwnerUID
 	return vm, nil
 }
 
 func (p *fakeVMProvider) DeleteVM(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
 	p.deleteVMCalls++
 	p.deletedVMNames = append(p.deletedVMNames, vm.Name)
+	p.deletedVMs = append(p.deletedVMs, vm)
 	return nil
 }
 
-func (*fakeVMProvider) DeleteISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) error {
-	return nil
+func (p *fakeVMProvider) DeleteISO(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, path string) error {
+	p.deletedISOPaths = append(p.deletedISOPaths, path)
+	return p.deleteISOErr
 }
 
 type failingVMProvider struct{}
@@ -2591,10 +2895,9 @@ func reconcileTestPool() *agentforgev1alpha1.VsphereAgentPool {
 				Network:              "VM Network",
 			},
 			Template: agentforgev1alpha1.VMTemplateSpec{
-				NamePrefix: testNodePool,
-				NumCPUs:    4,
-				MemoryMiB:  16384,
-				DiskGiB:    100,
+				NumCPUs:   4,
+				MemoryMiB: 16384,
+				DiskGiB:   100,
 			},
 			Agent: agentforgev1alpha1.AgentBindingSpec{
 				Role: testWorkerRole,

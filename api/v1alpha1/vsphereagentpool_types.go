@@ -54,12 +54,14 @@ type VspherePlacementSpec struct {
 	// The Secret must contain server, username, and password keys. It may also
 	// contain an insecure key with "true" when the vCenter certificate should not
 	// be verified.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="credentialsSecretRef is immutable"
 	CredentialsSecretRef SecretReference `json:"credentialsSecretRef"`
 
 	// Datacenter is the target vSphere datacenter name.
 	// +kubebuilder:default=dc1
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="datacenter is immutable"
 	Datacenter string `json:"datacenter,omitempty"`
 
 	// DatastoreCluster is the datastore cluster used for VM disks. It maps to
@@ -72,6 +74,7 @@ type VspherePlacementSpec struct {
 	// It maps to the static module's vsphere_iso_datastore input.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="isoDatastore is immutable"
 	ISODatastore string `json:"isoDatastore"`
 
 	// ResourcePool is the vSphere resource pool path, for example
@@ -83,6 +86,7 @@ type VspherePlacementSpec struct {
 	// Folder is the VM folder path. When empty, the operator uses the hosted
 	// cluster name.
 	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="folder is immutable"
 	// +optional
 	Folder string `json:"folder,omitempty"`
 
@@ -130,8 +134,10 @@ type VspherePlacementSpec struct {
 
 // VMTemplateSpec describes the VM hardware profile.
 type VMTemplateSpec struct {
-	// NamePrefix prefixes operator-created VM names. When empty, the operator
-	// uses <hostedCluster>-<agent.role>.
+	// NamePrefix is retained for API compatibility but is ignored. VM names are
+	// pinned to AgentMachine names so each discovered Agent can satisfy only its
+	// intended AgentMachine.
+	// Deprecated: VM names are derived from AgentMachine names.
 	// +kubebuilder:validation:MaxLength=58
 	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +optional
@@ -205,8 +211,8 @@ type ISOCacheSpec struct {
 	PathPrefix string `json:"pathPrefix,omitempty"`
 }
 
-// CleanupPolicy controls whether the operator deletes external inventory when
-// demand disappears or the VsphereAgentPool is deleted.
+// CleanupPolicy controls whether the operator deletes its managed external
+// inventory when demand disappears or the VsphereAgentPool is deleted.
 // +kubebuilder:validation:Enum=Delete;Retain
 type CleanupPolicy string
 
@@ -223,13 +229,16 @@ const (
 // VsphereAgentPoolSpec defines the desired state of VsphereAgentPool.
 type VsphereAgentPoolSpec struct {
 	// HostedClusterRef references the Hypershift HostedCluster this pool serves.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="hostedClusterRef is immutable"
 	HostedClusterRef LocalObjectReference `json:"hostedClusterRef"`
 
 	// NodePoolRef references the Hypershift NodePool this bridge follows.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="nodePoolRef is immutable"
 	NodePoolRef LocalObjectReference `json:"nodePoolRef"`
 
 	// InfraEnvRef references the Assisted Installer InfraEnv that exposes the
 	// discovery ISO and labels newly discovered Agents.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="infraEnvRef is immutable"
 	InfraEnvRef LocalObjectReference `json:"infraEnvRef"`
 
 	// ControlPlaneNamespace is the hosted control plane namespace that contains
@@ -238,6 +247,7 @@ type VsphereAgentPoolSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="controlPlaneNamespace is immutable"
 	ControlPlaneNamespace string `json:"controlPlaneNamespace"`
 
 	// VSphere configures placement and VM platform settings.
@@ -253,8 +263,8 @@ type VsphereAgentPoolSpec struct {
 	// +optional
 	ISO ISOCacheSpec `json:"iso,omitempty"`
 
-	// CleanupPolicy controls whether stale vSphere VMs and unbound Assisted
-	// Installer Agents are deleted by the operator. Use Retain for conservative
+	// CleanupPolicy controls whether stale operator-managed vSphere VMs and their
+	// unbound Assisted Installer Agents are deleted. Use Retain for conservative
 	// production rollouts where external inventory cleanup is handled manually.
 	// +kubebuilder:default=Delete
 	// +optional
@@ -265,6 +275,18 @@ type VsphereAgentPoolSpec struct {
 type OwnedVMStatus struct {
 	// Name is the vSphere VM name.
 	Name string `json:"name"`
+
+	// OwnerUID is the Kubernetes VsphereAgent UID recorded in the vSphere VM
+	// annotation. It prevents name collisions from being adopted or deleted.
+	// +optional
+	OwnerUID string `json:"ownerUID,omitempty"`
+
+	// Source identifies whether this VM is backed by a VsphereAgent or was only
+	// observed through an Assisted Installer Agent. Discovered-only VMs are not
+	// eligible for automatic external cleanup.
+	// +kubebuilder:validation:Enum=VsphereAgent;DiscoveredAgent
+	// +optional
+	Source string `json:"source,omitempty"`
 
 	// BIOSUUID is the VM BIOS UUID when known.
 	// +optional
@@ -330,7 +352,8 @@ type ISOCacheHistoryEntry struct {
 
 // ISOCacheStatus records the active cached InfraEnv discovery ISO.
 type ISOCacheStatus struct {
-	// URL is the InfraEnv status.isoDownloadURL used for the last check.
+	// URL is the redacted InfraEnv status.isoDownloadURL used for the last check.
+	// User information, query parameters, and fragments are never persisted.
 	// +optional
 	URL string `json:"url,omitempty"`
 

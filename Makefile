@@ -3,7 +3,7 @@
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.3)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.3)
-VERSION ?= 1.0.2
+VERSION ?= 1.1.0
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -74,11 +74,14 @@ VCSIM_VERSIONED := $(VCSIM)-$(GOVC_VERSION)
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
+ENVTEST_VERSION ?= v0.24.1
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.34.1
 UNAME := $(shell uname -s | tr '[:upper:]' '[:lower:]')
-KIND_BINARY := kind-$(UNAME)-amd64
+UNAME_ARCH := $(shell uname -m)
+KIND_ARCH := $(if $(filter arm64 aarch64,$(UNAME_ARCH)),arm64,amd64)
+KIND_BINARY := kind-$(UNAME)-$(KIND_ARCH)
 KIND = $(LOCALBIN)/kind
 KIND_VERSION ?= 0.32.0
 KIND_CLUSTER_NAME ?= agent-forge-operator-test
@@ -140,8 +143,23 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet envtest ## Run tests.
+test: verify-govc-version manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+
+.PHONY: verify-govc-version
+verify-govc-version: ## Verify all shipped govc version pins match.
+	@set -e; \
+	expected="$(GOVC_VERSION)"; \
+	dockerfile=$$(awk -F= '/^ARG GOVC_VERSION=/{print $$2; exit}' Dockerfile); \
+	goreleaser_dockerfile=$$(awk -F= '/^ARG GOVC_VERSION=/{print $$2; exit}' Dockerfile.goreleaser); \
+	goreleaser=$$(awk '/GOVC_VERSION:/{print $$2; exit}' .goreleaser.yaml); \
+	for pin in "Dockerfile=$$dockerfile" "Dockerfile.goreleaser=$$goreleaser_dockerfile" ".goreleaser.yaml=$$goreleaser"; do \
+		file=$${pin%%=*}; value=$${pin#*=}; \
+		if [ "$$value" != "$$expected" ]; then \
+			echo "$$file pins GOVC_VERSION=$$value, want $$expected" >&2; \
+			exit 1; \
+		fi; \
+	done
 
 .PHONY: test-vcsim
 test-vcsim: govc vcsim ## Run govc provider tests against govmomi vcsim.
@@ -220,14 +238,14 @@ docker-push: ## Push docker image with the manager.
 # - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name project-v3-builder
 	$(CONTAINER_TOOL) buildx use project-v3-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm project-v3-builder
 	rm Dockerfile.cross
 
@@ -280,9 +298,10 @@ gen-crd-api-reference-docs: ## Download gen-crd-api-reference-docs locally if ne
 	test -s $(GEN_CRD_API_REFERENCE_DOCS) || GOBIN=$(LOCALBIN) go install github.com/ahmetb/gen-crd-api-reference-docs@$(GEN_API_REF_DOCS_VERSION)
 
 .PHONY: envtest
-envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
+envtest: $(ENVTEST) ## Download the pinned setup-envtest version locally if necessary.
 $(ENVTEST): $(LOCALBIN)
-	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	test -s $(LOCALBIN)/setup-envtest && $(LOCALBIN)/setup-envtest version | grep -q $(ENVTEST_VERSION) || \
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
 
 .PHONY: govc
 govc: $(GOVC_VERSIONED) ## Download govc locally if necessary.

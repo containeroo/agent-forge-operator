@@ -22,7 +22,7 @@
     {
       "customType": "regex",
       "managerFilePatterns": ["/^\\.goreleaser\\.yaml$/"],
-      "matchStrings": ["GOVC_VERSION=(?<currentValue>v[^\\s]+)"],
+      "matchStrings": ["GOVC_VERSION:\\s+(?<currentValue>v[^\\s]+)"],
       "depNameTemplate": "vmware/govmomi",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver"
@@ -50,6 +50,14 @@
         "CONTROLLER_TOOLS_VERSION \\?= (?<currentValue>v[^\\s]+)"
       ],
       "depNameTemplate": "kubernetes-sigs/controller-tools",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^Makefile$/"],
+      "matchStrings": ["ENVTEST_VERSION \\?= (?<currentValue>v[^\\s]+)"],
+      "depNameTemplate": "kubernetes-sigs/controller-runtime",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver"
     },

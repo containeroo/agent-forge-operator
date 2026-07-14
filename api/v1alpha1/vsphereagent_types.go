@@ -23,6 +23,7 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 type VsphereAgentSpec struct {
 	// PoolRef references the VsphereAgentPool whose configuration is used to
 	// create and manage this VM.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="poolRef is immutable"
 	PoolRef LocalObjectReference `json:"poolRef"`
 }
 

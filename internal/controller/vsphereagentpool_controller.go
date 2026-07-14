@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -89,13 +90,14 @@ type AgentMachineDemand struct {
 	WithoutAgent int32
 }
 
-// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools/finalizers,verbs=update
-// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=capi-provider.agent-install.openshift.io,resources=agentmachines,verbs=get;list;watch;patch
-// +kubebuilder:rbac:groups=agent-install.openshift.io,resources=infraenvs;agents,verbs=get;list;watch;patch;delete
+// +kubebuilder:rbac:groups=agent-install.openshift.io,resources=infraenvs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agent-install.openshift.io,resources=agents,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
@@ -270,8 +272,8 @@ func (r *VsphereAgentPoolReconciler) listVsphereAgentsForPool(ctx context.Contex
 }
 
 func vsphereAgentBelongsToPool(agent *agentforgev1alpha1.VsphereAgent, poolName string) bool {
-	if agent.Spec.PoolRef.Name == poolName {
-		return true
+	if agent.Spec.PoolRef.Name != "" {
+		return agent.Spec.PoolRef.Name == poolName
 	}
 	return agent.Labels[vsphereAgentPoolNameLabel] == poolName
 }
@@ -312,6 +314,12 @@ func mergeOwnedVMStatuses(previous, current []agentforgev1alpha1.OwnedVMStatus) 
 			vm.MachineRef = previousVM.MachineRef
 			if vm.BIOSUUID == "" {
 				vm.BIOSUUID = previousVM.BIOSUUID
+			}
+			if vm.OwnerUID == "" {
+				vm.OwnerUID = previousVM.OwnerUID
+			}
+			if vm.Source == "" {
+				vm.Source = previousVM.Source
 			}
 			if vm.MACAddress == "" {
 				vm.MACAddress = previousVM.MACAddress
@@ -460,12 +468,18 @@ func (r *VsphereAgentPoolReconciler) ensureISOCache(ctx context.Context, pool *a
 
 	previousPath := pool.Status.ISO.Path
 	previousHistory := append([]agentforgev1alpha1.ISOCacheHistoryEntry(nil), pool.Status.ISO.History...)
+	previousHistory = ensureISOHistoryEntry(previousHistory, agentforgev1alpha1.ISOCacheHistoryEntry{
+		Path:       previousPath,
+		SHA256:     pool.Status.ISO.SHA256,
+		SizeBytes:  pool.Status.ISO.SizeBytes,
+		UploadedAt: pool.Status.ISO.UploadedAt,
+	})
 	uploadedAt := pool.Status.ISO.UploadedAt
 	if result.Uploaded || uploadedAt.IsZero() || result.Path != previousPath {
 		uploadedAt = now
 	}
 
-	pool.Status.ISO.URL = isoDownloadURL
+	pool.Status.ISO.URL = redactedDownloadURL(isoDownloadURL)
 	pool.Status.ISO.Path = result.Path
 	pool.Status.ISO.SHA256 = result.SHA256
 	pool.Status.ISO.SizeBytes = result.SizeBytes
@@ -484,6 +498,9 @@ func (r *VsphereAgentPoolReconciler) ensureISOCache(ctx context.Context, pool *a
 		if err := provider.DeleteISO(ctx, pool, stalePath); err != nil {
 			recordISOOperation("delete", err)
 			r.recordWarning(pool, "ISOPruneFailed", stableErrorMessage(err))
+			if entry, found := findISOHistoryEntry(previousHistory, stalePath); found {
+				pool.Status.ISO.History = ensureISOHistoryEntry(pool.Status.ISO.History, entry)
+			}
 		} else {
 			recordISOOperation("delete", nil)
 		}
@@ -890,43 +907,65 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 }
 
 type agentIdentityLookup struct {
-	byHostname map[string]AgentInfo
-	byName     map[string]AgentInfo
-	byBIOSUUID map[string]AgentInfo
-	byMAC      map[string]AgentInfo
+	byHostname        map[string]AgentInfo
+	byName            map[string]AgentInfo
+	byBIOSUUID        map[string]AgentInfo
+	byMAC             map[string]AgentInfo
+	ambiguousHostname map[string]struct{}
+	ambiguousBIOSUUID map[string]struct{}
+	ambiguousMAC      map[string]struct{}
 }
 
 func newAgentIdentityLookup(agents []AgentInfo) agentIdentityLookup {
 	lookup := agentIdentityLookup{
-		byHostname: map[string]AgentInfo{},
-		byName:     map[string]AgentInfo{},
-		byBIOSUUID: map[string]AgentInfo{},
-		byMAC:      map[string]AgentInfo{},
+		byHostname:        map[string]AgentInfo{},
+		byName:            map[string]AgentInfo{},
+		byBIOSUUID:        map[string]AgentInfo{},
+		byMAC:             map[string]AgentInfo{},
+		ambiguousHostname: map[string]struct{}{},
+		ambiguousBIOSUUID: map[string]struct{}{},
+		ambiguousMAC:      map[string]struct{}{},
 	}
 	for _, agent := range agents {
 		lookup.byName[agent.Name] = agent
 		if hostname := agentObservedHostname(agent); hostname != "" {
-			lookup.byHostname[hostname] = agent
+			addUniqueAgentIdentity(lookup.byHostname, lookup.ambiguousHostname, hostname, agent)
 		}
 		if agent.BIOSUUID != "" {
-			lookup.byBIOSUUID[agent.BIOSUUID] = agent
+			addUniqueAgentIdentity(lookup.byBIOSUUID, lookup.ambiguousBIOSUUID, agent.BIOSUUID, agent)
 		}
 		if agent.MAC != "" {
-			lookup.byMAC[agent.MAC] = agent
+			addUniqueAgentIdentity(lookup.byMAC, lookup.ambiguousMAC, agent.MAC, agent)
 		}
 	}
 	return lookup
 }
 
+func addUniqueAgentIdentity(index map[string]AgentInfo, ambiguous map[string]struct{}, key string, agent AgentInfo) {
+	if _, found := ambiguous[key]; found {
+		return
+	}
+	if existing, found := index[key]; found && existing.Name != agent.Name {
+		delete(index, key)
+		ambiguous[key] = struct{}{}
+		return
+	}
+	index[key] = agent
+}
+
 func (l agentIdentityLookup) match(vm agentforgev1alpha1.OwnedVMStatus) (AgentInfo, bool) {
 	if vm.BIOSUUID != "" {
-		if agent, matched := l.byBIOSUUID[vm.BIOSUUID]; matched {
-			return agent, true
+		if _, ambiguous := l.ambiguousBIOSUUID[vm.BIOSUUID]; !ambiguous {
+			if agent, matched := l.byBIOSUUID[vm.BIOSUUID]; matched {
+				return agent, true
+			}
 		}
 	}
 	if vm.MACAddress != "" {
-		if agent, matched := l.byMAC[vm.MACAddress]; matched {
-			return agent, true
+		if _, ambiguous := l.ambiguousMAC[vm.MACAddress]; !ambiguous {
+			if agent, matched := l.byMAC[vm.MACAddress]; matched {
+				return agent, true
+			}
 		}
 	}
 	if agent, matched := l.matchHostname(vm); matched {
@@ -936,6 +975,9 @@ func (l agentIdentityLookup) match(vm agentforgev1alpha1.OwnedVMStatus) (AgentIn
 }
 
 func (l agentIdentityLookup) matchHostname(vm agentforgev1alpha1.OwnedVMStatus) (AgentInfo, bool) {
+	if _, ambiguous := l.ambiguousHostname[vm.Name]; ambiguous {
+		return AgentInfo{}, false
+	}
 	candidate, exists := l.byHostname[vm.Name]
 	if exists && !vmIdentityConflictsAgent(vm, candidate) {
 		return candidate, true
@@ -955,13 +997,20 @@ func (l agentIdentityLookup) matchAgentRef(vm agentforgev1alpha1.OwnedVMStatus) 
 }
 
 func markOwnedVMWithoutMatchingAgent(vm *agentforgev1alpha1.OwnedVMStatus, now time.Time) {
+	wasOrphaned := vm.Phase == phaseOrphaned
 	hadDiscoveredAgent := vmHadDiscoveredAgent(*vm)
+	previousTransitionTime := vm.LastTransitionTime
 	vm.AgentRef = nil
 	vm.MachineRef = nil
-	if hadDiscoveredAgent {
+	if wasOrphaned {
+		return
+	} else if hadDiscoveredAgent {
 		setOwnedVMPhase(vm, phaseOrphaned, "AgentMissing")
 	} else if ownedVMDiscoveryExpired(*vm, now) {
 		setOwnedVMPhase(vm, phaseOrphaned, "AgentDiscoveryExpired")
+		if !previousTransitionTime.IsZero() {
+			vm.LastTransitionTime = previousTransitionTime
+		}
 	} else {
 		setOwnedVMPhase(vm, phaseProvisioning, reasonAgentNotDiscovered)
 	}
@@ -1098,6 +1147,7 @@ func agentObservedHostname(agent AgentInfo) string {
 func agentOwnedVMStatus(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo, hostname string) agentforgev1alpha1.OwnedVMStatus {
 	vm := agentforgev1alpha1.OwnedVMStatus{
 		Name:               hostname,
+		Source:             vmSourceDiscoveredAgent,
 		MACAddress:         agent.MAC,
 		LastTransitionTime: metav1.Now(),
 	}
@@ -1140,6 +1190,9 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 		labels = map[string]string{}
 	}
 	for key, value := range pool.Spec.Agent.Labels {
+		if key == roleLabelKey || key == agentMachineSelectionLabel || key == agentMachineRefKey {
+			continue
+		}
 		labels[key] = value
 	}
 	labels[roleLabelKey] = pool.Spec.Agent.Role
@@ -1511,7 +1564,7 @@ func isoCacheDue(pool *agentforgev1alpha1.VsphereAgentPool, isoDownloadURL, forc
 	if pool.Status.ISO.Path == "" || pool.Status.ISO.SHA256 == "" {
 		return true
 	}
-	if pool.Status.ISO.URL != "" && pool.Status.ISO.URL != isoDownloadURL {
+	if pool.Status.ISO.URL != "" && pool.Status.ISO.URL != redactedDownloadURL(isoDownloadURL) {
 		return true
 	}
 	if !strings.HasPrefix(pool.Status.ISO.Path, isoPathPrefix(pool)+"/") {
@@ -1546,6 +1599,9 @@ func updatedISOHistory(history []agentforgev1alpha1.ISOCacheHistoryEntry, curren
 		retain = 1
 	}
 	result := []agentforgev1alpha1.ISOCacheHistoryEntry{current}
+	if len(result) >= retain {
+		return result
+	}
 	for _, entry := range history {
 		if entry.Path == "" || entry.Path == current.Path {
 			continue
@@ -1556,6 +1612,25 @@ func updatedISOHistory(history []agentforgev1alpha1.ISOCacheHistoryEntry, curren
 		}
 	}
 	return result
+}
+
+func ensureISOHistoryEntry(history []agentforgev1alpha1.ISOCacheHistoryEntry, entry agentforgev1alpha1.ISOCacheHistoryEntry) []agentforgev1alpha1.ISOCacheHistoryEntry {
+	if entry.Path == "" {
+		return history
+	}
+	if _, found := findISOHistoryEntry(history, entry.Path); found {
+		return history
+	}
+	return append(history, entry)
+}
+
+func findISOHistoryEntry(history []agentforgev1alpha1.ISOCacheHistoryEntry, path string) (agentforgev1alpha1.ISOCacheHistoryEntry, bool) {
+	for _, entry := range history {
+		if entry.Path == path {
+			return entry, true
+		}
+	}
+	return agentforgev1alpha1.ISOCacheHistoryEntry{}, false
 }
 
 func staleISOPaths(history []agentforgev1alpha1.ISOCacheHistoryEntry, previousPath, currentPath string, retain int) []string {
@@ -1623,6 +1698,9 @@ func normalizeVMwareSerialUUID(value string) string {
 	if len(value) != 32 {
 		return ""
 	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return ""
+	}
 	return strings.ToLower(fmt.Sprintf("%s-%s-%s-%s-%s", value[0:8], value[8:12], value[12:16], value[16:20], value[20:32]))
 }
 
@@ -1649,7 +1727,7 @@ func agentPrimaryMAC(agent *unstructured.Unstructured) string {
 func agentCandidateLabels(pool *agentforgev1alpha1.VsphereAgentPool) map[string]string {
 	labels := map[string]string{}
 	for key, value := range pool.Spec.Agent.Labels {
-		if key == roleLabelKey || key == poolLabelKey {
+		if key == roleLabelKey || key == poolLabelKey || key == agentMachineSelectionLabel || key == agentMachineRefKey {
 			continue
 		}
 		labels[key] = value

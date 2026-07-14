@@ -8,9 +8,6 @@ on:
       - master
   workflow_dispatch:
 
-env:
-  KUBERNETES_VERSION: "1.32.0"
-
 jobs:
   tests:
     name: Run Tests

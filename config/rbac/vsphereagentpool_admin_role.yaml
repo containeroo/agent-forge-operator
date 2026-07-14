@@ -17,11 +17,13 @@ rules:
   - agent-forge.containeroo.ch
   resources:
   - vsphereagentpools
+  - vsphereagents
   verbs:
   - '*'
 - apiGroups:
   - agent-forge.containeroo.ch
   resources:
   - vsphereagentpools/status
+  - vsphereagents/status
   verbs:
   - get

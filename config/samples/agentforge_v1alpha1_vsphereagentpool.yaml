@@ -30,7 +30,6 @@ spec:
     networkAdapterType: vmxnet3
     diskEagerlyScrub: false
   template:
-    namePrefix: demo-worker
     numCPUs: 4
     memoryMiB: 16384
     diskGiB: 100

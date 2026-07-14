@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"time"
 
@@ -48,7 +50,7 @@ type VsphereAgentReconciler struct {
 	ProviderFactory VMProviderFactory
 }
 
-// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents,verbs=get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch
@@ -59,8 +61,6 @@ type VsphereAgentReconciler struct {
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 
 func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
 	var agent agentforgev1alpha1.VsphereAgent
 	if err := r.apiReader().Get(ctx, req.NamespacedName, &agent); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -102,30 +102,29 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	vmName := vsphereAgentVMName(&agent)
 	if agent.Status.VM.Name != "" {
-		if vm, found := ownedVMStatusForVsphereAgent(&pool, &agent); found {
-			agent.Status.VM = vm
-		}
-		if agent.Status.VM.BIOSUUID == "" || agent.Status.VM.MACAddress == "" {
-			if vm, err := r.refreshVMIdentity(ctx, &pool, agent.Status.VM); err == nil {
-				agent.Status.VM.BIOSUUID = vm.BIOSUUID
-				agent.Status.VM.MACAddress = vm.MACAddress
-			} else {
-				log.Error(err, "failed to refresh VM identity", "vm", agent.Status.VM.Name)
-			}
-		}
-		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
-			Type:               conditionReady,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: agent.Generation,
-			Reason:             "VMCreated",
-			Message:            "vSphere VM has been created",
-		})
-		return ctrl.Result{RequeueAfter: time.Minute}, r.updateStatus(ctx, &agent)
+		return r.reconcileExistingVM(ctx, &agent, &pool)
 	}
 
 	if agent.Labels[vsphereAgentCreatedForLabel] == vsphereAgentCreatedForAdopted {
 		agent.Status.VM = newOwnedVMStatus(vmName)
 		agent.Status.VM.Reason = reasonVMAdopted
+		vm, err := r.refreshVMIdentity(ctx, &pool, agent.Status.VM, "")
+		if err != nil {
+			meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+				Type:               conditionReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: agent.Generation,
+				Reason:             "AdoptedVMUnavailable",
+				Message:            stableErrorMessage(err),
+			})
+			if statusErr := r.updateStatus(ctx, &agent); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		agent.Status.VM.BIOSUUID = vm.BIOSUUID
+		agent.Status.VM.MACAddress = vm.MACAddress
+		agent.Status.VM.OwnerUID = vm.OwnerUID
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
 			Status:             metav1.ConditionTrue,
@@ -187,7 +186,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	vm, err := provider.CreateVM(ctx, &pool, VMCreateRequest{Name: vmName, ISOPath: isoPath})
+	vm, err := provider.CreateVM(ctx, &pool, VMCreateRequest{Name: vmName, ISOPath: isoPath, OwnerUID: string(agent.UID)})
 	if err != nil {
 		recordVMOperation("create", err)
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
@@ -214,7 +213,63 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{RequeueAfter: time.Minute}, r.updateStatus(ctx, &agent)
 }
 
-func (r *VsphereAgentReconciler) refreshVMIdentity(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) (agentforgev1alpha1.OwnedVMStatus, error) {
+func (r *VsphereAgentReconciler) reconcileExistingVM(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
+	if vm, found := ownedVMStatusForVsphereAgent(pool, agent); found {
+		agent.Status.VM = vm
+	}
+	expectedOwnerUID := ""
+	if agent.Labels[vsphereAgentCreatedForLabel] != vsphereAgentCreatedForAdopted {
+		expectedOwnerUID = string(agent.UID)
+	}
+	vm, err := r.refreshVMIdentity(ctx, pool, agent.Status.VM, expectedOwnerUID)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to refresh VM status", "vm", agent.Status.VM.Name)
+		reason := "VMStatusFailed"
+		message := stableErrorMessage(err)
+		if errors.Is(err, errVMNotFound) {
+			reason = "VMNotFound"
+			message = "vSphere VM no longer exists"
+			if agent.Labels[vsphereAgentCreatedForLabel] != vsphereAgentCreatedForAdopted {
+				agent.Status.VM = agentforgev1alpha1.OwnedVMStatus{}
+			}
+		} else if errors.Is(err, errVMOwnershipMismatch) {
+			reason = "VMOwnershipMismatch"
+			message = "vSphere VM ownership does not match this VsphereAgent"
+		}
+		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+			Type:               conditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: agent.Generation,
+			Reason:             reason,
+			Message:            message,
+		})
+		if statusErr := r.updateStatus(ctx, agent); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	agent.Status.VM.BIOSUUID = vm.BIOSUUID
+	agent.Status.VM.MACAddress = vm.MACAddress
+	if vm.OwnerUID != "" {
+		agent.Status.VM.OwnerUID = vm.OwnerUID
+	}
+	readyReason := "VMCreated"
+	readyMessage := "vSphere VM has been created"
+	if agent.Labels[vsphereAgentCreatedForLabel] == vsphereAgentCreatedForAdopted {
+		readyReason = reasonVMAdopted
+		readyMessage = "vSphere VM has been adopted"
+	}
+	meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+		Type:               conditionReady,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: agent.Generation,
+		Reason:             readyReason,
+		Message:            readyMessage,
+	})
+	return ctrl.Result{RequeueAfter: time.Minute}, r.updateStatus(ctx, agent)
+}
+
+func (r *VsphereAgentReconciler) refreshVMIdentity(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus, expectedOwnerUID string) (agentforgev1alpha1.OwnedVMStatus, error) {
 	if vm.Name == "" {
 		return vm, nil
 	}
@@ -226,11 +281,22 @@ func (r *VsphereAgentReconciler) refreshVMIdentity(ctx context.Context, pool *ag
 	if err != nil {
 		return vm, err
 	}
+	if expectedOwnerUID != "" {
+		if discovered.OwnerUID != "" && discovered.OwnerUID != expectedOwnerUID {
+			return vm, fmt.Errorf("%w: VM %q belongs to another VsphereAgent", errVMOwnershipMismatch, vm.Name)
+		}
+		if vm.OwnerUID != "" && discovered.OwnerUID == "" {
+			return vm, fmt.Errorf("%w: VM %q ownership annotation is missing", errVMOwnershipMismatch, vm.Name)
+		}
+	}
 	if discovered.BIOSUUID != "" {
 		vm.BIOSUUID = discovered.BIOSUUID
 	}
 	if discovered.MACAddress != "" {
 		vm.MACAddress = discovered.MACAddress
+	}
+	if discovered.OwnerUID != "" {
+		vm.OwnerUID = discovered.OwnerUID
 	}
 	return vm, nil
 }
@@ -248,8 +314,13 @@ func ownedVMStatusForVsphereAgent(pool *agentforgev1alpha1.VsphereAgentPool, age
 }
 
 func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
-	if cleanupEnabled(pool) && agent.Status.VM.Name != "" {
-		managedByAnotherAgent, err := r.vmManagedByAnotherVsphereAgent(ctx, agent)
+	vm := agent.Status.VM
+	if vm.Name == "" {
+		vm = newOwnedVMStatus(vsphereAgentVMName(agent))
+		vm.OwnerUID = string(agent.UID)
+	}
+	if cleanupEnabled(pool) && vm.Name != "" {
+		managedByAnotherAgent, err := r.vmManagedByAnotherVsphereAgent(ctx, agent, vm)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -258,7 +329,7 @@ func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *age
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			if err := provider.DeleteVM(ctx, pool, agent.Status.VM); err != nil {
+			if err := provider.DeleteVM(ctx, pool, vm); err != nil {
 				recordVMOperation("delete", err)
 				return ctrl.Result{}, err
 			}
@@ -269,8 +340,8 @@ func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *age
 	return ctrl.Result{}, r.patchFinalizer(ctx, agent)
 }
 
-func (r *VsphereAgentReconciler) vmManagedByAnotherVsphereAgent(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent) (bool, error) {
-	if agent.Status.VM.Name == "" || agent.Spec.PoolRef.Name == "" {
+func (r *VsphereAgentReconciler) vmManagedByAnotherVsphereAgent(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent, vm agentforgev1alpha1.OwnedVMStatus) (bool, error) {
+	if vm.Name == "" || agent.Spec.PoolRef.Name == "" {
 		return false, nil
 	}
 	var list agentforgev1alpha1.VsphereAgentList
@@ -285,10 +356,10 @@ func (r *VsphereAgentReconciler) vmManagedByAnotherVsphereAgent(ctx context.Cont
 		if !vsphereAgentBelongsToPool(other, agent.Spec.PoolRef.Name) {
 			continue
 		}
-		if other.Status.VM.Name == agent.Status.VM.Name {
+		if other.Status.VM.Name == vm.Name || vsphereAgentVMName(other) == vm.Name {
 			return true, nil
 		}
-		if sameVMIdentity(other.Status.VM, agent.Status.VM) && duplicateCanBeDeletedWithoutVMDelete(agent, other) {
+		if sameVMIdentity(other.Status.VM, vm) && duplicateCanBeDeletedWithoutVMDelete(agent, other) {
 			return true, nil
 		}
 	}

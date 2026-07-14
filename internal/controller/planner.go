@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"time"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 )
@@ -152,7 +153,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		actions = append(actions, agentforgev1alpha1.PlannedActionStatus{
 			Type:   actionPatchAgent,
 			Name:   agent.Name,
-			Reason: "Candidate Agent is not approved, named, or assigned to the requested role",
+			Reason: "Candidate Agent metadata does not match the pool",
 		})
 	}
 
@@ -226,7 +227,10 @@ func agentNeedsPatch(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo)
 	if desiredPoolLabel, hasPoolLabel := pool.Spec.Agent.Labels[poolLabelKey]; hasPoolLabel && agent.PoolLabel != desiredPoolLabel {
 		return true
 	}
-	return !agent.Approved || agent.SpecRole != pool.Spec.Agent.Role || agent.RoleLabel != pool.Spec.Agent.Role || agent.Hostname == ""
+	return approveAgents(pool) && !agent.Approved ||
+		agent.SpecRole != pool.Spec.Agent.Role ||
+		agent.RoleLabel != pool.Spec.Agent.Role ||
+		agent.Hostname == ""
 }
 
 func agentNeedsSelectionLabelPatch(agent AgentInfo) bool {
@@ -289,7 +293,7 @@ func deletedMachineTargets(vms []agentforgev1alpha1.OwnedVMStatus, agents []Agen
 	var selectedVMs []agentforgev1alpha1.OwnedVMStatus
 	var selectedAgents []AgentInfo
 	for _, vm := range vms {
-		if vm.Name == "" || vm.Phase != phaseReleased || vm.Reason != reasonMachineDeleted {
+		if vm.Name == "" || !vmEligibleForCleanup(vm) || vm.Phase != phaseReleased || vm.Reason != reasonMachineDeleted {
 			continue
 		}
 		selectedVMs = append(selectedVMs, vm)
@@ -324,7 +328,7 @@ func surplusAvailableDeletionTargets(vms []agentforgev1alpha1.OwnedVMStatus, age
 		if int32(len(selectedVMs)) >= surplus { //nolint:gosec // slice length is bounded by observed Kubernetes objects.
 			break
 		}
-		if vm.Name == "" || vm.Phase != phaseAvailable {
+		if vm.Name == "" || !vmEligibleForCleanup(vm) || vm.Phase != phaseAvailable {
 			continue
 		}
 		if _, exists := selected[vm.Name]; exists {
@@ -363,10 +367,14 @@ func agentDeletionReasonsByName(vms []agentforgev1alpha1.OwnedVMStatus) map[stri
 
 func orphanedDeletionTargets(vms, alreadySelected []agentforgev1alpha1.OwnedVMStatus) []agentforgev1alpha1.OwnedVMStatus {
 	selected := selectedVMNames(alreadySelected)
+	now := time.Now()
 
 	var targets []agentforgev1alpha1.OwnedVMStatus
 	for _, vm := range vms {
-		if vm.Name == "" || vm.Phase != phaseOrphaned {
+		if vm.Name == "" || !vmEligibleForCleanup(vm) || vm.Phase != phaseOrphaned {
+			continue
+		}
+		if !orphanedVMCleanupDue(vm, now) {
 			continue
 		}
 		if _, exists := selected[vm.Name]; exists {
@@ -375,6 +383,17 @@ func orphanedDeletionTargets(vms, alreadySelected []agentforgev1alpha1.OwnedVMSt
 		targets = append(targets, vm)
 	}
 	return targets
+}
+
+func orphanedVMCleanupDue(vm agentforgev1alpha1.OwnedVMStatus, now time.Time) bool {
+	if vm.LastTransitionTime.IsZero() {
+		return true
+	}
+	return !now.Before(vm.LastTransitionTime.Add(orphanedOwnedVMGracePeriod))
+}
+
+func vmEligibleForCleanup(vm agentforgev1alpha1.OwnedVMStatus) bool {
+	return vm.Source != vmSourceDiscoveredAgent
 }
 
 func selectedVMNames(vms []agentforgev1alpha1.OwnedVMStatus) map[string]struct{} {

@@ -21,9 +21,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -41,14 +43,25 @@ import (
 )
 
 const (
-	govcCommandTimeout = 30 * time.Minute
-	isoDownloadTimeout = 30 * time.Minute
+	govcCommandTimeout            = 30 * time.Minute
+	partialVMCleanupTimeout       = 5 * time.Minute
+	isoDownloadTimeout            = 30 * time.Minute
+	maxISODownloadSize      int64 = 10 << 30
+	vmOwnerAnnotationPrefix       = "agent-forge.containeroo.ch/vsphere-agent-uid="
+	vmSourceVsphereAgent          = "VsphereAgent"
+	vmSourceDiscoveredAgent       = "DiscoveredAgent"
+)
+
+var (
+	errVMNotFound          = errors.New("vSphere VM not found")
+	errVMOwnershipMismatch = errors.New("vSphere VM ownership mismatch")
 )
 
 // VMCreateRequest carries per-reconcile VM creation details.
 type VMCreateRequest struct {
-	Name    string
-	ISOPath string
+	Name     string
+	ISOPath  string
+	OwnerUID string
 }
 
 // ISOEnsureRequest carries the current cached ISO identity from status.
@@ -101,6 +114,11 @@ func NewGovcVMProvider(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool
 	if cfg.Insecure == "" {
 		cfg.Insecure = "false"
 	}
+	insecure, err := strconv.ParseBool(cfg.Insecure)
+	if err != nil {
+		return nil, fmt.Errorf("vSphere credentials Secret %s/%s has invalid %q value %q: %w", secret.Namespace, secret.Name, secretKeyInsecure, cfg.Insecure, err)
+	}
+	cfg.Insecure = strconv.FormatBool(insecure)
 	command := os.Getenv("GOVC_PATH")
 	if command == "" {
 		command = "/usr/local/bin/govc"
@@ -128,9 +146,15 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 	if req.ISOPath == "" {
 		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("cached ISO path is empty")
 	}
+	ownerUID := strings.TrimSpace(req.OwnerUID)
+	if ownerUID == "" {
+		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("VsphereAgent owner UID is required")
+	}
+	ownerAnnotation := vmOwnerAnnotationPrefix + ownerUID
 
 	args := []string{
 		"vm.create",
+		"-annotation", ownerAnnotation,
 		"-dc", pool.Spec.VSphere.Datacenter,
 		"-datastore-cluster", pool.Spec.VSphere.DatastoreCluster,
 		"-pool", pool.Spec.VSphere.ResourcePool,
@@ -152,6 +176,13 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 	if err := p.run(ctx, args...); err != nil {
 		if isGovcVMAlreadyExists(err) {
 			created = false
+			existing, statusErr := p.vmDetails(ctx, pool, name)
+			if statusErr != nil {
+				return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("verify existing VM %q ownership: %w", name, statusErr)
+			}
+			if existing.Config.Annotation != ownerAnnotation {
+				return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("refusing to manage existing VM %q: ownership annotation does not match VsphereAgent UID", name)
+			}
 		} else {
 			return agentforgev1alpha1.OwnedVMStatus{}, err
 		}
@@ -162,7 +193,10 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 			return agentforgev1alpha1.OwnedVMStatus{}, cause
 		}
 		vm := newOwnedVMStatus(name)
-		if err := p.DeleteVM(ctx, pool, vm); err != nil {
+		vm.OwnerUID = ownerUID
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partialVMCleanupTimeout)
+		defer cancel()
+		if err := p.DeleteVM(cleanupCtx, pool, vm); err != nil {
 			return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("%w; failed to clean up partially created VM %q: %v", cause, name, err)
 		}
 		return agentforgev1alpha1.OwnedVMStatus{}, cause
@@ -191,7 +225,11 @@ func (p *govcVMProvider) CreateVM(ctx context.Context, pool *agentforgev1alpha1.
 	}
 
 	vm := newOwnedVMStatus(name)
+	vm.OwnerUID = ownerUID
 	if discovered, err := p.VMStatus(ctx, pool, name); err == nil {
+		if discovered.OwnerUID != "" {
+			vm.OwnerUID = discovered.OwnerUID
+		}
 		vm.BIOSUUID = discovered.BIOSUUID
 		vm.MACAddress = discovered.MACAddress
 	} else {
@@ -256,6 +294,9 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 		return ISOEnsureResult{}, err
 	}
 	if err := p.run(ctx, "datastore.upload", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, tmpFile, isoPath); err != nil {
+		if isGovcDatastorePathAlreadyExists(err) {
+			return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: false}, nil
+		}
 		return ISOEnsureResult{}, err
 	}
 	return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: true}, nil
@@ -283,6 +324,30 @@ func (p *govcVMProvider) ensureDatastoreDirectory(ctx context.Context, pool *age
 func (p *govcVMProvider) DeleteVM(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) error {
 	if strings.TrimSpace(vm.Name) == "" {
 		return fmt.Errorf("cannot delete VM with empty name")
+	}
+	if vm.OwnerUID != "" {
+		var discovered govcVirtualMachine
+		var err error
+		if vm.BIOSUUID != "" {
+			discovered, err = p.vmDetailsByUUID(ctx, pool, vm.BIOSUUID)
+			if errors.Is(err, errVMNotFound) {
+				discovered, err = p.vmDetails(ctx, pool, vm.Name)
+			}
+		} else {
+			discovered, err = p.vmDetails(ctx, pool, vm.Name)
+		}
+		if errors.Is(err, errVMNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("verify VM %q ownership before delete: %w", vm.Name, err)
+		}
+		if discovered.Config.Annotation != vmOwnerAnnotationPrefix+vm.OwnerUID {
+			return fmt.Errorf("refusing to delete VM %q: ownership annotation does not match VsphereAgent UID", vm.Name)
+		}
+		if discoveredUUID := normalizeVMwareSerialUUID(discovered.Config.UUID); discoveredUUID != "" {
+			vm.BIOSUUID = discoveredUUID
+		}
 	}
 	if strings.TrimSpace(vm.BIOSUUID) != "" {
 		err := p.run(ctx, "vm.destroy", "-dc", pool.Spec.VSphere.Datacenter, "-vm.uuid", vm.BIOSUUID)
@@ -443,26 +508,34 @@ func isGovcDatastorePathAlreadyExists(err error) bool {
 		strings.Contains(message, "file exists")
 }
 
-func downloadFileWithSHA256(ctx context.Context, url, path string) (string, int64, error) {
+func downloadFileWithSHA256(ctx context.Context, rawURL, path string) (string, int64, error) {
 	downloadCtx, cancel := contextWithDefaultTimeout(ctx, isoDownloadTimeout)
 	defer cancel()
+	safeURL := redactedDownloadURL(rawURL)
 
-	req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", 0, err
+		return "", 0, fmt.Errorf("invalid ISO download URL %q", safeURL)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		if downloadCtx.Err() != nil {
-			return "", 0, fmt.Errorf("download %s failed: %w", url, downloadCtx.Err())
+			return "", 0, fmt.Errorf("download %s failed: %w", safeURL, downloadCtx.Err())
 		}
-		return "", 0, err
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return "", 0, fmt.Errorf("download %s failed: %w", safeURL, err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return "", 0, fmt.Errorf("download %s returned HTTP %d", url, resp.StatusCode)
+		return "", 0, fmt.Errorf("download %s returned HTTP %d", safeURL, resp.StatusCode)
+	}
+	if resp.ContentLength > maxISODownloadSize {
+		return "", 0, fmt.Errorf("download %s is %d bytes, exceeding the %d-byte limit", safeURL, resp.ContentLength, maxISODownloadSize)
 	}
 	out, err := os.Create(path)
 	if err != nil {
@@ -472,19 +545,35 @@ func downloadFileWithSHA256(ctx context.Context, url, path string) (string, int6
 		_ = out.Close()
 	}()
 	hash := sha256.New()
-	sizeBytes, err := io.Copy(io.MultiWriter(out, hash), resp.Body)
+	sizeBytes, err := io.Copy(io.MultiWriter(out, hash), io.LimitReader(resp.Body, maxISODownloadSize+1))
 	if err != nil {
 		if downloadCtx.Err() != nil {
-			return "", 0, fmt.Errorf("download %s failed: %w", url, downloadCtx.Err())
+			return "", 0, fmt.Errorf("download %s failed: %w", safeURL, downloadCtx.Err())
 		}
 		return "", 0, err
 	}
+	if sizeBytes > maxISODownloadSize {
+		return "", 0, fmt.Errorf("download %s exceeds the %d-byte limit", safeURL, maxISODownloadSize)
+	}
 	return hex.EncodeToString(hash.Sum(nil)), sizeBytes, nil
+}
+
+func redactedDownloadURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "<invalid-url>"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func newOwnedVMStatus(name string) agentforgev1alpha1.OwnedVMStatus {
 	return agentforgev1alpha1.OwnedVMStatus{
 		Name:               name,
+		Source:             vmSourceVsphereAgent,
 		Phase:              phaseProvisioning,
 		Reason:             reasonVMCreateRequested,
 		LastTransitionTime: metav1.Now(),
@@ -492,19 +581,14 @@ func newOwnedVMStatus(name string) agentforgev1alpha1.OwnedVMStatus {
 }
 
 func (p *govcVMProvider) VMStatus(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) (agentforgev1alpha1.OwnedVMStatus, error) {
-	output, err := p.runOutput(ctx, "vm.info", "-json", "-dc", pool.Spec.VSphere.Datacenter, "-vm.ipath", vmInventoryPath(pool, name))
+	vm, err := p.vmDetails(ctx, pool, name)
 	if err != nil {
 		return agentforgev1alpha1.OwnedVMStatus{}, err
 	}
-	var info govcVMInfo
-	if err := json.Unmarshal(output, &info); err != nil {
-		return agentforgev1alpha1.OwnedVMStatus{}, err
-	}
-	if len(info.VirtualMachines) == 0 {
-		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("vm.info returned no VM for %s", name)
-	}
-	vm := info.VirtualMachines[0]
 	status := newOwnedVMStatus(name)
+	if strings.HasPrefix(vm.Config.Annotation, vmOwnerAnnotationPrefix) {
+		status.OwnerUID = strings.TrimPrefix(vm.Config.Annotation, vmOwnerAnnotationPrefix)
+	}
 	status.BIOSUUID = normalizeVMwareSerialUUID(vm.Config.UUID)
 	for _, device := range vm.Config.Hardware.Device {
 		if strings.TrimSpace(device.MACAddress) == "" {
@@ -516,6 +600,32 @@ func (p *govcVMProvider) VMStatus(ctx context.Context, pool *agentforgev1alpha1.
 	return status, nil
 }
 
+func (p *govcVMProvider) vmDetails(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) (govcVirtualMachine, error) {
+	return p.vmDetailsWithSelector(ctx, pool, "-vm.ipath", vmInventoryPath(pool, name), name)
+}
+
+func (p *govcVMProvider) vmDetailsByUUID(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, uuid string) (govcVirtualMachine, error) {
+	return p.vmDetailsWithSelector(ctx, pool, "-vm.uuid", uuid, uuid)
+}
+
+func (p *govcVMProvider) vmDetailsWithSelector(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, selector, value, identity string) (govcVirtualMachine, error) {
+	output, err := p.runOutput(ctx, "vm.info", "-json", "-dc", pool.Spec.VSphere.Datacenter, selector, value)
+	if err != nil {
+		if isGovcVMNotFound(err) {
+			return govcVirtualMachine{}, fmt.Errorf("%w: %v", errVMNotFound, err)
+		}
+		return govcVirtualMachine{}, err
+	}
+	var info govcVMInfo
+	if err := json.Unmarshal(output, &info); err != nil {
+		return govcVirtualMachine{}, err
+	}
+	if len(info.VirtualMachines) == 0 {
+		return govcVirtualMachine{}, fmt.Errorf("%w: vm.info returned no VM for %s", errVMNotFound, identity)
+	}
+	return info.VirtualMachines[0], nil
+}
+
 type govcVMInfo struct {
 	VirtualMachines []govcVirtualMachine `json:"virtualMachines"`
 }
@@ -525,8 +635,9 @@ type govcVirtualMachine struct {
 }
 
 type govcVMConfig struct {
-	UUID     string       `json:"uuid"`
-	Hardware govcHardware `json:"hardware"`
+	UUID       string       `json:"uuid"`
+	Annotation string       `json:"annotation"`
+	Hardware   govcHardware `json:"hardware"`
 }
 
 type govcHardware struct {
@@ -560,6 +671,10 @@ func isoPathPrefix(pool *agentforgev1alpha1.VsphereAgentPool) string {
 	prefix := strings.Trim(strings.TrimSpace(pool.Spec.ISO.PathPrefix), "/")
 	if prefix == "" {
 		prefix = fmt.Sprintf("agent-forge/%s/%s", pool.Namespace, pool.Name)
+	}
+	prefix = strings.Trim(path.Clean("/"+prefix), "/")
+	if prefix == "" {
+		return fmt.Sprintf("agent-forge/%s/%s", pool.Namespace, pool.Name)
 	}
 	return prefix
 }

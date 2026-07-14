@@ -17,6 +17,7 @@ rules:
   - agent-forge.containeroo.ch
   resources:
   - vsphereagentpools
+  - vsphereagents
   verbs:
   - get
   - list
@@ -25,5 +26,6 @@ rules:
   - agent-forge.containeroo.ch
   resources:
   - vsphereagentpools/status
+  - vsphereagents/status
   verbs:
   - get

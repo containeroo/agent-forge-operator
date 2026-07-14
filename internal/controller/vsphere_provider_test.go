@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
@@ -40,7 +41,7 @@ exit 0
 	}
 
 	pool := providerTestPool()
-	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err != nil {
+	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso", OwnerUID: "owner-uid"}); err != nil {
 		t.Fatalf("CreateVM returned error: %v", err)
 	}
 
@@ -67,6 +68,9 @@ exit 0
 	}
 	if strings.Contains(createArgs, "-disk.eager") {
 		t.Fatalf("vm.create args = %q, must not pass disk eager flag when diskEagerlyScrub=false", createArgs)
+	}
+	if !strings.Contains(createArgs, "-annotation "+vmOwnerAnnotationPrefix+"owner-uid") {
+		t.Fatalf("vm.create args = %q, want stable VsphereAgent ownership annotation", createArgs)
 	}
 	createFields := strings.Fields(createArgs)
 	vmName := createFields[len(createFields)-1]
@@ -108,7 +112,7 @@ exit 0
 
 	pool := providerTestPool()
 	pool.Spec.VSphere.DiskEagerlyScrub = true
-	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err != nil {
+	if _, err := provider.CreateVM(ctx, pool, VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso", OwnerUID: "owner-uid"}); err != nil {
 		t.Fatalf("CreateVM returned error: %v", err)
 	}
 
@@ -157,7 +161,7 @@ exit 0
 		},
 	}
 
-	vm, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso"})
+	vm, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso", OwnerUID: "owner-uid"})
 	if err != nil {
 		t.Fatalf("CreateVM returned error: %v", err)
 	}
@@ -182,7 +186,7 @@ if [ "$1" = "vm.create" ]; then
 fi
 if [ "$1" = "vm.info" ]; then
   cat <<'JSON'
-{"virtualMachines":[{"config":{"uuid":"423297c6-d72e-28bb-b279-1209c29ab72b","hardware":{"device":[{"macAddress":"00:50:56:aa:bb:cc"}]}}}]}
+	{"virtualMachines":[{"config":{"uuid":"423297c6-d72e-28bb-b279-1209c29ab72b","annotation":"agent-forge.containeroo.ch/vsphere-agent-uid=owner-uid","hardware":{"device":[{"macAddress":"00:50:56:aa:bb:cc"}]}}}]}
 JSON
 fi
 exit 0
@@ -203,8 +207,9 @@ exit 0
 	}
 
 	vm, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{
-		Name:    "demo-worker-ab12",
-		ISOPath: "agent-forge/demo/demo-worker/cached.iso",
+		Name:     "demo-worker-ab12",
+		ISOPath:  "agent-forge/demo/demo-worker/cached.iso",
+		OwnerUID: "owner-uid",
 	})
 	if err != nil {
 		t.Fatalf("CreateVM returned error: %v", err)
@@ -227,6 +232,114 @@ exit 0
 	}
 }
 
+func TestGovcCreateVMRefusesUnownedExistingVM(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "vm.create" ]; then
+  echo "govc: duplicate name" >&2
+  exit 1
+fi
+if [ "$1" = "vm.info" ]; then
+  cat <<'JSON'
+{"virtualMachines":[{"config":{"annotation":"created-by-someone-else","hardware":{"device":[]}}}]}
+JSON
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+
+	provider := &govcVMProvider{command: govcPath, config: govcConfig{}}
+	_, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{
+		Name:     "demo-worker-ab12",
+		ISOPath:  "agent-forge/demo/demo-worker/cached.iso",
+		OwnerUID: "owner-uid",
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to manage existing VM") {
+		t.Fatalf("CreateVM error = %v, want ownership refusal", err)
+	}
+
+	logBytes, readErr := os.ReadFile(commandLog)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logBytes), "vm.change") {
+		t.Fatalf("unowned existing VM was modified; calls:\n%s", logBytes)
+	}
+}
+
+func TestNewGovcVMProviderRejectsInvalidInsecureValue(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "demo", Name: "vsphere"},
+		Data: map[string][]byte{
+			secretKeyServer:   []byte("vcenter.example.invalid"),
+			secretKeyUsername: []byte("user"),
+			secretKeyPassword: []byte("pass"),
+			secretKeyInsecure: []byte("sometimes"),
+		},
+	}
+
+	if _, err := NewGovcVMProvider(context.Background(), providerTestPool(), secret); err == nil || !strings.Contains(err.Error(), "invalid \"insecure\"") {
+		t.Fatalf("NewGovcVMProvider error = %v, want invalid insecure value", err)
+	}
+}
+
+func TestDownloadFileWithSHA256RejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "10737418241")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	_, _, err := downloadFileWithSHA256(context.Background(), server.URL, filepath.Join(t.TempDir(), "discovery.iso"))
+	if err == nil || !strings.Contains(err.Error(), "exceeding the") {
+		t.Fatalf("download error = %v, want size-limit rejection", err)
+	}
+}
+
+func TestDownloadFileWithSHA256RedactsURLCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	rawURL := strings.Replace(server.URL, "http://", "http://user:password@", 1) + "/discovery.iso?token=super-secret"
+	_, _, err := downloadFileWithSHA256(context.Background(), rawURL, filepath.Join(t.TempDir(), "discovery.iso"))
+	if err == nil {
+		t.Fatal("download unexpectedly succeeded")
+	}
+	if strings.Contains(err.Error(), "password") || strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("download error leaked URL credentials: %v", err)
+	}
+	if !strings.Contains(err.Error(), "/discovery.iso") {
+		t.Fatalf("download error = %v, want useful redacted URL path", err)
+	}
+}
+
+func TestISOPathPrefixNormalizesTraversalSegments(t *testing.T) {
+	pool := providerTestPool()
+	pool.Spec.ISO.PathPrefix = "team/cache/../../shared/discovery"
+
+	if got, want := isoPathPrefix(pool), "shared/discovery"; got != want {
+		t.Fatalf("isoPathPrefix = %q, want %q", got, want)
+	}
+}
+
+func TestISOPathPrefixFallsBackWhenNormalizationIsEmpty(t *testing.T) {
+	pool := providerTestPool()
+	pool.Spec.ISO.PathPrefix = ".."
+
+	if got, want := isoPathPrefix(pool), "agent-forge/"+pool.Namespace+"/"+pool.Name; got != want {
+		t.Fatalf("isoPathPrefix = %q, want %q", got, want)
+	}
+}
+
 func TestGovcCreateVMDoesNotAddDuplicateCDROMWhenOneExists(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
@@ -243,7 +356,7 @@ if [ "$1" = "device.ls" ]; then
 fi
 if [ "$1" = "vm.info" ]; then
   cat <<'JSON'
-{"virtualMachines":[{"config":{"uuid":"423297c6-d72e-28bb-b279-1209c29ab72b","hardware":{"device":[{"macAddress":"00:50:56:aa:bb:cc"}]}}}]}
+	{"virtualMachines":[{"config":{"uuid":"423297c6-d72e-28bb-b279-1209c29ab72b","annotation":"agent-forge.containeroo.ch/vsphere-agent-uid=owner-uid","hardware":{"device":[{"macAddress":"00:50:56:aa:bb:cc"}]}}}]}
 JSON
 fi
 exit 0
@@ -264,8 +377,9 @@ exit 0
 	}
 
 	if _, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{
-		Name:    "demo-worker-ab12",
-		ISOPath: "agent-forge/demo/demo-worker/cached.iso",
+		Name:     "demo-worker-ab12",
+		ISOPath:  "agent-forge/demo/demo-worker/cached.iso",
+		OwnerUID: "owner-uid",
 	}); err != nil {
 		t.Fatalf("CreateVM returned error: %v", err)
 	}
@@ -448,6 +562,42 @@ exit 0
 	}
 }
 
+func TestGovcEnsureISOHandlesConcurrentUploadWinner(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+if [ "$1" = "datastore.ls" ]; then
+  echo "govc: file not found" >&2
+  exit 1
+fi
+if [ "$1" = "datastore.upload" ]; then
+  echo "govc: file exists" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	isoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("iso-v1"))
+	}))
+	defer isoServer.Close()
+	provider := &govcVMProvider{command: govcPath, config: govcConfig{}}
+
+	result, err := provider.EnsureISO(ctx, providerTestPool(), ISOEnsureRequest{DownloadURL: isoServer.URL})
+	if err != nil {
+		t.Fatalf("EnsureISO returned error after another upload won the race: %v", err)
+	}
+	if result.Uploaded {
+		t.Fatal("EnsureISO reported an upload even though the content-addressed object already existed")
+	}
+	if result.SHA256 == "" || result.Path == "" {
+		t.Fatalf("EnsureISO result = %#v, want reusable cached object identity", result)
+	}
+}
+
 func TestGovcDeleteVMUsesInventoryPath(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
@@ -497,6 +647,11 @@ if [ "$1" = "device.cdrom.insert" ]; then
   echo "govc: cdrom insert failed" >&2
   exit 1
 fi
+if [ "$1" = "vm.info" ]; then
+  cat <<'JSON'
+{"virtualMachines":[{"config":{"annotation":"agent-forge.containeroo.ch/vsphere-agent-uid=owner-uid","hardware":{"device":[]}}}]}
+JSON
+fi
 exit 0
 `
 	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
@@ -514,7 +669,7 @@ exit 0
 		},
 	}
 
-	if _, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso"}); err == nil {
+	if _, err := provider.CreateVM(ctx, providerTestPool(), VMCreateRequest{Name: "demo-worker-ab12", ISOPath: "agent-forge/demo/demo-worker/cached.iso", OwnerUID: "owner-uid"}); err == nil {
 		t.Fatal("CreateVM succeeded despite cdrom insert failure")
 	}
 	logBytes, err := os.ReadFile(commandLog)
@@ -564,6 +719,84 @@ exit 0
 	args := strings.TrimSpace(string(logBytes))
 	if args != "vm.destroy -dc dc1 -vm.uuid 423297c6-d72e-28bb-b279-1209c29ab72b" {
 		t.Fatalf("vm.destroy args = %q, want BIOS UUID selector", args)
+	}
+}
+
+func TestGovcDeleteVMRefusesOwnershipMismatch(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "vm.info" ]; then
+  cat <<'JSON'
+{"virtualMachines":[{"config":{"uuid":"423297c6-d72e-28bb-b279-1209c29ab72b","annotation":"agent-forge.containeroo.ch/vsphere-agent-uid=another-owner","hardware":{"device":[]}}}]}
+JSON
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+	provider := &govcVMProvider{command: govcPath, config: govcConfig{}}
+	vm := newOwnedVMStatus("demo-worker-ab12")
+	vm.OwnerUID = "owner-uid"
+
+	err := provider.DeleteVM(ctx, providerTestPool(), vm)
+	if err == nil || !strings.Contains(err.Error(), "refusing to delete VM") {
+		t.Fatalf("DeleteVM error = %v, want ownership refusal", err)
+	}
+	logBytes, readErr := os.ReadFile(commandLog)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logBytes), "vm.destroy") {
+		t.Fatalf("ownership-mismatched VM was destroyed; calls:\n%s", logBytes)
+	}
+}
+
+func TestGovcDeleteVMFallsBackToOwnedNameWhenRecordedUUIDIsStale(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	commandLog := filepath.Join(tmpDir, "govc-args.log")
+	govcPath := filepath.Join(tmpDir, "govc")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "vm.info" ] && [ "$5" = "-vm.uuid" ]; then
+  echo "govc: no such VM" >&2
+  exit 1
+fi
+if [ "$1" = "vm.info" ]; then
+  cat <<'JSON'
+{"virtualMachines":[{"config":{"uuid":"423297c6-d72e-28bb-b279-1209c29ab72b","annotation":"agent-forge.containeroo.ch/vsphere-agent-uid=owner-uid","hardware":{"device":[]}}}]}
+JSON
+fi
+exit 0
+`
+	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOVC_ARG_LOG", commandLog)
+	provider := &govcVMProvider{command: govcPath, config: govcConfig{}}
+	vm := newOwnedVMStatus("demo-worker-ab12")
+	vm.OwnerUID = "owner-uid"
+	vm.BIOSUUID = "00000000-0000-0000-0000-000000000000"
+
+	if err := provider.DeleteVM(ctx, providerTestPool(), vm); err != nil {
+		t.Fatalf("DeleteVM returned error: %v", err)
+	}
+	logBytes, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
+	if len(calls) != 3 {
+		t.Fatalf("calls = %#v, want UUID lookup, name lookup, and delete", calls)
+	}
+	if calls[2] != "vm.destroy -dc dc1 -vm.uuid 423297c6-d72e-28bb-b279-1209c29ab72b" {
+		t.Fatalf("delete args = %q, want refreshed BIOS UUID", calls[2])
 	}
 }
 
@@ -664,10 +897,9 @@ func providerTestPool() *agentforgev1alpha1.VsphereAgentPool {
 				SCSIType:           "pvscsi",
 			},
 			Template: agentforgev1alpha1.VMTemplateSpec{
-				NamePrefix: "demo-worker",
-				NumCPUs:    4,
-				MemoryMiB:  16384,
-				DiskGiB:    120,
+				NumCPUs:   4,
+				MemoryMiB: 16384,
+				DiskGiB:   120,
 			},
 			Agent: agentforgev1alpha1.AgentBindingSpec{
 				Role: "worker",

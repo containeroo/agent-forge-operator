@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 )
@@ -155,6 +156,34 @@ func TestBuildPlanPatchesAgentAssociatedWithOwnedVMWithoutDemand(t *testing.T) {
 	}
 }
 
+func TestBuildPlanDoesNotRequireApprovalWhenAutomaticApprovalIsDisabled(t *testing.T) {
+	pool := testPool()
+	disabled := false
+	pool.Spec.Agent.Approve = &disabled
+	agent := AgentInfo{
+		Name:      "candidate-agent",
+		Approved:  false,
+		SpecRole:  pool.Spec.Agent.Role,
+		RoleLabel: pool.Spec.Agent.Role,
+		Hostname:  "worker-1",
+		PoolLabel: pool.Spec.Agent.Labels[poolLabelKey],
+		BIOSUUID:  "worker-bios",
+	}
+
+	plan := buildPlan(pool, PoolSnapshot{
+		MatchingAgents: []AgentInfo{agent},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{{
+			Name:     "worker-1",
+			BIOSUUID: "worker-bios",
+			Phase:    phaseAvailable,
+		}},
+	})
+
+	if len(plan.AgentsToPatch) != 0 {
+		t.Fatalf("AgentsToPatch = %#v, want no approval-only patch when approve=false", plan.AgentsToPatch)
+	}
+}
+
 func TestBuildPlanDeletesOrphanedOwnedVMsWithoutExcessAgents(t *testing.T) {
 	pool := testPool()
 
@@ -186,6 +215,39 @@ func TestBuildPlanDeletesOrphanedOwnedVMsWithoutExcessAgents(t *testing.T) {
 	}
 	if len(plan.Actions) != 2 || plan.Actions[0].Type != actionDeleteVM || plan.Actions[1].Type != actionDeleteVM {
 		t.Fatalf("actions = %#v, want two DeleteVM actions", plan.Actions)
+	}
+}
+
+func TestBuildPlanDefersFreshlyOrphanedVMCleanup(t *testing.T) {
+	pool := testPool()
+	plan := buildPlan(pool, PoolSnapshot{
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{{
+			Name:               "temporarily-missing-agent-vm",
+			Phase:              phaseOrphaned,
+			Reason:             "AgentMissing",
+			LastTransitionTime: metav1.Now(),
+		}},
+	})
+
+	if len(plan.VMsToDelete) != 0 {
+		t.Fatalf("VMsToDelete = %#v, want grace period for freshly missing Agent", plan.VMsToDelete)
+	}
+}
+
+func TestBuildPlanDoesNotDeleteDiscoveredOnlyVM(t *testing.T) {
+	pool := testPool()
+	plan := buildPlan(pool, PoolSnapshot{
+		MatchingAgents: []AgentInfo{{Name: "external-agent", Hostname: "external-vm"}},
+		OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{{
+			Name:     "external-vm",
+			Source:   vmSourceDiscoveredAgent,
+			Phase:    phaseAvailable,
+			AgentRef: testAgentRef("external-agent"),
+		}},
+	})
+
+	if len(plan.VMsToDelete) != 0 || len(plan.AgentsToDelete) != 0 {
+		t.Fatalf("cleanup targets = VMs %#v Agents %#v, want discovered-only inventory retained", plan.VMsToDelete, plan.AgentsToDelete)
 	}
 }
 

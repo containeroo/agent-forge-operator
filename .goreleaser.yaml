@@ -29,7 +29,7 @@ dockers_v2:
       - linux/amd64
       - linux/arm64
     build_args:
-      GOVC_VERSION: v0.54.1
+      GOVC_VERSION: v0.55.1
     flags:
       - --pull
       - --cache-from=type=gha,scope=agent-forge-operator

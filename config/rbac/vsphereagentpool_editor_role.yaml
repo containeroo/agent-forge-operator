@@ -31,3 +31,17 @@ rules:
   - vsphereagentpools/status
   verbs:
   - get
+- apiGroups:
+  - agent-forge.containeroo.ch
+  resources:
+  - vsphereagents
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - agent-forge.containeroo.ch
+  resources:
+  - vsphereagents/status
+  verbs:
+  - get
