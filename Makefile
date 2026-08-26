@@ -83,7 +83,7 @@ UNAME_ARCH := $(shell uname -m)
 KIND_ARCH := $(if $(filter arm64 aarch64,$(UNAME_ARCH)),arm64,amd64)
 KIND_BINARY := kind-$(UNAME)-$(KIND_ARCH)
 KIND = $(LOCALBIN)/kind
-KIND_VERSION ?= 0.32.0
+KIND_VERSION ?= 0.33.0
 KIND_CLUSTER_NAME ?= agent-forge-operator-test
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
