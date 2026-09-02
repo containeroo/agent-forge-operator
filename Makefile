@@ -73,7 +73,7 @@ VCSIM_VERSIONED := $(VCSIM)-$(GOVC_VERSION)
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
-CONTROLLER_TOOLS_VERSION ?= v0.21.0
+CONTROLLER_TOOLS_VERSION ?= v0.22.0
 ENVTEST_VERSION ?= v0.24.1
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
