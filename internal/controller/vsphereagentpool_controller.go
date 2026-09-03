@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"reflect"
 	"regexp"
 	"strings"
@@ -60,6 +61,7 @@ const (
 	apiVersionV1Beta1  = "v1beta1"
 
 	vsphereAgentPoolControlPlaneNamespaceIndex = ".spec.controlPlaneNamespace"
+	vsphereAgentPoolInfraEnvNameIndex          = ".spec.infraEnvRef.name"
 )
 
 var (
@@ -633,11 +635,83 @@ func (r *VsphereAgentPoolReconciler) infraEnvAvailable(ctx context.Context, pool
 		}
 		return false, "", fmt.Sprintf("failed to read InfraEnv: %v", err)
 	}
+	if status, reason, message, found := infraEnvStatusCondition(infraEnv, "ImageCreated"); found && status != string(corev1.ConditionTrue) {
+		detail := fmt.Sprintf("InfraEnv ImageCreated condition is %s", status)
+		if reason != "" {
+			detail += fmt.Sprintf(" (%s)", reason)
+		}
+		if message != "" {
+			detail += ": " + message
+		}
+		return false, "", detail
+	}
 	isoURL, _, _ := unstructured.NestedString(infraEnv.Object, "status", "isoDownloadURL")
 	if isoURL == "" {
 		return false, "", "InfraEnv status.isoDownloadURL is empty"
 	}
+	expectedVersion, _, _ := unstructured.NestedString(infraEnv.Object, "spec", "osImageVersion")
+	if expectedVersion = openshiftMajorMinor(expectedVersion); expectedVersion != "" {
+		if actualVersion := infraEnvStatusImageVersion(infraEnv, isoURL); actualVersion != "" && actualVersion != expectedVersion {
+			return false, "", fmt.Sprintf("InfraEnv discovery image version %s does not match spec.osImageVersion %s", actualVersion, expectedVersion)
+		}
+	}
 	return true, isoURL, "InfraEnv exposes discovery ISO"
+}
+
+func infraEnvStatusCondition(infraEnv *unstructured.Unstructured, conditionType string) (string, string, string, bool) {
+	conditions, _, _ := unstructured.NestedSlice(infraEnv.Object, "status", "conditions")
+	for _, rawCondition := range conditions {
+		condition, ok := rawCondition.(map[string]any)
+		if !ok || condition["type"] != conditionType {
+			continue
+		}
+		status, _ := condition["status"].(string)
+		reason, _ := condition["reason"].(string)
+		message, _ := condition["message"].(string)
+		return status, reason, message, true
+	}
+	return "", "", "", false
+}
+
+var openshiftVersionPattern = regexp.MustCompile(`^(\d+\.\d+)(?:\.\d+)?$`)
+
+func openshiftMajorMinor(version string) string {
+	matches := openshiftVersionPattern.FindStringSubmatch(version)
+	if len(matches) != 2 {
+		return ""
+	}
+	return matches[1]
+}
+
+func infraEnvStatusImageVersion(infraEnv *unstructured.Unstructured, isoURL string) string {
+	artifactURLs := make([]string, 0, 3)
+	artifactURLs = append(artifactURLs, isoURL)
+	for _, field := range []string{"rootfs", "initrd"} {
+		artifactURL, _, _ := unstructured.NestedString(infraEnv.Object, "status", "bootArtifacts", field)
+		artifactURLs = append(artifactURLs, artifactURL)
+	}
+	for _, artifactURL := range artifactURLs {
+		if version := imageURLVersion(artifactURL); version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+func imageURLVersion(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if version := openshiftMajorMinor(parsed.Query().Get("version")); version != "" {
+		return version
+	}
+	for _, segment := range strings.Split(strings.Trim(parsed.Path, "/"), "/") {
+		if version := openshiftMajorMinor(segment); version != "" {
+			return version
+		}
+	}
+	return ""
 }
 
 func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]AgentInfo, error) {
@@ -1775,6 +1849,12 @@ func agentWatchObject() *unstructured.Unstructured {
 	return obj
 }
 
+func infraEnvWatchObject() *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(infraEnvGVK)
+	return obj
+}
+
 func agentChangePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool {
@@ -1976,6 +2056,30 @@ func (r *VsphereAgentPoolReconciler) requestsForAgentChange(ctx context.Context,
 	return reqs
 }
 
+func (r *VsphereAgentPoolReconciler) requestsForInfraEnvChange(ctx context.Context, o client.Object) []reconcile.Request {
+	infraEnv, ok := o.(*unstructured.Unstructured)
+	if !ok {
+		err := fmt.Errorf("expected an unstructured InfraEnv, got %T", o)
+		ctrl.LoggerFrom(ctx).Error(err, "failed to get requests for InfraEnv change")
+		return nil
+	}
+
+	var pools agentforgev1alpha1.VsphereAgentPoolList
+	if err := r.List(ctx, &pools,
+		client.InNamespace(infraEnv.GetNamespace()),
+		client.MatchingFields{vsphereAgentPoolInfraEnvNameIndex: infraEnv.GetName()},
+	); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "failed to list VsphereAgentPools for InfraEnv change")
+		return nil
+	}
+
+	reqs := make([]reconcile.Request, 0, len(pools.Items))
+	for i := range pools.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&pools.Items[i])})
+	}
+	return reqs
+}
+
 func controlPlaneObjectMatchesPool(obj *unstructured.Unstructured, pool *agentforgev1alpha1.VsphereAgentPool) bool {
 	if pool.Spec.ControlPlaneNamespace != obj.GetNamespace() {
 		return false
@@ -1999,6 +2103,16 @@ func (r *VsphereAgentPoolReconciler) SetupWithManager(ctx context.Context, mgr c
 		}); err != nil {
 		return err
 	}
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolInfraEnvNameIndex,
+		func(o client.Object) []string {
+			pool := o.(*agentforgev1alpha1.VsphereAgentPool)
+			if pool.Spec.InfraEnvRef.Name == "" {
+				return nil
+			}
+			return []string{pool.Spec.InfraEnvRef.Name}
+		}); err != nil {
+		return err
+	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentforgev1alpha1.VsphereAgentPool{}, builder.WithPredicates(vsphereAgentPoolChangePredicate())).
@@ -2006,6 +2120,7 @@ func (r *VsphereAgentPoolReconciler) SetupWithManager(ctx context.Context, mgr c
 		Watches(agentMachineWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForControlPlaneObjectChange), builder.WithPredicates(agentMachineChangePredicate())).
 		Watches(machineWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForControlPlaneObjectChange), builder.WithPredicates(machineChangePredicate())).
 		Watches(agentWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForAgentChange), builder.WithPredicates(agentChangePredicate())).
+		Watches(infraEnvWatchObject(), handler.EnqueueRequestsFromMapFunc(r.requestsForInfraEnvChange)).
 		Named("vsphereagentpool").
 		Complete(r)
 }

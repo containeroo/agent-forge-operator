@@ -4,6 +4,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,6 +200,109 @@ func TestReconcileMarksReadyFalseWhenInfraEnvUnavailable(t *testing.T) {
 	infraEnv := findCondition(updated.Status.Conditions, conditionInfraEnvAvailable)
 	if infraEnv == nil || infraEnv.Status != metav1.ConditionFalse {
 		t.Fatalf("InfraEnvAvailable condition = %#v, want False", infraEnv)
+	}
+}
+
+func TestInfraEnvAvailableWaitsForCurrentImage(t *testing.T) {
+	tests := []struct {
+		name            string
+		isoURL          string
+		imageVersion    string
+		conditionStatus string
+		conditionReason string
+		conditionMsg    string
+		wantAvailable   bool
+		wantMessage     string
+	}{
+		{
+			name:            "unsupported image version",
+			imageVersion:    "4.22",
+			conditionStatus: string(corev1.ConditionFalse),
+			conditionReason: "ImageCreationError",
+			conditionMsg:    "No OS image for Openshift version 5.0 and architecture x86_64",
+			wantMessage:     "InfraEnv ImageCreated condition is False (ImageCreationError): No OS image for Openshift version 5.0 and architecture x86_64",
+		},
+		{
+			name:            "stale ISO version",
+			isoURL:          "https://example.invalid/byapikey/token/4.21/x86_64/minimal.iso",
+			imageVersion:    "4.22",
+			conditionStatus: string(corev1.ConditionTrue),
+			conditionReason: "InfraEnvAvailable",
+			wantMessage:     "InfraEnv discovery image version 4.21 does not match spec.osImageVersion 4.22",
+		},
+		{
+			name:            "current ISO version",
+			isoURL:          "https://example.invalid/byapikey/token/4.22/x86_64/minimal.iso",
+			imageVersion:    "4.22",
+			conditionStatus: string(corev1.ConditionTrue),
+			conditionReason: "InfraEnvAvailable",
+			wantAvailable:   true,
+			wantMessage:     "InfraEnv exposes discovery ISO",
+		},
+		{
+			name:            "legacy unversioned URL",
+			isoURL:          "https://example.invalid/downloads/image",
+			imageVersion:    "4.22",
+			conditionStatus: string(corev1.ConditionTrue),
+			conditionReason: "InfraEnvAvailable",
+			wantAvailable:   true,
+			wantMessage:     "InfraEnv exposes discovery ISO",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			infraEnv := testInfraEnv(testNamespace, testInfraEnvName, tt.isoURL)
+			infraEnv.Object["spec"] = map[string]any{"osImageVersion": tt.imageVersion}
+			infraEnv.Object["status"].(map[string]any)["conditions"] = []any{map[string]any{
+				"type":    "ImageCreated",
+				"status":  tt.conditionStatus,
+				"reason":  tt.conditionReason,
+				"message": tt.conditionMsg,
+			}}
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(infraEnv).Build()
+			reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+
+			available, gotURL, message := reconciler.infraEnvAvailable(context.Background(), reconcileTestPool())
+			if available != tt.wantAvailable {
+				t.Fatalf("available = %t, want %t (message %q)", available, tt.wantAvailable, message)
+			}
+			if message != tt.wantMessage {
+				t.Fatalf("message = %q, want %q", message, tt.wantMessage)
+			}
+			if tt.wantAvailable && gotURL != tt.isoURL {
+				t.Fatalf("URL = %q, want %q", gotURL, tt.isoURL)
+			}
+			if !tt.wantAvailable && gotURL != "" {
+				t.Fatalf("URL = %q, want empty while waiting", gotURL)
+			}
+		})
+	}
+}
+
+func TestInfraEnvAvailableUsesBootArtifactVersionForOpaqueISOURL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/downloads/image")
+	infraEnv.Object["spec"] = map[string]any{"osImageVersion": "4.22"}
+	infraEnv.Object["status"].(map[string]any)["bootArtifacts"] = map[string]any{
+		"rootfs": "https://example.invalid/boot-artifacts/rootfs?arch=x86_64&version=4.21",
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(infraEnv).Build()
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+
+	available, _, message := reconciler.infraEnvAvailable(context.Background(), reconcileTestPool())
+	if available {
+		t.Fatal("InfraEnv reported available with stale boot artifacts")
+	}
+	if !strings.Contains(message, "version 4.21 does not match spec.osImageVersion 4.22") {
+		t.Fatalf("message = %q, want version mismatch", message)
 	}
 }
 
@@ -2411,6 +2515,37 @@ func TestRequestsForAgentChangeFindsMatchingPool(t *testing.T) {
 	}
 }
 
+func TestRequestsForInfraEnvChangeFindsReferencingPools(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := reconcileTestPool()
+	otherPool := reconcileTestPool()
+	otherPool.Name = "other-worker"
+	otherPool.Spec.InfraEnvRef.Name = "other-infraenv"
+	otherNamespacePool := reconcileTestPool()
+	otherNamespacePool.Namespace = "other-namespace"
+	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, otherPool, otherNamespacePool).
+		WithIndex(&agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolInfraEnvNameIndex, infraEnvNameIndexFunc).
+		Build()
+
+	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
+	reqs := reconciler.requestsForInfraEnvChange(ctx, infraEnv)
+	if len(reqs) != 1 {
+		t.Fatalf("requests = %#v, want one request", reqs)
+	}
+	if reqs[0].NamespacedName != (types.NamespacedName{Namespace: testNamespace, Name: testNodePool}) {
+		t.Fatalf("request = %s, want demo/demo-worker", reqs[0].NamespacedName)
+	}
+}
+
 func TestAgentChangePredicateWatchesInventoryIdentity(t *testing.T) {
 	oldAgent := testCandidateAgent(testNamespace, "candidate-agent")
 	newAgent := oldAgent.DeepCopy()
@@ -3065,4 +3200,12 @@ func controlPlaneNamespaceIndexFunc(o client.Object) []string {
 		return nil
 	}
 	return []string{pool.Spec.ControlPlaneNamespace}
+}
+
+func infraEnvNameIndexFunc(o client.Object) []string {
+	pool := o.(*agentforgev1alpha1.VsphereAgentPool)
+	if pool.Spec.InfraEnvRef.Name == "" {
+		return nil
+	}
+	return []string{pool.Spec.InfraEnvRef.Name}
 }
