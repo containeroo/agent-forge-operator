@@ -239,3 +239,75 @@ func vcsimProviderTestPool() *agentforgev1alpha1.VsphereAgentPool {
 	pool.Spec.ISO.PathPrefix = "agent-forge/vcsim/demo-worker"
 	return pool
 }
+
+func TestRegressionVcsimStaleUUIDMustNotDeleteReplacement(t *testing.T) {
+	env := startVcsim(t)
+	ctx := context.Background()
+	pool := vcsimProviderTestPool()
+	provider := env.provider()
+	create := func() {
+		env.runGovc(t, "vm.create", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, "-pool", "/DC0/host/DC0_C0/Resources", "-net", pool.Spec.VSphere.Network, "-on=false", "reused-name")
+	}
+	create()
+	old, err := provider.VMStatus(ctx, pool, "reused-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.runGovc(t, "vm.destroy", "-vm.uuid", old.BIOSUUID)
+	create()
+	env.runGovc(t, "vm.change", "-vm", "reused-name", "-uuid", "4139c345-7186-4924-a842-36b69a24159b")
+	replacement, err := provider.VMStatus(ctx, pool, "reused-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.BIOSUUID == replacement.BIOSUUID {
+		t.Fatal("simulator reused UUID; fixture is invalid")
+	}
+	if err := provider.DeleteVM(ctx, pool, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.VMStatus(ctx, pool, "reused-name"); err != nil {
+		t.Fatalf("unrelated replacement VM deleted through stale UUID fallback: %v", err)
+	}
+}
+
+func TestRegressionVcsimRejectsTruncatedCachedISO(t *testing.T) {
+	env := startVcsim(t)
+	ctx := context.Background()
+	pool := vcsimProviderTestPool()
+	provider := env.provider()
+	content := []byte("complete-discovery-image")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(content) }))
+	defer server.Close()
+	full, err := provider.EnsureISO(ctx, pool, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := os.CreateTemp(t.TempDir(), "partial-iso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := partial.Write(content[:3]); err != nil {
+		t.Fatal(err)
+	}
+	if err := partial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	env.runGovc(t, "datastore.upload", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, partial.Name(), full.Path)
+	result, err := provider.EnsureISO(ctx, pool, server.URL)
+	if err != nil {
+		t.Fatalf("could not repair truncated ISO: %v", err)
+	}
+	if !result.Uploaded {
+		t.Fatalf("truncated datastore file accepted as complete cached image: %#v", result)
+	}
+	repairedPath := partial.Name() + "-repaired"
+	env.runGovc(t, "datastore.download", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, result.Path, repairedPath)
+	repaired, err := os.ReadFile(repairedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(repaired, content) {
+		t.Fatalf("published ISO contents = %q, want %q", repaired, content)
+	}
+}

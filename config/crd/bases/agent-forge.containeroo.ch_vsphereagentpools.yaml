@@ -502,6 +502,10 @@ spec:
                       URL is the redacted InfraEnv status.isoDownloadURL used for the last check.
                       User information, query parameters, and fragments are never persisted.
                     type: string
+                  urlHash:
+                    description: URLHash identifies the complete download URL without
+                      exposing credentials.
+                    type: string
                 type: object
               matchingAgents:
                 description: MatchingAgents is the number of Agents matching spec.agent.labels.

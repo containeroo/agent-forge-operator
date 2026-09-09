@@ -286,6 +286,9 @@ func (r *VsphereAgentReconciler) refreshVMIdentity(ctx context.Context, pool *ag
 			return vm, fmt.Errorf("%w: VM %q ownership annotation is missing", errVMOwnershipMismatch, vm.Name)
 		}
 	}
+	if vm.BIOSUUID != "" && discovered.BIOSUUID != "" && vm.BIOSUUID != discovered.BIOSUUID {
+		return vm, fmt.Errorf("%w: VM %q UUID changed", errVMOwnershipMismatch, vm.Name)
+	}
 	if discovered.BIOSUUID != "" {
 		vm.BIOSUUID = discovered.BIOSUUID
 	}
@@ -322,6 +325,9 @@ func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *age
 			return ctrl.Result{}, err
 		}
 		if !managedByAnotherAgent {
+			if err := prepareVMDeletion(ctx, r.Client, r.apiReader(), pool, vm); err != nil {
+				return ctrl.Result{}, err
+			}
 			provider, err := r.provider(ctx, pool)
 			if err != nil {
 				return ctrl.Result{}, err
@@ -331,6 +337,9 @@ func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *age
 				return ctrl.Result{}, err
 			}
 			recordVMOperation("delete", nil)
+			if err := deleteVMAgents(ctx, r.Client, r.apiReader(), pool, vm); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 	controllerutil.RemoveFinalizer(agent, vsphereAgentFinalizerName)
@@ -416,18 +425,19 @@ func (r *VsphereAgentReconciler) updateStatus(ctx context.Context, agent *agentf
 func (r *VsphereAgentReconciler) patchPoolISOStatus(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var current agentforgev1alpha1.VsphereAgentPool
-		if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
+		if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &current); err != nil {
 			return err
+		}
+		// A refresh that started earlier must not overwrite a newer cache result.
+		if pool.Status.ISO.CheckedAt.Before(&current.Status.ISO.CheckedAt) {
+			return nil
 		}
 		before := *current.Status.DeepCopy()
 		current.Status.ISO = pool.Status.ISO
-		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               conditionISOReady,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: current.Generation,
-			Reason:             conditionISOReady,
-			Message:            "InfraEnv discovery ISO is cached for new vSphere VMs",
-		})
+		if condition := meta.FindStatusCondition(pool.Status.Conditions, conditionISOReady); condition != nil {
+			meta.SetStatusCondition(&current.Status.Conditions, *condition)
+		}
+
 		if reflect.DeepEqual(before, current.Status) {
 			return nil
 		}

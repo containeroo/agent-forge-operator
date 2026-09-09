@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"reflect"
@@ -73,8 +74,9 @@ var (
 // VsphereAgentPoolReconciler reconciles a VsphereAgentPool object.
 type VsphereAgentPoolReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Recorder  events.EventRecorder
+	APIReader       client.Reader
+	Recorder        events.EventRecorder
+	ProviderFactory VMProviderFactory
 }
 
 type MachineInfo struct {
@@ -124,7 +126,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.reconcileDelete(ctx, &pool)
 	}
 
-	available, _, infraEnvMessage := infraEnvAvailable(ctx, r.Client, &pool)
+	available, isoURL, infraEnvMessage := infraEnvAvailable(ctx, r.Client, &pool)
 	if !available {
 		r.setStatusError(&pool, reasonInfraEnvUnavailable, infraEnvMessage)
 		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
@@ -204,6 +206,23 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		log.Error(err, "apply plan failed", "retryAfter", 30*time.Second)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+	cache := &VsphereAgentReconciler{Client: r.Client, APIReader: r.apiReader(), Recorder: r.Recorder, ProviderFactory: r.ProviderFactory}
+	if isoCacheDue(&pool, isoURL, pool.Annotations[forceISORefreshAnnotation], time.Now()) {
+		provider, err := cache.provider(ctx, &pool)
+		if err == nil {
+			_, err = cache.ensureISOCache(ctx, &pool, provider, isoURL)
+		}
+		if err != nil {
+			meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+				Type: conditionISOReady, Status: metav1.ConditionFalse, ObservedGeneration: pool.Generation,
+				Reason: "ISORefreshFailed", Message: stableErrorMessage(err),
+			})
+		}
+		if err := cache.patchPoolISOStatus(ctx, &pool); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	plan.PendingOwnedVMs = countPendingOwnedVMs(pool.Status.OwnedVMs)
 
 	r.recordPlan(&pool, plan, "PlanApplied")
@@ -212,7 +231,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{RequeueAfter: time.Minute}, nil
+	return ctrl.Result{RequeueAfter: min(time.Minute, isoCheckInterval(&pool))}, nil
 }
 
 func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
@@ -281,13 +300,11 @@ func (r *VsphereAgentPoolReconciler) listVsphereAgentVMs(ctx context.Context, po
 	vms := make([]agentforgev1alpha1.OwnedVMStatus, 0, len(list.Items))
 	for i := range list.Items {
 		agent := &list.Items[i]
-		if agent.GetDeletionTimestamp() != nil {
-			continue
-		}
 		vm := agent.Status.VM
 		if vm.Name == "" {
 			vm = newOwnedVMStatus(vsphereAgentVMName(agent))
 			vm.Reason = "VMCreatePending"
+			vm.OwnerUID = string(agent.UID)
 		}
 		vms = append(vms, vm)
 	}
@@ -302,6 +319,11 @@ func mergeOwnedVMStatuses(previous, current []agentforgev1alpha1.OwnedVMStatus) 
 	merged := make([]agentforgev1alpha1.OwnedVMStatus, 0, len(current))
 	for _, vm := range current {
 		if previousVM, ok := lookup.match(vm); ok {
+			if (vm.OwnerUID != "" && previousVM.OwnerUID != "" && vm.OwnerUID != previousVM.OwnerUID) ||
+				(vm.BIOSUUID != "" && previousVM.BIOSUUID != "" && vm.BIOSUUID != previousVM.BIOSUUID) {
+				merged = append(merged, vm)
+				continue
+			}
 			vm.Phase = previousVM.Phase
 			vm.Reason = previousVM.Reason
 			vm.LastTransitionTime = previousVM.LastTransitionTime
@@ -389,37 +411,16 @@ func (r *VsphereAgentPoolReconciler) applyPlan(ctx context.Context, pool *agentf
 		}
 	}
 
-	if len(plan.VMsToDelete) > 0 {
-		agentsToDelete := agentDeleteSet(plan.AgentsToDelete)
-		deletedAgents := map[string]struct{}{}
-		for _, vm := range plan.VMsToDelete {
-			agentName := ownedVMAgentName(vm)
-			if _, shouldDeleteAgent := agentsToDelete[agentName]; shouldDeleteAgent {
-				safe, blocker, err := r.agentCanBeDeleted(ctx, pool, agentName)
-				if err != nil {
-					return err
-				}
-				if !safe {
-					r.recordNormal(pool, "AgentDeleteDeferred", fmt.Sprintf("waiting to delete Agent %s/%s: %s", pool.Namespace, agentName, blocker))
-					continue
-				}
-			}
-			if err := r.deleteVsphereAgentForVM(ctx, pool, vm); err != nil {
+	for _, vm := range plan.VMsToDelete {
+		if err := prepareVMDeletion(ctx, r.Client, r.apiReader(), pool, vm); err != nil {
+			if !errors.Is(err, errVMDeletionBlocked) {
 				return err
 			}
-			pool.Status.OwnedVMs = removeOwnedVM(pool.Status.OwnedVMs, vm.Name)
-			if _, shouldDeleteAgent := agentsToDelete[agentName]; shouldDeleteAgent {
-				if err := r.deleteAgent(ctx, pool, agentName); err != nil {
-					return err
-				}
-				deletedAgents[agentName] = struct{}{}
-			}
+			r.recordNormal(pool, "AgentDeleteDeferred", err.Error())
+			continue
 		}
-		for _, agent := range plan.AgentsToDelete {
-			if _, deleted := deletedAgents[agent.Name]; deleted {
-				continue
-			}
-			r.recordNormal(pool, "AgentDeleteDeferred", fmt.Sprintf("waiting to delete Agent %s/%s until its VM is selected and deleted", pool.Namespace, agent.Name))
+		if err := r.deleteVsphereAgentForVM(ctx, pool, vm); err != nil {
+			return err
 		}
 	}
 
@@ -612,20 +613,14 @@ func imageURLVersion(rawURL string) string {
 func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) ([]AgentInfo, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(agentGVK)
-	listOpts := []client.ListOption{client.InNamespace(pool.Namespace)}
-	if labels := agentCandidateLabels(pool); len(labels) > 0 {
-		listOpts = append(listOpts, client.MatchingLabels(labels))
-	}
-	if err := r.List(ctx, list, listOpts...); err != nil {
+	if err := r.List(ctx, list, client.InNamespace(pool.Namespace)); err != nil {
 		return nil, err
 	}
 
 	agents := make([]AgentInfo, 0, len(list.Items))
 	for i := range list.Items {
 		obj := &list.Items[i]
-		if !agentBelongsToInfraEnv(obj, pool.Spec.InfraEnvRef.Name) {
-			continue
-		}
+
 		labels := obj.GetLabels()
 		approved, _, _ := unstructured.NestedBool(obj.Object, "spec", "approved")
 		specRole, _, _ := unstructured.NestedString(obj.Object, "spec", "role")
@@ -633,13 +628,28 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 		inventoryHostname, _, _ := unstructured.NestedString(obj.Object, "status", "inventory", "hostname")
 		serialNumber, _, _ := unstructured.NestedString(obj.Object, "status", "inventory", "systemVendor", "serialNumber")
 		clusterName, _, _ := unstructured.NestedString(obj.Object, "spec", "clusterDeploymentName", "name")
-		if clusterName != "" && clusterName != pool.Spec.HostedClusterRef.Name {
-			continue
+
+		machineName := ""
+		if ref := labels[agentMachineRefKey]; ref != "" {
+			am := agentMachineWatchObject()
+			ns := obj.GetAnnotations()["agentMachineRefNamespace"]
+			if ns == "" {
+				ns = pool.Spec.ControlPlaneNamespace
+			}
+			if err := r.apiReader().Get(ctx, client.ObjectKey{Namespace: ns, Name: ref}, am); err != nil && !apierrors.IsNotFound(err) {
+				return nil, err
+			}
+			for _, owner := range am.GetOwnerReferences() {
+				if owner.Kind == "Machine" && strings.HasPrefix(owner.APIVersion, "cluster.x-k8s.io/") {
+					machineName = owner.Name
+					break
+				}
+			}
 		}
-		machineName := labels[agentMachineRefKey]
 		agent := AgentInfo{
 			Name:              obj.GetName(),
-			Bound:             machineName != "" || clusterName != "",
+			Bound:             labels[agentMachineRefKey] != "" || clusterName != "",
+			Deleting:          obj.GetAnnotations()[agentCleanupAnnotation] != "",
 			MachineName:       machineName,
 			Approved:          approved,
 			SpecRole:          specRole,
@@ -651,8 +661,21 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 			MAC:               normalizeMAC(agentPrimaryMAC(obj)),
 			BIOSUUID:          normalizeVMwareSerialUUID(serialNumber),
 		}
-		if !agentMatchesPoolDiscriminator(pool, agent) {
-			continue
+		owned := agentAssociatedWithOwnedVM(pool.Status.OwnedVMs, agent)
+		if !owned {
+			if !agentBelongsToInfraEnv(obj, pool.Spec.InfraEnvRef.Name) || (clusterName != "" && clusterName != pool.Spec.HostedClusterRef.Name) || !agentMatchesPoolDiscriminator(pool, agent) {
+				continue
+			}
+			matches := true
+			for key, value := range agentCandidateLabels(pool) {
+				if labels[key] != value {
+					matches = false
+					break
+				}
+			}
+			if !matches {
+				continue
+			}
 		}
 		agents = append(agents, agent)
 	}
@@ -837,6 +860,13 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		}
 		agent, matched := agentLookup.match(vm)
 		if !matched {
+			if machine, exists := machineStates[objectReferenceName(vm.MachineRef)]; exists {
+				if machine.Deleting {
+					setOwnedVMPhase(&vm, phaseReleased, reasonMachineDeleting)
+				}
+				vms = append(vms, vm)
+				continue
+			}
 			markOwnedVMWithoutMatchingAgent(&vm, now)
 			vms = append(vms, vm)
 			continue
@@ -969,8 +999,6 @@ func markOwnedVMWithoutMatchingAgent(vm *agentforgev1alpha1.OwnedVMStatus, now t
 	wasOrphaned := vm.Phase == phaseOrphaned
 	hadDiscoveredAgent := vmHadDiscoveredAgent(*vm)
 	previousTransitionTime := vm.LastTransitionTime
-	vm.AgentRef = nil
-	vm.MachineRef = nil
 	if wasOrphaned {
 		return
 	} else if hadDiscoveredAgent {
@@ -1069,16 +1097,6 @@ func ownedVMAgentName(vm agentforgev1alpha1.OwnedVMStatus) string {
 	return vm.AgentRef.Name
 }
 
-func agentDeleteSet(agents []AgentInfo) map[string]struct{} {
-	result := map[string]struct{}{}
-	for _, agent := range agents {
-		if agent.Name != "" {
-			result[agent.Name] = struct{}{}
-		}
-	}
-	return result
-}
-
 func agentObjectReference(pool *agentforgev1alpha1.VsphereAgentPool, name string) *corev1.ObjectReference {
 	return &corev1.ObjectReference{
 		APIVersion: agentGVK.GroupVersion().String(),
@@ -1149,8 +1167,11 @@ func applyAgentToOwnedVMStatus(pool *agentforgev1alpha1.VsphereAgentPool, vm *ag
 func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name, hostname string) error {
 	agent := &unstructured.Unstructured{}
 	agent.SetGroupVersionKind(agentGVK)
-	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, agent); err != nil {
+	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, agent); err != nil {
 		return err
+	}
+	if agent.GetAnnotations()[agentCleanupAnnotation] != "" || agentDeletionBlocker(agent) != "" {
+		return nil
 	}
 	before := agent.DeepCopy()
 
@@ -1184,49 +1205,7 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 		}
 	}
 
-	return r.Patch(ctx, agent, client.MergeFrom(before))
-}
-
-func (r *VsphereAgentPoolReconciler) deleteAgent(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) error {
-	agent := &unstructured.Unstructured{}
-	agent.SetGroupVersionKind(agentGVK)
-	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, agent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	if blocker := agentDeletionBlocker(agent); blocker != "" {
-		return fmt.Errorf("refusing to delete Agent %s/%s: %s", pool.Namespace, name, blocker)
-	}
-	if err := r.Delete(ctx, agent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	if r.Recorder != nil {
-		recordEventf(r.Recorder, pool, corev1.EventTypeNormal, "AgentDeleted", "deleted stale unbound Agent %s", name)
-	}
-	return nil
-}
-
-func (r *VsphereAgentPoolReconciler) agentCanBeDeleted(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name string) (bool, string, error) {
-	if name == "" {
-		return true, "", nil
-	}
-	agent := &unstructured.Unstructured{}
-	agent.SetGroupVersionKind(agentGVK)
-	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, agent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, "", nil
-		}
-		return false, "", err
-	}
-	if blocker := agentDeletionBlocker(agent); blocker != "" {
-		return false, blocker, nil
-	}
-	return true, "", nil
+	return r.Patch(ctx, agent, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
 func agentDeletionBlocker(agent *unstructured.Unstructured) string {
@@ -1312,8 +1291,7 @@ func isPoolReconcileCondition(conditionType string) bool {
 		conditionAgentMachineDemand,
 		conditionInfraEnvAvailable,
 		conditionCapacitySatisfied,
-		conditionVsphereReady,
-		conditionISOReady:
+		conditionVsphereReady:
 		return true
 	default:
 		return false
@@ -1527,7 +1505,7 @@ func isoCacheDue(pool *agentforgev1alpha1.VsphereAgentPool, isoDownloadURL, forc
 	if pool.Status.ISO.Path == "" || pool.Status.ISO.SHA256 == "" {
 		return true
 	}
-	if pool.Status.ISO.URL != "" && pool.Status.ISO.URL != redactedDownloadURL(isoDownloadURL) {
+	if pool.Status.ISO.URLHash != downloadURLHash(isoDownloadURL) {
 		return true
 	}
 	if !strings.HasPrefix(pool.Status.ISO.Path, isoPathPrefix(pool)+"/") {
@@ -1708,16 +1686,6 @@ func agentBelongsToInfraEnv(agent *unstructured.Unstructured, infraEnvName strin
 		}
 	}
 	return false
-}
-
-func removeOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, name string) []agentforgev1alpha1.OwnedVMStatus {
-	result := vms[:0]
-	for _, vm := range vms {
-		if vm.Name != name {
-			result = append(result, vm)
-		}
-	}
-	return result
 }
 
 func agentMachineWatchObject() *unstructured.Unstructured {

@@ -362,7 +362,7 @@ func TestBuildPlanDoesNotDeleteUnboundAgentsDuringScaleUp(t *testing.T) {
 	}
 }
 
-func TestBuildPlanDoesNotDeleteOrphanedVMsDuringScaleUp(t *testing.T) {
+func TestBuildPlanRecoversOrphanedVMsDuringScaleUp(t *testing.T) {
 	pool := testPool()
 
 	plan := buildPlan(pool, PoolSnapshot{
@@ -377,8 +377,8 @@ func TestBuildPlanDoesNotDeleteOrphanedVMsDuringScaleUp(t *testing.T) {
 		},
 	})
 
-	if len(plan.VMsToDelete) != 0 {
-		t.Fatalf("VMsToDelete = %#v, want no orphan cleanup while Machine is still scaling up", plan.VMsToDelete)
+	if len(plan.VMsToDelete) != 1 || plan.VMsToDelete[0].Name != "orphaned-vm" {
+		t.Fatalf("VMsToDelete = %#v, want expired orphan cleanup during scale up", plan.VMsToDelete)
 	}
 }
 

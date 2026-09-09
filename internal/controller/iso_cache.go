@@ -55,6 +55,7 @@ func (r *VsphereAgentReconciler) ensureISOCache(ctx context.Context, pool *agent
 	}
 
 	pool.Status.ISO.URL = redactedDownloadURL(isoDownloadURL)
+	pool.Status.ISO.URLHash = downloadURLHash(isoDownloadURL)
 	pool.Status.ISO.Path = result.Path
 	pool.Status.ISO.SHA256 = result.SHA256
 	pool.Status.ISO.SizeBytes = result.SizeBytes

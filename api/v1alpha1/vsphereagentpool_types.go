@@ -357,6 +357,10 @@ type ISOCacheStatus struct {
 	// +optional
 	URL string `json:"url,omitempty"`
 
+	// URLHash identifies the complete download URL without exposing credentials.
+	// +optional
+	URLHash string `json:"urlHash,omitempty"`
+
 	// Path is the datastore path inserted into newly created VMs.
 	// +optional
 	Path string `json:"path,omitempty"`

@@ -19,6 +19,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
@@ -1560,10 +1561,11 @@ func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
 		newOwnedVMStatus("demo-worker-ab12"),
 	}
-	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+	am := testAgentMachine(testControlPlaneNamespace, "demo-worker-ab12-machine", "demo/demo-worker")
 	machine := testMachine(testControlPlaneNamespace, "demo-worker-ab12-machine", "demo/demo-worker", false)
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
 	agent := testAgent(testNamespace, "demo-worker-ab12", true, true)
+	am.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "cluster.x-k8s.io/v1beta1", Kind: "Machine", Name: machine.GetName()}})
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1596,7 +1598,7 @@ func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 		t.Fatalf("agentRef = %#v, want bound Agent ref", vm.AgentRef)
 	}
 	if vm.MachineRef == nil || vm.MachineRef.Name != agent.GetName()+"-machine" || vm.MachineRef.Namespace != testControlPlaneNamespace {
-		t.Fatalf("machineRef = %#v, want AgentMachine ref in control plane namespace", vm.MachineRef)
+		t.Fatalf("machineRef = %#v, want Machine ref in control plane namespace", vm.MachineRef)
 	}
 }
 
@@ -1756,8 +1758,8 @@ func TestRefreshOwnedVMStatusesMarksMissingDiscoveredAgentOrphaned(t *testing.T)
 	if vms[0].Phase != phaseOrphaned || vms[0].Reason != "AgentMissing" {
 		t.Fatalf("VM phase/reason = %s/%s, want Orphaned/AgentMissing", vms[0].Phase, vms[0].Reason)
 	}
-	if vms[0].AgentRef != nil {
-		t.Fatalf("agentRef = %#v, want nil after Agent disappeared", vms[0].AgentRef)
+	if vms[0].AgentRef == nil || vms[0].AgentRef.Name != "missing-agent" {
+		t.Fatalf("agentRef = %#v, want original identity retained for deletion checks", vms[0].AgentRef)
 	}
 }
 
@@ -2578,6 +2580,7 @@ func TestISOCacheDueDetectsStableURLIntervalAndForceRefresh(t *testing.T) {
 		ForceRefreshToken: "old",
 	}
 
+	pool.Status.ISO.URLHash = downloadURLHash(pool.Status.ISO.URL)
 	if isoCacheDue(pool, pool.Status.ISO.URL, "", now) {
 		t.Fatal("cache was due before check interval elapsed")
 	}
@@ -2899,6 +2902,7 @@ type fakeVMProvider struct {
 	vmStatusErr      error
 	vmStatusOwnerUID string
 	deleteISOErr     error
+	deleteVMErr      error
 }
 
 func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (ISOEnsureResult, error) {
@@ -2934,7 +2938,7 @@ func (p *fakeVMProvider) DeleteVM(_ context.Context, _ *agentforgev1alpha1.Vsphe
 	p.deleteVMCalls++
 	p.deletedVMNames = append(p.deletedVMNames, vm.Name)
 	p.deletedVMs = append(p.deletedVMs, vm)
-	return nil
+	return p.deleteVMErr
 }
 
 func (p *fakeVMProvider) DeleteISO(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, path string) error {
@@ -3133,4 +3137,401 @@ func infraEnvNameIndexFunc(o client.Object) []string {
 		return nil
 	}
 	return []string{pool.Spec.InfraEnvRef.Name}
+}
+
+func TestRegressionLabelDriftMustNotDeleteLiveWorker(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileTestPool()
+	vm := newOwnedVMStatus("live-worker")
+	vm.Phase = phaseBound
+	vm.AgentRef = agentObjectReference(pool, "live-worker")
+	vm.MachineRef = machineObjectReference(pool, "live-worker-machine")
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{vm}
+	pool.Spec.Agent.Labels[testCustomerKey] = "new-customer"
+	va := testVsphereAgentForVM(pool, vm)
+	va.Finalizers = []string{vsphereAgentFinalizerName}
+	agent := testAgent(pool.Namespace, "live-worker", true, true)
+	machine := testMachine(testControlPlaneNamespace, "live-worker-machine", "demo/demo-worker", false)
+	am := testReadyAgentMachine(testControlPlaneNamespace, "live-worker-machine", "demo/demo-worker")
+	infra := testInfraEnv(pool.Namespace, testInfraEnvName, "https://example.invalid/iso")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, va, agent, machine, am, infra).WithStatusSubresource(pool, va).Build()
+	r := &VsphereAgentPoolReconciler{Client: c}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	var updated agentforgev1alpha1.VsphereAgentPool
+	if err := c.Get(ctx, req.NamespacedName, &updated); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("live worker after label change: %#v", updated.Status.OwnedVMs)
+	if len(updated.Status.OwnedVMs) != 1 {
+		t.Fatal("missing inventory")
+	}
+	updated.Status.OwnedVMs[0].LastTransitionTime = metav1.NewTime(time.Now().Add(-time.Hour))
+	if err := c.Status().Update(ctx, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	var remaining agentforgev1alpha1.VsphereAgent
+	if err := c.Get(ctx, client.ObjectKeyFromObject(va), &remaining); err != nil {
+		t.Fatal(err)
+	}
+	if !remaining.DeletionTimestamp.IsZero() {
+		t.Fatal("live worker selected for VM deletion solely because its Agent no longer matches pool labels")
+	}
+}
+
+func TestRegressionExpiredDiscoveryNeedsRecovery(t *testing.T) {
+	pool := reconcileTestPool()
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{{Name: "stuck-worker", Source: vmSourceVsphereAgent, Phase: phaseProvisioning, Reason: reasonAgentNotDiscovered, LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Hour))}}
+	vms := refreshOwnedVMStatuses(pool, nil, nil)
+	plan := buildPlan(pool, PoolSnapshot{AgentMachines: 1, WaitingAgentMachines: 1, AgentMachinesWithoutAgent: 1, OwnedVMs: vms})
+	t.Logf("phase=%s reason=%s deficit=%d deletions=%d", vms[0].Phase, vms[0].Reason, plan.DemandDeficit, len(plan.VMsToDelete))
+	if len(plan.VMsToDelete) == 0 {
+		t.Fatal("expired discovery cannot be replaced while the requesting AgentMachine is still waiting")
+	}
+}
+
+func TestRegressionWaitForVMFinalizerBeforeDeletingAgent(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileTestPool()
+	vm := newOwnedVMStatus("worker")
+	vm.Phase = phaseAvailable
+	vm.AgentRef = agentObjectReference(pool, "worker")
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{vm}
+	va := testVsphereAgentForVM(pool, vm)
+	va.Finalizers = []string{vsphereAgentFinalizerName}
+	agent := testAgent(pool.Namespace, "worker", false, true)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, va, agent).Build()
+	r := &VsphereAgentPoolReconciler{Client: c}
+	if err := r.applyPlan(ctx, pool, PoolPlan{VMsToDelete: []agentforgev1alpha1.OwnedVMStatus{vm}, AgentsToDelete: []AgentInfo{{Name: "worker"}}}); err != nil {
+		t.Fatal(err)
+	}
+	var deleting agentforgev1alpha1.VsphereAgent
+	if err := c.Get(ctx, client.ObjectKeyFromObject(va), &deleting); err != nil {
+		t.Fatal(err)
+	}
+	if deleting.DeletionTimestamp.IsZero() {
+		t.Fatal("expected VM finalizer to be pending")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(agent), agent); err != nil {
+		t.Fatalf("Agent removed while VM finalizer is still pending: %v", err)
+	}
+}
+
+func TestRegressionPoolMustPreserveNewerISOCondition(t *testing.T) {
+	current := agentforgev1alpha1.VsphereAgentPoolStatus{Conditions: []metav1.Condition{{Type: conditionISOReady, Status: metav1.ConditionTrue, Reason: "FreshUpload", LastTransitionTime: metav1.Now()}}}
+	desired := agentforgev1alpha1.VsphereAgentPoolStatus{Conditions: []metav1.Condition{{Type: conditionISOReady, Status: metav1.ConditionFalse, Reason: "OldFailure", LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Hour))}}}
+	merged := mergePoolReconcileStatus(current, desired)
+	if got := meta.FindStatusCondition(merged.Conditions, conditionISOReady); got.Status != metav1.ConditionTrue {
+		t.Fatalf("new ISO condition overwritten by stale pool snapshot: %#v", got)
+	}
+}
+
+func TestRegressionISOQueryVersionMustInvalidateCache(t *testing.T) {
+	pool := reconcileTestPool()
+	applySpecDefaults(pool)
+	pool.Status.ISO = agentforgev1alpha1.ISOCacheStatus{URL: redactedDownloadURL("https://example.invalid/image?version=4.21"), Path: isoPathPrefix(pool) + "/old.iso", SHA256: "old", CheckedAt: metav1.Now()}
+	if !isoCacheDue(pool, "https://example.invalid/image?version=4.22", "", time.Now()) {
+		t.Fatal("image version changed but old ISO remains eligible for new VMs")
+	}
+}
+
+func TestRegressionForceISORefreshWithExistingVM(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileTestPool()
+	pool.Annotations = map[string]string{forceISORefreshAnnotation: "refresh-now"}
+	va := testVsphereAgentForVM(pool, newOwnedVMStatus("worker"))
+	va.Finalizers = []string{vsphereAgentFinalizerName}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: "vsphere-credentials"}}
+	infra := testInfraEnv(pool.Namespace, testInfraEnvName, "https://example.invalid/iso")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, va, secret, infra).WithStatusSubresource(pool, va).Build()
+	provider := &fakeVMProvider{}
+	r := &VsphereAgentPoolReconciler{Client: c, ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+		return provider, nil
+	}}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+		t.Fatal(err)
+	}
+	if provider.ensureISOCalls == 0 {
+		t.Fatal("force refresh annotation is ignored when the pool only has existing VMs")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), pool); err != nil {
+		t.Fatal(err)
+	}
+	if pool.Status.ISO.ForceRefreshToken != "refresh-now" {
+		t.Fatal("force refresh was not recorded")
+	}
+	pool.Status.ISO.CheckedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+	if err := c.Status().Update(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if provider.ensureISOCalls != 2 {
+		t.Fatalf("expired cache was not refreshed: calls=%d", provider.ensureISOCalls)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if provider.ensureISOCalls != 2 {
+		t.Fatal("fresh cache was downloaded again before its interval")
+	}
+
+}
+
+func TestRegressionAgentMachineNameIsNotMachineName(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileTestPool()
+	vm := newOwnedVMStatus("worker")
+	vm.Phase = phaseBound
+	vm.AgentRef = agentObjectReference(pool, "worker")
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{vm}
+	agent := testAgent(pool.Namespace, "worker", true, true)
+	labels := agent.GetLabels()
+	labels[agentMachineRefKey] = "worker-infra"
+	agent.SetLabels(labels)
+	am := testReadyAgentMachine(testControlPlaneNamespace, "worker-infra", "demo/demo-worker")
+	am.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "cluster.x-k8s.io/v1beta1", Kind: "Machine", Name: "worker-machine"}})
+	machine := testMachine(testControlPlaneNamespace, "worker-machine", "demo/demo-worker", true)
+	if err := unstructured.SetNestedField(machine.Object, "worker-infra", "spec", "infrastructureRef", "name"); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, agent, am, machine).Build()
+	r := &VsphereAgentPoolReconciler{Client: c}
+	agents, err := r.listMatchingAgents(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machines, err := r.listNodePoolMachines(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vms := refreshOwnedVMStatuses(pool, agents, machines)
+	if len(vms) != 1 || vms[0].Reason != reasonMachineDeleting {
+		t.Fatalf("Machine is deleting but VM remains bound to the AgentMachine name: %#v", vms)
+	}
+}
+
+func TestRegressionDeletionGuardMustUseFreshAgent(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileTestPool()
+	vm := newOwnedVMStatus("worker")
+	vm.Phase = phaseAvailable
+	vm.AgentRef = agentObjectReference(pool, "worker")
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{vm}
+	va := testVsphereAgentForVM(pool, vm)
+	va.Finalizers = []string{vsphereAgentFinalizerName}
+	cachedAgent := testAgent(pool.Namespace, "worker", false, true)
+	freshAgent := testAgent(pool.Namespace, "worker", true, true)
+	cached := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, va, cachedAgent).Build()
+	live := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, va.DeepCopy(), freshAgent).Build()
+	r := &VsphereAgentPoolReconciler{Client: cached, APIReader: live}
+	if err := r.applyPlan(ctx, pool, PoolPlan{VMsToDelete: []agentforgev1alpha1.OwnedVMStatus{vm}, AgentsToDelete: []AgentInfo{{Name: "worker"}}}); err != nil {
+		t.Fatal(err)
+	}
+	var remaining agentforgev1alpha1.VsphereAgent
+	if err := cached.Get(ctx, client.ObjectKeyFromObject(va), &remaining); err != nil {
+		t.Fatal(err)
+	}
+	if !remaining.DeletionTimestamp.IsZero() {
+		t.Fatal("VM deletion started although uncached Agent is bound to an AgentMachine")
+	}
+}
+
+func TestVMFinalizerRetainsAgentUntilDeleteSucceeds(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileTestPool()
+	vm := newOwnedVMStatus("worker")
+	vm.Phase = phaseAvailable
+	vm.AgentRef = agentObjectReference(pool, "worker")
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{vm}
+	va := testVsphereAgentForVM(pool, vm)
+	va.Finalizers = []string{vsphereAgentFinalizerName}
+	agent := testAgent(pool.Namespace, "worker", false, true)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: pool.Namespace, Name: "vsphere-credentials"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, va, agent, secret).WithStatusSubresource(pool, va).Build()
+	poolController := &VsphereAgentPoolReconciler{Client: c}
+	if err := poolController.applyPlan(ctx, pool, PoolPlan{VMsToDelete: []agentforgev1alpha1.OwnedVMStatus{vm}}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeVMProvider{deleteVMErr: fmt.Errorf("vCenter unavailable")}
+	controller := &VsphereAgentReconciler{Client: c, ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
+		return provider, nil
+	}}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(va)}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(agent), agent); err != nil {
+		t.Fatal(err)
+	}
+	labels := agent.GetLabels()
+	labels[agentMachineRefKey] = "late-reservation"
+	agent.SetLabels(labels)
+	if err := c.Update(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Reconcile(ctx, req); err == nil {
+		t.Fatal("finalizer ignored a newly bound Agent")
+	}
+	if provider.deleteVMCalls != 0 {
+		t.Fatal("finalizer deleted a newly bound VM")
+	}
+	delete(labels, agentMachineRefKey)
+	agent.SetLabels(labels)
+	if err := c.Update(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := controller.Reconcile(ctx, req); err == nil {
+		t.Fatal("expected vCenter deletion failure")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(agent), agent); err != nil {
+		t.Fatal("Agent removed before VM deletion:", err)
+	}
+	approved, _, _ := unstructured.NestedBool(agent.Object, "spec", "approved")
+	if approved || agent.GetAnnotations()[agentCleanupAnnotation] != vm.Name {
+		t.Fatal("Agent remains eligible for CAPI reservation during deletion")
+	}
+	if err := poolController.patchAgent(ctx, pool, agent.GetName(), vm.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(agent), agent); err != nil {
+		t.Fatal(err)
+	}
+	approved, _, _ = unstructured.NestedBool(agent.Object, "spec", "approved")
+	if approved {
+		t.Fatal("a stale preparation plan reapproved an Agent being deleted")
+	}
+	provider.deleteVMErr = nil
+	if _, err := controller.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(agent), agent); !apierrors.IsNotFound(err) {
+		t.Fatalf("Agent after VM deletion: %v", err)
+	}
+	if err := c.Get(ctx, req.NamespacedName, va); !apierrors.IsNotFound(err) {
+		t.Fatalf("VsphereAgent finalizer did not finish: %v", err)
+	}
+}
+
+func TestDeletionConflictsWithConcurrentCAPIReservation(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileTestPool()
+	vm := newOwnedVMStatus("worker")
+	vm.AgentRef = agentObjectReference(pool, "worker")
+	agent := testAgent(pool.Namespace, "worker", false, true)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).WithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			reserved := agentWatchObject()
+			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), reserved); err != nil {
+				return err
+			}
+			labels := reserved.GetLabels()
+			labels[agentMachineRefKey] = "reserved-machine"
+			reserved.SetLabels(labels)
+			if err := c.Update(ctx, reserved); err != nil {
+				return err
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}).Build()
+	if err := prepareVMDeletion(ctx, c, c, pool, vm); !apierrors.IsConflict(err) {
+		t.Fatalf("deletion must lose to concurrent reservation, got %v", err)
+	}
+}
+
+func TestAgentMachineRecreatesDeletedVsphereAgent(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileTestPool()
+	am := testAgentMachine(testControlPlaneNamespace, "worker", "demo/demo-worker")
+	va := newVsphereAgentForAgentMachine(am.GetName(), pool, am)
+	va.Finalizers = []string{vsphereAgentFinalizerName}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, am, va).
+		WithIndex(&agentforgev1alpha1.VsphereAgentPool{}, vsphereAgentPoolControlPlaneNamespaceIndex, controlPlaneNamespaceIndexFunc).Build()
+	controller := &AgentMachineReconciler{Client: c, Scheme: scheme}
+	if err := c.Delete(ctx, va); err != nil {
+		t.Fatal(err)
+	}
+	requests := controller.requestsForVsphereAgent(ctx, va)
+	if len(requests) != 1 || requests[0].NamespacedName != client.ObjectKeyFromObject(am) {
+		t.Fatalf("mapped requests: %v", requests)
+	}
+	result, err := controller.Reconcile(ctx, requests[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("no retry scheduled while old VsphereAgent is finalizing")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(va), va); err != nil {
+		t.Fatal(err)
+	}
+	va.Finalizers = nil
+	if err := c.Update(ctx, va); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Reconcile(ctx, requests[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(va), va); err != nil {
+		t.Fatal("no replacement created:", err)
+	}
+	if !va.DeletionTimestamp.IsZero() || va.Status.VM.Name != "" {
+		t.Fatalf("replacement was not reset: %#v", va)
+	}
+}
+
+func TestReplacementVMDoesNotInheritExpiredDiscovery(t *testing.T) {
+	old := newOwnedVMStatus("worker")
+	old.OwnerUID = "old-uid"
+	old.Phase = phaseOrphaned
+	old.Reason = "AgentDiscoveryExpired"
+	replacement := newOwnedVMStatus("worker")
+	replacement.OwnerUID = "new-uid"
+	merged := mergeOwnedVMStatuses([]agentforgev1alpha1.OwnedVMStatus{old}, []agentforgev1alpha1.OwnedVMStatus{replacement})
+	if len(merged) != 1 || merged[0].Phase == phaseOrphaned || merged[0].Reason == old.Reason {
+		t.Fatalf("replacement inherited expired state: %#v", merged)
+	}
 }

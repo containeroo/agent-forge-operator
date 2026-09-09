@@ -38,6 +38,9 @@ jobs:
         run: |
           make test
 
+      - name: Run vSphere Simulator Tests
+        run: make test-vcsim
+
       - name: Run E2E Tests
         run: |
           make test-e2e

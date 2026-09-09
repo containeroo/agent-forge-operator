@@ -68,6 +68,7 @@ const (
 type AgentInfo struct {
 	Name              string
 	Bound             bool
+	Deleting          bool
 	MachineName       string
 	Approved          bool
 	SpecRole          string
@@ -136,7 +137,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 
 	var agentsToPatch []AgentInfo
 	for _, agent := range snapshot.MatchingAgents {
-		if agent.Bound {
+		if agent.Bound || agent.Deleting {
 			continue
 		}
 		needsPatch := agentNeedsPatch(pool, agent)
@@ -168,8 +169,8 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 				vmsToDelete = append(vmsToDelete, surplusVMs...)
 				agentsToDelete = append(agentsToDelete, surplusAgents...)
 			}
-			vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete)...)
 		}
+		vmsToDelete = append(vmsToDelete, orphanedDeletionTargets(snapshot.OwnedVMs, vmsToDelete)...)
 	}
 	for _, vm := range vmsToDelete {
 		reason := reasonMachineDeletedPolicy

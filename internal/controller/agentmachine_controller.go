@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 )
@@ -83,7 +86,7 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		matchingPools = append(matchingPools, pool)
 	}
 	if len(matchingPools) == 0 {
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if len(matchingPools) > 1 {
 		return ctrl.Result{}, fmt.Errorf("AgentMachine %s/%s matches multiple VsphereAgentPools: %s", agentMachine.GetNamespace(), agentMachine.GetName(), matchingPoolNames(matchingPools))
@@ -95,7 +98,7 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.ensureVsphereAgentForAgentMachine(ctx, pool, &agentMachine); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 func ensureAgentMachineSelectorPinned(ctx context.Context, c client.Client, agentMachine *unstructured.Unstructured) error {
@@ -230,6 +233,23 @@ func vsphereAgentVMName(agent *agentforgev1alpha1.VsphereAgent) string {
 func (r *AgentMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(agentMachineWatchObject()).
+		Watches(&agentforgev1alpha1.VsphereAgent{}, handler.EnqueueRequestsFromMapFunc(r.requestsForVsphereAgent)).
 		Named("agentmachine").
 		Complete(r)
+}
+
+func (r *AgentMachineReconciler) requestsForVsphereAgent(ctx context.Context, obj client.Object) []reconcile.Request {
+	agent, ok := obj.(*agentforgev1alpha1.VsphereAgent)
+	if !ok || agent.Labels[vsphereAgentCreatedForLabel] != vsphereAgentCreatedForDemand {
+		return nil
+	}
+	pool := &agentforgev1alpha1.VsphereAgentPool{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: agent.Namespace, Name: agent.Spec.PoolRef.Name}, pool); err != nil {
+		return nil
+	}
+	name := agent.Labels[agentMachineSelectionLabel]
+	if name == "" {
+		name = vsphereAgentVMName(agent)
+	}
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: pool.Spec.ControlPlaneNamespace, Name: name}}}
 }

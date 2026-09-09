@@ -406,9 +406,11 @@ func TestGovcEnsureISOUploadsContentAddressedPath(t *testing.T) {
 	govcPath := filepath.Join(tmpDir, "govc")
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
-if [ "$1" = "datastore.ls" ]; then
-  echo "govc: file not found" >&2
-  exit 1
+if [ "$1" = "datastore.download" ]; then
+  case "$6" in
+    *.partial) printf 'iso-v1' > "$7" ;;
+    *) echo "govc: file not found" >&2; exit 1 ;;
+  esac
 fi
 exit 0
 `
@@ -470,7 +472,7 @@ func TestGovcEnsureISOStopsOnDatastoreLookupErrors(t *testing.T) {
 	govcPath := filepath.Join(tmpDir, "govc")
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
-if [ "$1" = "datastore.ls" ]; then
+if [ "$1" = "datastore.download" ]; then
   echo "govc: permission denied" >&2
   exit 1
 fi
@@ -515,6 +517,7 @@ func TestGovcEnsureISOReusesSameDigestWhenDatastoreObjectExists(t *testing.T) {
 	govcPath := filepath.Join(tmpDir, "govc")
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$GOVC_ARG_LOG"
+if [ "$1" = "datastore.download" ]; then printf 'iso-v1' > "$7"; fi
 exit 0
 `
 	if err := os.WriteFile(govcPath, []byte(script), 0o755); err != nil {
@@ -551,17 +554,17 @@ exit 0
 	if strings.Contains(string(logBytes), "datastore.upload") {
 		t.Fatalf("unexpected upload for reusable ISO; calls:\n%s", string(logBytes))
 	}
-	if !strings.Contains(string(logBytes), "datastore.ls") {
+	if !strings.Contains(string(logBytes), "datastore.download") {
 		t.Fatalf("datastore object existence was not checked; calls:\n%s", string(logBytes))
 	}
 }
 
-func TestGovcEnsureISOHandlesConcurrentUploadWinner(t *testing.T) {
+func TestGovcEnsureISORejectsFailedStagingUpload(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	govcPath := filepath.Join(tmpDir, "govc")
 	script := `#!/bin/sh
-if [ "$1" = "datastore.ls" ]; then
+if [ "$1" = "datastore.download" ]; then
   echo "govc: file not found" >&2
   exit 1
 fi
@@ -580,15 +583,8 @@ exit 0
 	defer isoServer.Close()
 	provider := &govcVMProvider{command: govcPath, config: govcConfig{}}
 
-	result, err := provider.EnsureISO(ctx, providerTestPool(), isoServer.URL)
-	if err != nil {
-		t.Fatalf("EnsureISO returned error after another upload won the race: %v", err)
-	}
-	if result.Uploaded {
-		t.Fatal("EnsureISO reported an upload even though the content-addressed object already existed")
-	}
-	if result.SHA256 == "" || result.Path == "" {
-		t.Fatalf("EnsureISO result = %#v, want reusable cached object identity", result)
+	if _, err := provider.EnsureISO(ctx, providerTestPool(), isoServer.URL); err == nil || !strings.Contains(err.Error(), "datastore.upload") {
+		t.Fatalf("expected the staging upload failure, got %v", err)
 	}
 }
 
@@ -751,7 +747,7 @@ exit 0
 	}
 }
 
-func TestGovcDeleteVMFallsBackToOwnedNameWhenRecordedUUIDIsStale(t *testing.T) {
+func TestGovcDeleteVMDoesNotResolveOwnedNameWhenRecordedUUIDIsGone(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	commandLog := filepath.Join(tmpDir, "govc-args.log")
@@ -786,15 +782,12 @@ exit 0
 		t.Fatal(err)
 	}
 	calls := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
-	if len(calls) != 3 {
-		t.Fatalf("calls = %#v, want UUID lookup, name lookup, and delete", calls)
-	}
-	if calls[2] != "vm.destroy -dc dc1 -vm.uuid 423297c6-d72e-28bb-b279-1209c29ab72b" {
-		t.Fatalf("delete args = %q, want refreshed BIOS UUID", calls[2])
+	if len(calls) != 1 {
+		t.Fatalf("calls = %#v, want only the UUID lookup", calls)
 	}
 }
 
-func TestGovcDeleteVMFallsBackToInventoryPathWhenUUIDIsMissing(t *testing.T) {
+func TestGovcDeleteVMDoesNotFallBackToNameWhenUUIDIsGone(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	commandLog := filepath.Join(tmpDir, "govc-args.log")
@@ -833,11 +826,8 @@ exit 0
 		t.Fatal(err)
 	}
 	calls := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
-	if len(calls) != 2 {
-		t.Fatalf("calls = %#v, want UUID delete and inventory path fallback", calls)
-	}
-	if calls[1] != "vm.destroy -dc dc1 -vm.ipath /dc1/vm/demo/demo-worker-ab12" {
-		t.Fatalf("fallback args = %q, want inventory path", calls[1])
+	if len(calls) != 1 {
+		t.Fatalf("calls = %#v, want only the UUID delete", calls)
 	}
 }
 

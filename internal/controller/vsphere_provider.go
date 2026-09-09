@@ -275,24 +275,61 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 	}
 	isoPath := isoContentPath(pool, sha)
 
-	exists, err := p.datastorePathExists(ctx, pool, isoPath)
-	if err == nil && exists {
-		return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: false}, nil
-	}
-	if err != nil && !isGovcDatastorePathNotFound(err) {
+	valid, err := p.verifyISO(ctx, pool, isoPath, filepath.Join(tmpDir, "cached.iso"), sha)
+	if err != nil {
 		return ISOEnsureResult{}, err
 	}
-
+	if valid {
+		return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes}, nil
+	}
 	if err := p.ensureDatastoreDirectory(ctx, pool, path.Dir(isoPath)); err != nil {
 		return ISOEnsureResult{}, err
 	}
-	if err := p.run(ctx, "datastore.upload", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, tmpFile, isoPath); err != nil {
-		if isGovcDatastorePathAlreadyExists(err) {
-			return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: false}, nil
-		}
+	stagingPath := isoPath + "." + filepath.Base(tmpDir) + ".partial"
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partialVMCleanupTimeout)
+		defer cancel()
+		_ = p.DeleteISO(cleanupCtx, pool, stagingPath)
+	}()
+	if err := p.run(ctx, "datastore.upload", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, tmpFile, stagingPath); err != nil {
 		return ISOEnsureResult{}, err
 	}
+	valid, err = p.verifyISO(ctx, pool, stagingPath, filepath.Join(tmpDir, "uploaded.iso"), sha)
+	if err != nil {
+		return ISOEnsureResult{}, err
+	}
+	if !valid {
+		return ISOEnsureResult{}, fmt.Errorf("uploaded ISO failed content verification")
+	}
+	if err := p.run(ctx, "datastore.mv", "-f=true", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, stagingPath, isoPath); err != nil {
+		return ISOEnsureResult{}, err
+	}
+
 	return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: true}, nil
+}
+
+func (p *govcVMProvider) verifyISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, remote, local, digest string) (bool, error) {
+	if err := p.run(ctx, "datastore.download", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, remote, local); err != nil {
+		if isGovcDatastorePathNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	file, err := os.Open(local)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = file.Close() }()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return false, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == digest, nil
+}
+
+func downloadURLHash(rawURL string) string {
+	sum := sha256.Sum256([]byte(rawURL))
+	return hex.EncodeToString(sum[:])
 }
 
 func (p *govcVMProvider) ensureDatastoreDirectory(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, dir string) error {
@@ -323,9 +360,7 @@ func (p *govcVMProvider) DeleteVM(ctx context.Context, pool *agentforgev1alpha1.
 		var err error
 		if vm.BIOSUUID != "" {
 			discovered, err = p.vmDetailsByUUID(ctx, pool, vm.BIOSUUID)
-			if errors.Is(err, errVMNotFound) {
-				discovered, err = p.vmDetails(ctx, pool, vm.Name)
-			}
+
 		} else {
 			discovered, err = p.vmDetails(ctx, pool, vm.Name)
 		}
@@ -347,9 +382,10 @@ func (p *govcVMProvider) DeleteVM(ctx context.Context, pool *agentforgev1alpha1.
 		if err == nil {
 			return nil
 		}
-		if !isGovcVMNotFound(err) {
-			return err
+		if isGovcVMNotFound(err) {
+			return nil
 		}
+		return err
 	}
 	err := p.run(ctx, "vm.destroy", "-dc", pool.Spec.VSphere.Datacenter, "-vm.ipath", vmInventoryPath(pool, vm.Name))
 	if isGovcVMNotFound(err) {
