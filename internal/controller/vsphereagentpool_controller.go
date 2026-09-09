@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -74,10 +73,8 @@ var (
 // VsphereAgentPoolReconciler reconciles a VsphereAgentPool object.
 type VsphereAgentPoolReconciler struct {
 	client.Client
-	APIReader       client.Reader
-	Scheme          *runtime.Scheme
-	Recorder        events.EventRecorder
-	ProviderFactory VMProviderFactory
+	APIReader client.Reader
+	Recorder  events.EventRecorder
 }
 
 type MachineInfo struct {
@@ -127,8 +124,8 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.reconcileDelete(ctx, &pool)
 	}
 
-	infraEnvAvailable, _, infraEnvMessage := r.infraEnvAvailable(ctx, &pool)
-	if !infraEnvAvailable {
+	available, _, infraEnvMessage := infraEnvAvailable(ctx, r.Client, &pool)
+	if !available {
 		r.setStatusError(&pool, reasonInfraEnvUnavailable, infraEnvMessage)
 		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 			Type:               conditionInfraEnvAvailable,
@@ -207,7 +204,7 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		log.Error(err, "apply plan failed", "retryAfter", 30*time.Second)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	refreshPlanOwnedVMCounts(&plan, &pool)
+	plan.PendingOwnedVMs = countPendingOwnedVMs(pool.Status.OwnedVMs)
 
 	r.recordPlan(&pool, plan, "PlanApplied")
 	setPlanConditions(&pool, plan, "")
@@ -216,10 +213,6 @@ func (r *VsphereAgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	return ctrl.Result{RequeueAfter: time.Minute}, nil
-}
-
-func refreshPlanOwnedVMCounts(plan *PoolPlan, pool *agentforgev1alpha1.VsphereAgentPool) {
-	plan.PendingOwnedVMs = countPendingOwnedVMs(pool.Status.OwnedVMs)
 }
 
 func (r *VsphereAgentPoolReconciler) reconcileDelete(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (ctrl.Result, error) {
@@ -450,104 +443,6 @@ func (r *VsphereAgentPoolReconciler) deleteVsphereAgentForVM(ctx context.Context
 	return nil
 }
 
-func (r *VsphereAgentPoolReconciler) ensureISOCache(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, provider VMProvider, isoDownloadURL string) (string, error) {
-	now := metav1.Now()
-	token := pool.GetAnnotations()[forceISORefreshAnnotation]
-	if !isoCacheDue(pool, isoDownloadURL, token, now.Time) {
-		return pool.Status.ISO.Path, nil
-	}
-
-	result, err := provider.EnsureISO(ctx, pool, ISOEnsureRequest{
-		DownloadURL:   isoDownloadURL,
-		CurrentSHA256: pool.Status.ISO.SHA256,
-		CurrentPath:   pool.Status.ISO.Path,
-	})
-	if err != nil {
-		recordISOOperation("ensure", err)
-		return "", err
-	}
-	recordISOOperation("ensure", nil)
-
-	previousPath := pool.Status.ISO.Path
-	previousHistory := append([]agentforgev1alpha1.ISOCacheHistoryEntry(nil), pool.Status.ISO.History...)
-	previousHistory = ensureISOHistoryEntry(previousHistory, agentforgev1alpha1.ISOCacheHistoryEntry{
-		Path:       previousPath,
-		SHA256:     pool.Status.ISO.SHA256,
-		SizeBytes:  pool.Status.ISO.SizeBytes,
-		UploadedAt: pool.Status.ISO.UploadedAt,
-	})
-	uploadedAt := pool.Status.ISO.UploadedAt
-	if result.Uploaded || uploadedAt.IsZero() || result.Path != previousPath {
-		uploadedAt = now
-	}
-
-	pool.Status.ISO.URL = redactedDownloadURL(isoDownloadURL)
-	pool.Status.ISO.Path = result.Path
-	pool.Status.ISO.SHA256 = result.SHA256
-	pool.Status.ISO.SizeBytes = result.SizeBytes
-	pool.Status.ISO.CheckedAt = now
-	pool.Status.ISO.UploadedAt = uploadedAt
-	pool.Status.ISO.ForceRefreshToken = token
-	retainVersions := isoRetainVersions(pool)
-	pool.Status.ISO.History = updatedISOHistory(previousHistory, agentforgev1alpha1.ISOCacheHistoryEntry{
-		Path:       result.Path,
-		SHA256:     result.SHA256,
-		SizeBytes:  result.SizeBytes,
-		UploadedAt: uploadedAt,
-	}, retainVersions)
-
-	for _, stalePath := range staleISOPaths(previousHistory, previousPath, result.Path, retainVersions) {
-		if err := provider.DeleteISO(ctx, pool, stalePath); err != nil {
-			recordISOOperation("delete", err)
-			r.recordWarning(pool, "ISOPruneFailed", stableErrorMessage(err))
-			if entry, found := findISOHistoryEntry(previousHistory, stalePath); found {
-				pool.Status.ISO.History = ensureISOHistoryEntry(pool.Status.ISO.History, entry)
-			}
-		} else {
-			recordISOOperation("delete", nil)
-		}
-	}
-
-	reason := "Reused"
-	message := fmt.Sprintf("Reused cached ISO %s", result.Path)
-	if result.Uploaded {
-		reason = "Uploaded"
-		message = fmt.Sprintf("Uploaded cached ISO %s", result.Path)
-	}
-	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
-		Type:               conditionISOReady,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: pool.Generation,
-		Reason:             reason,
-		Message:            message,
-	})
-	if r.Recorder != nil {
-		recordEvent(r.Recorder, pool, corev1.EventTypeNormal, "ISO"+reason, message)
-	}
-
-	return result.Path, nil
-}
-
-func (r *VsphereAgentPoolReconciler) provider(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (VMProvider, error) {
-	factory := r.ProviderFactory
-	if factory == nil {
-		factory = NewGovcVMProvider
-	}
-	secretNamespace := pool.Spec.VSphere.CredentialsSecretRef.Namespace
-	if secretNamespace == "" {
-		secretNamespace = pool.Namespace
-	}
-	var secret corev1.Secret
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: pool.Spec.VSphere.CredentialsSecretRef.Name}, &secret); err != nil {
-		return nil, err
-	}
-	return factory(ctx, pool, &secret)
-}
-
 func (r *VsphereAgentPoolReconciler) apiReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
@@ -626,10 +521,10 @@ func (r *VsphereAgentPoolReconciler) listNodePoolMachines(ctx context.Context, p
 	return machines, nil
 }
 
-func (r *VsphereAgentPoolReconciler) infraEnvAvailable(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (bool, string, string) {
+func infraEnvAvailable(ctx context.Context, reader client.Reader, pool *agentforgev1alpha1.VsphereAgentPool) (bool, string, string) {
 	infraEnv := &unstructured.Unstructured{}
 	infraEnv.SetGroupVersionKind(infraEnvGVK)
-	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.InfraEnvRef.Name}, infraEnv); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.InfraEnvRef.Name}, infraEnv); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, "", err.Error()
 		}
@@ -1459,6 +1354,14 @@ func (r *VsphereAgentPoolReconciler) recordNormal(pool *agentforgev1alpha1.Vsphe
 }
 
 func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan, errMessage string) {
+	capacityReason := "Satisfied"
+	if plan.DemandDeficit != 0 {
+		capacityReason = "Deficit"
+	}
+	vsphereReason, vsphereMessage := "Ready", "vSphere bridge did not report an error"
+	if errMessage != "" {
+		vsphereReason, vsphereMessage = "Error", errMessage
+	}
 	nowStatus := metav1.ConditionTrue
 	reason := "Reconciled"
 	message := "Agent capacity bridge reconciled successfully"
@@ -1493,15 +1396,15 @@ func setPlanConditions(pool *agentforgev1alpha1.VsphereAgentPool, plan PoolPlan,
 		Type:               conditionCapacitySatisfied,
 		Status:             conditionStatus(plan.DemandDeficit == 0),
 		ObservedGeneration: pool.Generation,
-		Reason:             boolReason(plan.DemandDeficit == 0, "Satisfied", "Deficit"),
+		Reason:             capacityReason,
 		Message:            fmt.Sprintf("agentMachines=%d waitingAgentMachines=%d unreadyAgentMachines=%d agentMachinesWithoutAgent=%d matchingAgents=%d pendingOwnedVMs=%d boundAgents=%d availableAgents=%d", plan.AgentMachines, plan.WaitingAgentMachines, plan.UnreadyAgentMachines, plan.AgentMachinesWithoutAgent, plan.MatchingAgents, plan.PendingOwnedVMs, plan.BoundAgents, plan.AvailableAgents),
 	})
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               conditionVsphereReady,
 		Status:             conditionStatus(errMessage == ""),
 		ObservedGeneration: pool.Generation,
-		Reason:             boolReason(errMessage == "", "Ready", "Error"),
-		Message:            boolMessage(errMessage == "", "vSphere bridge did not report an error", errMessage),
+		Reason:             vsphereReason,
+		Message:            vsphereMessage,
 	})
 }
 
@@ -1612,20 +1515,6 @@ func conditionStatus(value bool) metav1.ConditionStatus {
 		return metav1.ConditionTrue
 	}
 	return metav1.ConditionFalse
-}
-
-func boolReason(value bool, trueReason, falseReason string) string {
-	if value {
-		return trueReason
-	}
-	return falseReason
-}
-
-func boolMessage(value bool, trueMessage, falseMessage string) string {
-	if value {
-		return trueMessage
-	}
-	return falseMessage
 }
 
 var tempISOPathPattern = regexp.MustCompile(`/tmp/agent-forge-iso-[^[:space:]]+`)

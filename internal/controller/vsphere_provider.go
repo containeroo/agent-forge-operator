@@ -64,13 +64,6 @@ type VMCreateRequest struct {
 	OwnerUID string
 }
 
-// ISOEnsureRequest carries the current cached ISO identity from status.
-type ISOEnsureRequest struct {
-	DownloadURL   string
-	CurrentSHA256 string
-	CurrentPath   string
-}
-
 // ISOEnsureResult records the ISO object that should be inserted into new VMs.
 type ISOEnsureResult struct {
 	Path      string
@@ -85,7 +78,7 @@ type VMProviderFactory func(context.Context, *agentforgev1alpha1.VsphereAgentPoo
 // VMProvider abstracts vSphere VM lifecycle operations so reconciliation logic
 // stays testable.
 type VMProvider interface {
-	EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, ISOEnsureRequest) (ISOEnsureResult, error)
+	EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (ISOEnsureResult, error)
 	CreateVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error)
 	VMStatus(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (agentforgev1alpha1.OwnedVMStatus, error)
 	DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error
@@ -262,8 +255,8 @@ func hasCDROMDevice(output []byte) bool {
 	return false
 }
 
-func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, req ISOEnsureRequest) (ISOEnsureResult, error) {
-	if req.DownloadURL == "" {
+func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, downloadURL string) (ISOEnsureResult, error) {
+	if downloadURL == "" {
 		return ISOEnsureResult{}, fmt.Errorf("InfraEnv ISO download URL is empty")
 	}
 
@@ -276,7 +269,7 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 	}()
 
 	tmpFile := filepath.Join(tmpDir, "discovery.iso")
-	sha, sizeBytes, err := downloadFileWithSHA256(ctx, req.DownloadURL, tmpFile)
+	sha, sizeBytes, err := downloadFileWithSHA256(ctx, downloadURL, tmpFile)
 	if err != nil {
 		return ISOEnsureResult{}, err
 	}

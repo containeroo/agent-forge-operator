@@ -1,5 +1,6 @@
 //go:build vcsim
 
+//nolint:goconst // Keep fixture values readable, as in the provider unit tests.
 package controller
 
 import (
@@ -37,7 +38,7 @@ func TestGovcProviderVcsimEnsureISOUploadsReusesAndDeletes(t *testing.T) {
 
 	provider := env.provider()
 	pool := vcsimProviderTestPool()
-	result, err := provider.EnsureISO(ctx, pool, ISOEnsureRequest{DownloadURL: isoServer.URL})
+	result, err := provider.EnsureISO(ctx, pool, isoServer.URL)
 	if err != nil {
 		t.Fatalf("EnsureISO returned error: %v", err)
 	}
@@ -52,7 +53,7 @@ func TestGovcProviderVcsimEnsureISOUploadsReusesAndDeletes(t *testing.T) {
 		t.Fatal("EnsureISO did not report an upload")
 	}
 
-	reused, err := provider.EnsureISO(ctx, pool, ISOEnsureRequest{DownloadURL: isoServer.URL})
+	reused, err := provider.EnsureISO(ctx, pool, isoServer.URL)
 	if err != nil {
 		t.Fatalf("second EnsureISO returned error: %v", err)
 	}

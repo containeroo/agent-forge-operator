@@ -27,7 +27,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
@@ -45,7 +44,6 @@ import (
 type VsphereAgentReconciler struct {
 	client.Client
 	APIReader       client.Reader
-	Scheme          *runtime.Scheme
 	Recorder        events.EventRecorder
 	ProviderFactory VMProviderFactory
 }
@@ -138,9 +136,8 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	poolOps := r.poolReconciler()
-	infraEnvAvailable, infraEnvISOURL, infraEnvMessage := poolOps.infraEnvAvailable(ctx, &pool)
-	if !infraEnvAvailable {
+	available, infraEnvISOURL, infraEnvMessage := infraEnvAvailable(ctx, r.Client, &pool)
+	if !available {
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
 			Status:             metav1.ConditionFalse,
@@ -154,7 +151,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	provider, err := poolOps.provider(ctx, &pool)
+	provider, err := r.provider(ctx, &pool)
 	if err != nil {
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
@@ -168,7 +165,7 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	isoPath, err := poolOps.ensureISOCache(ctx, &pool, provider, infraEnvISOURL)
+	isoPath, err := r.ensureISOCache(ctx, &pool, provider, infraEnvISOURL)
 	if err != nil {
 		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
@@ -273,7 +270,7 @@ func (r *VsphereAgentReconciler) refreshVMIdentity(ctx context.Context, pool *ag
 	if vm.Name == "" {
 		return vm, nil
 	}
-	provider, err := r.poolReconciler().provider(ctx, pool)
+	provider, err := r.provider(ctx, pool)
 	if err != nil {
 		return vm, err
 	}
@@ -325,7 +322,7 @@ func (r *VsphereAgentReconciler) reconcileDelete(ctx context.Context, agent *age
 			return ctrl.Result{}, err
 		}
 		if !managedByAnotherAgent {
-			provider, err := r.poolReconciler().provider(ctx, pool)
+			provider, err := r.provider(ctx, pool)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
@@ -445,16 +442,6 @@ func (r *VsphereAgentReconciler) apiReader() client.Reader {
 	return r.Client
 }
 
-func (r *VsphereAgentReconciler) poolReconciler() *VsphereAgentPoolReconciler {
-	return &VsphereAgentPoolReconciler{
-		Client:          r.Client,
-		APIReader:       r.APIReader,
-		Scheme:          r.Scheme,
-		Recorder:        r.Recorder,
-		ProviderFactory: r.ProviderFactory,
-	}
-}
-
 func (r *VsphereAgentReconciler) requestsForPool(ctx context.Context, o client.Object) []reconcile.Request {
 	var agents agentforgev1alpha1.VsphereAgentList
 	if err := r.List(ctx, &agents, client.InNamespace(o.GetNamespace()), client.MatchingFields{vsphereAgentPoolOwnerFieldIndex: o.GetName()}); err != nil {
@@ -491,4 +478,20 @@ func (r *VsphereAgentReconciler) SetupWithManager(ctx context.Context, mgr ctrl.
 		Watches(&agentforgev1alpha1.VsphereAgentPool{}, handler.EnqueueRequestsFromMapFunc(r.requestsForPool)).
 		Named("vsphereagent").
 		Complete(r)
+}
+
+func (r *VsphereAgentReconciler) provider(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool) (VMProvider, error) {
+	factory := r.ProviderFactory
+	if factory == nil {
+		factory = NewGovcVMProvider
+	}
+	secretNamespace := pool.Spec.VSphere.CredentialsSecretRef.Namespace
+	if secretNamespace == "" {
+		secretNamespace = pool.Namespace
+	}
+	var secret corev1.Secret
+	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: pool.Spec.VSphere.CredentialsSecretRef.Name}, &secret); err != nil {
+		return nil, err
+	}
+	return factory(ctx, pool, &secret)
 }

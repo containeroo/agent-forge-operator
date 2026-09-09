@@ -36,7 +36,7 @@ const (
 	testAdoptedVM             = "demo-worker-adopted"
 )
 
-func TestReconcilePlansWithoutCallingProvider(t *testing.T) {
+func TestReconcileReportsDemandAndCapacity(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -65,23 +65,14 @@ func TestReconcilePlansWithoutCallingProvider(t *testing.T) {
 		WithStatusSubresource(pool).
 		Build()
 
-	providerCalled := false
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
-		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
-			providerCalled = true
-			return &fakeVMProvider{}, nil
-		},
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
 	if err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
-	}
-	if providerCalled {
-		t.Fatal("pool reconcile called vSphere provider")
 	}
 
 	var updated agentforgev1alpha1.VsphereAgentPool
@@ -131,7 +122,6 @@ func TestReconcileReportsAgentMachineDemandCondition(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -144,7 +134,7 @@ func TestReconcileReportsAgentMachineDemandCondition(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
 		t.Fatal(err)
 	}
-	condition := findCondition(updated.Status.Conditions, conditionAgentMachineDemand)
+	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionAgentMachineDemand)
 	if condition == nil {
 		t.Fatal("AgentMachineDemandFound condition was not set")
 		return
@@ -180,7 +170,6 @@ func TestReconcileMarksReadyFalseWhenInfraEnvUnavailable(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -193,11 +182,11 @@ func TestReconcileMarksReadyFalseWhenInfraEnvUnavailable(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
 		t.Fatal(err)
 	}
-	ready := findCondition(updated.Status.Conditions, conditionReady)
+	ready := meta.FindStatusCondition(updated.Status.Conditions, conditionReady)
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InfraEnvUnavailable" {
 		t.Fatalf("Ready condition = %#v, want InfraEnvUnavailable False", ready)
 	}
-	infraEnv := findCondition(updated.Status.Conditions, conditionInfraEnvAvailable)
+	infraEnv := meta.FindStatusCondition(updated.Status.Conditions, conditionInfraEnvAvailable)
 	if infraEnv == nil || infraEnv.Status != metav1.ConditionFalse {
 		t.Fatalf("InfraEnvAvailable condition = %#v, want False", infraEnv)
 	}
@@ -265,9 +254,8 @@ func TestInfraEnvAvailableWaitsForCurrentImage(t *testing.T) {
 				"message": tt.conditionMsg,
 			}}
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(infraEnv).Build()
-			reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
 
-			available, gotURL, message := reconciler.infraEnvAvailable(context.Background(), reconcileTestPool())
+			available, gotURL, message := infraEnvAvailable(context.Background(), k8sClient, reconcileTestPool())
 			if available != tt.wantAvailable {
 				t.Fatalf("available = %t, want %t (message %q)", available, tt.wantAvailable, message)
 			}
@@ -295,9 +283,8 @@ func TestInfraEnvAvailableUsesBootArtifactVersionForOpaqueISOURL(t *testing.T) {
 		"rootfs": "https://example.invalid/boot-artifacts/rootfs?arch=x86_64&version=4.21",
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(infraEnv).Build()
-	reconciler := &VsphereAgentPoolReconciler{Client: k8sClient}
 
-	available, _, message := reconciler.infraEnvAvailable(context.Background(), reconcileTestPool())
+	available, _, message := infraEnvAvailable(context.Background(), k8sClient, reconcileTestPool())
 	if available {
 		t.Fatal("InfraEnv reported available with stale boot artifacts")
 	}
@@ -320,8 +307,9 @@ func TestPoolDeleteWaitsForVsphereAgentFinalizers(t *testing.T) {
 	pool.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	agent := &agentforgev1alpha1.VsphereAgent{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:  testNamespace,
-			Name:       "demo-worker-agent",
+			Namespace: testNamespace,
+			Name:      "demo-worker-agent",
+
 			Finalizers: []string{vsphereAgentFinalizerName},
 			Labels: map[string]string{
 				vsphereAgentPoolNameLabel: testNodePool,
@@ -341,14 +329,9 @@ func TestPoolDeleteWaitsForVsphereAgentFinalizers(t *testing.T) {
 		WithStatusSubresource(pool, agent).
 		Build()
 
-	provider := &fakeVMProvider{}
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
-		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
-			return provider, nil
-		},
 	}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -357,9 +340,6 @@ func TestPoolDeleteWaitsForVsphereAgentFinalizers(t *testing.T) {
 	}
 	if result.RequeueAfter != 10*time.Second {
 		t.Fatalf("requeueAfter = %s, want 10s while child finalizer runs", result.RequeueAfter)
-	}
-	if provider.deleteVMCalls != 0 {
-		t.Fatalf("DeleteVM calls = %d, want child VsphereAgent to delete VM", provider.deleteVMCalls)
 	}
 
 	var updatedPool agentforgev1alpha1.VsphereAgentPool
@@ -395,22 +375,14 @@ func TestPoolDeleteRemovesFinalizerAfterChildrenGone(t *testing.T) {
 		WithStatusSubresource(pool).
 		Build()
 
-	provider := &fakeVMProvider{}
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
-		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
-			return provider, nil
-		},
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
 	if err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
-	}
-	if provider.deleteVMCalls != 0 {
-		t.Fatalf("DeleteVM calls = %d, want child VsphereAgents to own VM deletion", provider.deleteVMCalls)
 	}
 	var updatedPool agentforgev1alpha1.VsphereAgentPool
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updatedPool); err != nil {
@@ -495,7 +467,7 @@ func TestPoolStatusUpdatePreservesISOReadyCondition(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testNodePool}, &updated); err != nil {
 		t.Fatal(err)
 	}
-	isoReady := findCondition(updated.Status.Conditions, conditionISOReady)
+	isoReady := meta.FindStatusCondition(updated.Status.Conditions, conditionISOReady)
 	if isoReady == nil || isoReady.Status != metav1.ConditionTrue || isoReady.Reason != "ISOReady" {
 		t.Fatalf("ISOReady condition = %#v, want preserved True condition", isoReady)
 	}
@@ -573,7 +545,6 @@ func TestVsphereAgentReconcileRetainsVMWhenCleanupPolicyRetain(t *testing.T) {
 	provider := &fakeVMProvider{}
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
@@ -599,7 +570,7 @@ func TestVsphereAgentReconcileRetainsVMWhenCleanupPolicyRetain(t *testing.T) {
 	}
 }
 
-func TestReconcileCreatesVsphereAgentInsteadOfCallingProvider(t *testing.T) {
+func TestPoolReconcileLeavesDemandCreationToAgentMachineController(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
@@ -612,38 +583,21 @@ func TestReconcileCreatesVsphereAgentInsteadOfCallingProvider(t *testing.T) {
 	pool := reconcileTestPool()
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
-		Data: map[string][]byte{
-			"server":   []byte("vcenter.example.invalid"),
-			"username": []byte("user"),
-			"password": []byte("pass"),
-		},
-	}
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, am, infraEnv, secret).
+		WithObjects(pool, am, infraEnv).
 		WithStatusSubresource(pool).
 		Build()
 
-	providerCalled := false
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
-		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
-			providerCalled = true
-			return failingVMProvider{}, nil
-		},
 	}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
 	if err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
-	}
-	if providerCalled {
-		t.Fatal("pool reconcile called vSphere provider")
 	}
 	if result.RequeueAfter != time.Minute {
 		t.Fatalf("requeueAfter = %s, want 1m", result.RequeueAfter)
@@ -675,40 +629,21 @@ func TestReconcileDoesNotAdoptMatchingAgents(t *testing.T) {
 	agent1 := testAgent(testNamespace, "agent-1", true, true)
 	agent2 := testAgent(testNamespace, "agent-2", true, true)
 	agent3 := testAgent(testNamespace, "agent-3", true, true)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
-		Data: map[string][]byte{
-			"server":   []byte("vcenter.example.invalid"),
-			"username": []byte("user"),
-			"password": []byte("pass"),
-		},
-	}
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, am, am2, infraEnv, agent1, agent2, agent3, secret).
+		WithObjects(pool, am, am2, infraEnv, agent1, agent2, agent3).
 		WithStatusSubresource(pool).
 		Build()
 
-	provider := &fakeVMProvider{isoPath: "agent-forge/demo/demo-worker/abc.iso"}
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
-		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
-			return provider, nil
-		},
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
 	if err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
-	}
-	if provider.ensureISOCalls != 0 {
-		t.Fatalf("EnsureISO calls = %d, want 0 from pool reconcile", provider.ensureISOCalls)
-	}
-	if provider.createVMCalls != 0 {
-		t.Fatalf("CreateVM calls = %d, want 0 from pool reconcile", provider.createVMCalls)
 	}
 
 	var vsphereAgents agentforgev1alpha1.VsphereAgentList
@@ -988,8 +923,10 @@ func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	}
 	vsphereAgent := &agentforgev1alpha1.VsphereAgent{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:  testNamespace,
-			Name:       "demo-worker-agent",
+			Namespace: testNamespace,
+			Name:      "demo-worker-agent",
+			UID:       types.UID("demo-worker-agent-uid"),
+
 			Finalizers: []string{vsphereAgentFinalizerName},
 			Labels: map[string]string{
 				vsphereAgentPoolNameLabel: testNodePool,
@@ -1009,7 +946,6 @@ func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	provider := &fakeVMProvider{isoPath: "agent-forge/demo/demo-worker/abc.iso"}
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
@@ -1025,6 +961,10 @@ func TestVsphereAgentReconcileCreatesVM(t *testing.T) {
 	}
 	if provider.createVMCalls != 1 {
 		t.Fatalf("CreateVM calls = %d, want 1", provider.createVMCalls)
+	}
+	wantRequest := VMCreateRequest{Name: vsphereAgent.Name, ISOPath: provider.isoPath, OwnerUID: string(vsphereAgent.UID)}
+	if got := provider.createRequests[0]; got != wantRequest {
+		t.Fatalf("CreateVM request = %#v, want %#v", got, wantRequest)
 	}
 
 	var updated agentforgev1alpha1.VsphereAgent
@@ -1083,7 +1023,6 @@ func TestVsphereAgentReconcileUsesAnnotatedVMName(t *testing.T) {
 	provider := &fakeVMProvider{isoPath: "agent-forge/demo/demo-worker/abc.iso"}
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
@@ -1118,7 +1057,8 @@ func TestVsphereAgentReconcileSyncsVMStatusFromPool(t *testing.T) {
 
 	pool := reconcileTestPool()
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{{
-		Name:       "demo-worker-agent",
+		Name: "demo-worker-agent",
+
 		Phase:      phaseBound,
 		Reason:     "AgentBound",
 		BIOSUUID:   "42324d21-274c-03a8-b6fe-f9e8edb55e33",
@@ -1128,8 +1068,9 @@ func TestVsphereAgentReconcileSyncsVMStatusFromPool(t *testing.T) {
 	}}
 	vsphereAgent := &agentforgev1alpha1.VsphereAgent{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:  testNamespace,
-			Name:       "demo-worker-agent",
+			Namespace: testNamespace,
+			Name:      "demo-worker-agent",
+
 			Finalizers: []string{vsphereAgentFinalizerName},
 		},
 		Spec: agentforgev1alpha1.VsphereAgentSpec{
@@ -1137,7 +1078,8 @@ func TestVsphereAgentReconcileSyncsVMStatusFromPool(t *testing.T) {
 		},
 		Status: agentforgev1alpha1.VsphereAgentStatus{
 			VM: agentforgev1alpha1.OwnedVMStatus{
-				Name:       "demo-worker-agent",
+				Name: "demo-worker-agent",
+
 				Phase:      phaseProvisioning,
 				Reason:     "CreateRequested",
 				BIOSUUID:   "42324d21-274c-03a8-b6fe-f9e8edb55e33",
@@ -1154,7 +1096,6 @@ func TestVsphereAgentReconcileSyncsVMStatusFromPool(t *testing.T) {
 
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -1228,7 +1169,6 @@ func TestVsphereAgentReconcileSkipsVMDeleteForDuplicate(t *testing.T) {
 	provider := &fakeVMProvider{}
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
@@ -1323,7 +1263,6 @@ func TestVsphereAgentReconcileSkipsVMDeleteForAdoptedDuplicateByIdentity(t *test
 	provider := &fakeVMProvider{}
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
@@ -1377,7 +1316,6 @@ func TestVsphereAgentReconcileInitializesAdoptedStatus(t *testing.T) {
 	provider := &fakeVMProvider{}
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
@@ -1405,7 +1343,7 @@ func TestVsphereAgentReconcileInitializesAdoptedStatus(t *testing.T) {
 	if updated.Status.VM.Name != testAdoptedVM || updated.Status.VM.Reason != reasonVMAdopted {
 		t.Fatalf("VM status = %#v, want adopted VM status", updated.Status.VM)
 	}
-	ready := findCondition(updated.Status.Conditions, conditionReady)
+	ready := meta.FindStatusCondition(updated.Status.Conditions, conditionReady)
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != reasonVMAdopted {
 		t.Fatalf("Ready condition = %#v, want VMAdopted True", ready)
 	}
@@ -1444,7 +1382,6 @@ func TestVsphereAgentDeleteDropsFinalizerWhenPoolMissing(t *testing.T) {
 
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -1497,7 +1434,6 @@ func TestReconcilePatchesCandidateAgentFromInfraEnv(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -1581,7 +1517,6 @@ func TestReconcilePatchesCandidateAgentWithPoolDiscriminatorLabel(t *testing.T) 
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -1638,7 +1573,6 @@ func TestReconcileRefreshesOwnedVMBoundStatus(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -1730,7 +1664,6 @@ func TestReconcilePreservesOwnedVMTransitionState(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -1787,7 +1720,6 @@ func TestReconcilePreservesMachineDeletingStateForCleanup(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -2081,34 +2013,24 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 	vsphereAgent5 := testVsphereAgentForVM(pool, ownedVMs[4])
 	am := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
 	infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"}}
 	agent1 := testAgent(testNamespace, "demo-worker-one1", true, true)
 	agent2 := testAgent(testNamespace, "demo-worker-two2", true, true)
 	agent3 := testAgent(testNamespace, "demo-worker-thr3", true, true)
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, am, infraEnv, secret, agent1, agent2, agent3, vsphereAgent1, vsphereAgent2, vsphereAgent3, vsphereAgent4, vsphereAgent5).
+		WithObjects(pool, am, infraEnv, agent1, agent2, agent3, vsphereAgent1, vsphereAgent2, vsphereAgent3, vsphereAgent4, vsphereAgent5).
 		WithStatusSubresource(pool, vsphereAgent1, vsphereAgent2, vsphereAgent3, vsphereAgent4, vsphereAgent5).
 		Build()
 
-	provider := &fakeVMProvider{}
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
-		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
-			return provider, nil
-		},
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
 	if err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
-	}
-
-	if provider.deleteVMCalls != 0 {
-		t.Fatalf("DeleteVM calls = %d, want 0 without deleted Machines", provider.deleteVMCalls)
 	}
 
 	var updated agentforgev1alpha1.VsphereAgentPool
@@ -2118,7 +2040,7 @@ func TestReconcileDoesNotDeleteProvisioningOwnedVMsWithoutDeletedMachine(t *test
 	if len(updated.Status.OwnedVMs) != 5 {
 		t.Fatalf("ownedVMs = %d, want bound and provisioning VMs retained", len(updated.Status.OwnedVMs))
 	}
-	condition := findCondition(updated.Status.Conditions, conditionCapacitySatisfied)
+	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionCapacitySatisfied)
 	if condition == nil {
 		t.Fatal("CapacitySatisfied condition missing")
 		return
@@ -2158,7 +2080,6 @@ func TestReconcileMarksReturnedAgentReleased(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -2204,7 +2125,6 @@ func TestReconcileAdoptsExistingBoundAgentAsOwnedVM(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -2281,7 +2201,6 @@ func TestReconcileAdoptsInventoryHostnameForCandidateAgent(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 
@@ -2429,7 +2348,6 @@ func TestReconcileDoesNotRecordAgentClaimedByOtherPool(t *testing.T) {
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 	}
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -2546,25 +2464,58 @@ func TestRequestsForInfraEnvChangeFindsReferencingPools(t *testing.T) {
 	}
 }
 
-func TestAgentChangePredicateWatchesInventoryIdentity(t *testing.T) {
-	oldAgent := testCandidateAgent(testNamespace, "candidate-agent")
-	newAgent := oldAgent.DeepCopy()
-	setAgentInventoryHostname(t, newAgent, "demo-worker-c3p0")
-
-	if !agentChangePredicate().Update(event.UpdateEvent{ObjectOld: oldAgent, ObjectNew: newAgent}) {
-		t.Fatal("Agent inventory hostname change did not trigger reconcile")
+func TestAgentChangePredicate(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		path  []string
+		value any
+		want  bool
+	}{
+		{name: "unchanged"},
+		{name: "unrelated status", path: []string{"status", "debugInfo"}, value: "changed"},
+		{name: "hostname", path: []string{"status", "inventory", "hostname"}, value: "worker-1", want: true},
+		{name: "BIOS UUID", path: []string{"status", "inventory", "systemVendor", "serialNumber"}, value: "VMware-423297c6d72e28bbb2791209c29ab72b", want: true},
+		{name: "MAC", path: []string{"status", "inventory", "interfaces"}, value: []any{map[string]any{"macAddress": "00:50:56:aa:bb:cc"}}, want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			oldAgent := testCandidateAgent(testNamespace, "candidate-agent")
+			newAgent := oldAgent.DeepCopy()
+			if len(tt.path) > 0 {
+				if err := unstructured.SetNestedField(newAgent.Object, tt.value, tt.path...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := agentChangePredicate().Update(event.UpdateEvent{ObjectOld: oldAgent, ObjectNew: newAgent}); got != tt.want {
+				t.Fatalf("Update = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestAgentMachineChangePredicateWatchesAssignment(t *testing.T) {
-	oldAgentMachine := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
-	newAgentMachine := oldAgentMachine.DeepCopy()
-	if err := unstructured.SetNestedField(newAgentMachine.Object, "agent://agent-1", "spec", "providerID"); err != nil {
-		t.Fatal(err)
-	}
-
-	if !agentMachineChangePredicate().Update(event.UpdateEvent{ObjectOld: oldAgentMachine, ObjectNew: newAgentMachine}) {
-		t.Fatal("AgentMachine providerID assignment change did not trigger reconcile")
+func TestAgentMachineChangePredicate(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		path  []string
+		value string
+		want  bool
+	}{
+		{name: "unchanged"},
+		{name: "unrelated status", path: []string{"status", "debugInfo"}, value: "changed"},
+		{name: "provider ID", path: []string{"spec", "providerID"}, value: "agent://agent-1", want: true},
+		{name: "agent reference", path: []string{"status", "agentRef", "name"}, value: "agent-1", want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			oldMachine := testAgentMachine(testControlPlaneNamespace, testNodePool, "demo/demo-worker")
+			newMachine := oldMachine.DeepCopy()
+			if len(tt.path) > 0 {
+				if err := unstructured.SetNestedField(newMachine.Object, tt.value, tt.path...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := agentMachineChangePredicate().Update(event.UpdateEvent{ObjectOld: oldMachine, ObjectNew: newMachine}); got != tt.want {
+				t.Fatalf("Update = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -2584,28 +2535,16 @@ func TestReconcileKeepsUnboundAgentsWithoutDeletedMachine(t *testing.T) {
 	boundAgent := testAgent(testNamespace, "bound-agent", true, true)
 	excessAgent1 := testAgent(testNamespace, "excess-agent-1", false, true)
 	excessAgent2 := testAgent(testNamespace, "excess-agent-2", false, true)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"},
-		Data: map[string][]byte{
-			"server":   []byte("vcenter.example.invalid"),
-			"username": []byte("user"),
-			"password": []byte("pass"),
-		},
-	}
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, am, infraEnv, boundAgent, excessAgent1, excessAgent2, secret).
+		WithObjects(pool, am, infraEnv, boundAgent, excessAgent1, excessAgent2).
 		WithStatusSubresource(pool).
 		Build()
 
 	reconciler := &VsphereAgentPoolReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
-		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
-			return &fakeVMProvider{}, nil
-		},
 	}
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testNodePool}})
@@ -2657,7 +2596,7 @@ func TestISOCacheDueDetectsStableURLIntervalAndForceRefresh(t *testing.T) {
 func TestEnsureISOCacheDoesNotPersistDownloadCredentials(t *testing.T) {
 	pool := reconcileTestPool()
 	provider := &fakeVMProvider{isoPath: "agent-forge/demo/demo-worker/abc.iso"}
-	reconciler := &VsphereAgentPoolReconciler{Recorder: events.NewFakeRecorder(10)}
+	reconciler := &VsphereAgentReconciler{Recorder: events.NewFakeRecorder(10)}
 	rawURL := "https://user:password@example.invalid/discovery.iso?token=super-secret#fragment"
 
 	if _, err := reconciler.ensureISOCache(context.Background(), pool, provider, rawURL); err != nil {
@@ -2748,7 +2687,7 @@ func TestEnsureISOCacheRetriesFailedPrunes(t *testing.T) {
 		isoPath:      "cache/current.iso",
 		deleteISOErr: fmt.Errorf("datastore busy"),
 	}
-	reconciler := &VsphereAgentPoolReconciler{Recorder: events.NewFakeRecorder(10)}
+	reconciler := &VsphereAgentReconciler{Recorder: events.NewFakeRecorder(10)}
 
 	if _, err := reconciler.ensureISOCache(context.Background(), pool, provider, "https://example.invalid/current.iso"); err != nil {
 		t.Fatalf("ensureISOCache returned error: %v", err)
@@ -2788,18 +2727,18 @@ func TestVsphereAgentReconcileRecreatesMissingManagedVM(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "vsphere-credentials"}}
 	agent := testVsphereAgentForVM(pool, newOwnedVMStatus("missing-worker"))
 	agent.Name = "missing-worker"
+	agent.UID = types.UID("missing-worker-uid")
 	agent.Finalizers = []string{vsphereAgentFinalizerName}
 	agent.Labels[vsphereAgentCreatedForLabel] = vsphereAgentCreatedForDemand
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(pool, secret, agent).
-		WithStatusSubresource(agent).
+		WithObjects(pool, secret, agent, testInfraEnv(pool.Namespace, pool.Spec.InfraEnvRef.Name, "https://example.invalid/discovery.iso")).
+		WithStatusSubresource(pool, agent).
 		Build()
 	provider := &fakeVMProvider{vmStatusErr: fmt.Errorf("%w: missing-worker", errVMNotFound)}
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
@@ -2820,10 +2759,29 @@ func TestVsphereAgentReconcileRecreatesMissingManagedVM(t *testing.T) {
 	if updated.Status.VM.Name != "" {
 		t.Fatalf("VM status = %#v, want missing managed VM cleared so it can be recreated", updated.Status.VM)
 	}
-	ready := findCondition(updated.Status.Conditions, conditionReady)
+	ready := meta.FindStatusCondition(updated.Status.Conditions, conditionReady)
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "VMNotFound" {
 		t.Fatalf("Ready condition = %#v, want VMNotFound False", ready)
 	}
+	provider.vmStatusErr = nil
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)}); err != nil {
+		t.Fatalf("recreate reconcile returned error: %v", err)
+	}
+	if len(provider.createRequests) != 1 {
+		t.Fatalf("CreateVM requests = %#v, want one recreation", provider.createRequests)
+	}
+	wantRequest := VMCreateRequest{Name: agent.Name, ISOPath: provider.isoPath, OwnerUID: string(agent.UID)}
+	if got := provider.createRequests[0]; got != wantRequest {
+		t.Fatalf("recreation request = %#v, want %#v", got, wantRequest)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &updated); err != nil {
+		t.Fatal(err)
+	}
+	ready = meta.FindStatusCondition(updated.Status.Conditions, conditionReady)
+	if updated.Status.VM.Name != agent.Name || ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("recreated status = %#v, want VM restored and Ready", updated.Status)
+	}
+
 }
 
 func TestVsphereAgentReconcileRejectsVMOwnedByAnotherAgent(t *testing.T) {
@@ -2853,7 +2811,6 @@ func TestVsphereAgentReconcileRejectsVMOwnedByAnotherAgent(t *testing.T) {
 	provider := &fakeVMProvider{vmStatusOwnerUID: "another-agent-uid"}
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
@@ -2874,7 +2831,7 @@ func TestVsphereAgentReconcileRejectsVMOwnedByAnotherAgent(t *testing.T) {
 	if updated.Status.VM.OwnerUID != vm.OwnerUID {
 		t.Fatalf("VM owner UID = %q, want original %q", updated.Status.VM.OwnerUID, vm.OwnerUID)
 	}
-	ready := findCondition(updated.Status.Conditions, conditionReady)
+	ready := meta.FindStatusCondition(updated.Status.Conditions, conditionReady)
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "VMOwnershipMismatch" {
 		t.Fatalf("Ready condition = %#v, want VMOwnershipMismatch False", ready)
 	}
@@ -2912,7 +2869,6 @@ func TestVsphereAgentDeleteCleansUpVMWhenStatusWasNeverPersisted(t *testing.T) {
 	provider := &fakeVMProvider{}
 	reconciler := &VsphereAgentReconciler{
 		Client:   k8sClient,
-		Scheme:   scheme,
 		Recorder: events.NewFakeRecorder(10),
 		ProviderFactory: func(context.Context, *agentforgev1alpha1.VsphereAgentPool, *corev1.Secret) (VMProvider, error) {
 			return provider, nil
@@ -2934,7 +2890,7 @@ type fakeVMProvider struct {
 	ensureISOCalls   int
 	createVMCalls    int
 	deleteVMCalls    int
-	createISOPaths   []string
+	createRequests   []VMCreateRequest
 	createVMNames    []string
 	deletedVMNames   []string
 	deletedVMs       []agentforgev1alpha1.OwnedVMStatus
@@ -2945,7 +2901,7 @@ type fakeVMProvider struct {
 	deleteISOErr     error
 }
 
-func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, ISOEnsureRequest) (ISOEnsureResult, error) {
+func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (ISOEnsureResult, error) {
 	p.ensureISOCalls++
 	if p.isoPath == "" {
 		p.isoPath = "agent-forge/demo/demo-worker/abc.iso"
@@ -2955,7 +2911,7 @@ func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereA
 
 func (p *fakeVMProvider) CreateVM(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, req VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
 	p.createVMCalls++
-	p.createISOPaths = append(p.createISOPaths, req.ISOPath)
+	p.createRequests = append(p.createRequests, req)
 	p.createVMNames = append(p.createVMNames, req.Name)
 	if req.Name == "" {
 		return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("VM name is required")
@@ -2984,28 +2940,6 @@ func (p *fakeVMProvider) DeleteVM(_ context.Context, _ *agentforgev1alpha1.Vsphe
 func (p *fakeVMProvider) DeleteISO(_ context.Context, _ *agentforgev1alpha1.VsphereAgentPool, path string) error {
 	p.deletedISOPaths = append(p.deletedISOPaths, path)
 	return p.deleteISOErr
-}
-
-type failingVMProvider struct{}
-
-func (failingVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, ISOEnsureRequest) (ISOEnsureResult, error) {
-	return ISOEnsureResult{Path: "agent-forge/demo/demo-worker/abc.iso", SHA256: "abc", SizeBytes: 3, Uploaded: true}, nil
-}
-
-func (failingVMProvider) CreateVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error) {
-	return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("provider failed")
-}
-
-func (failingVMProvider) VMStatus(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (agentforgev1alpha1.OwnedVMStatus, error) {
-	return agentforgev1alpha1.OwnedVMStatus{}, fmt.Errorf("provider failed")
-}
-
-func (failingVMProvider) DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error {
-	return nil
-}
-
-func (failingVMProvider) DeleteISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) error {
-	return nil
 }
 
 func reconcileTestPool() *agentforgev1alpha1.VsphereAgentPool {
@@ -3179,15 +3113,6 @@ func testVsphereAgentForVM(pool *agentforgev1alpha1.VsphereAgentPool, vm agentfo
 			VM: vm,
 		},
 	}
-}
-
-func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
-	for i := range conditions {
-		if conditions[i].Type == conditionType {
-			return &conditions[i]
-		}
-	}
-	return nil
 }
 
 func testMachineRef(name string) *corev1.ObjectReference {

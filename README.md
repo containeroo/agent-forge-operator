@@ -46,3 +46,8 @@ make run
 The controller uses `govc` for vSphere operations. The container image includes
 `govc`; local `make run` expects `govc` at `/usr/local/bin/govc` unless
 `GOVC_PATH` is set.
+
+`make test-vcsim` exercises ISO caching and VM status/deletion against the vSphere
+simulator. `make test-e2e` requires Docker and uses Kind to verify deployment,
+metrics access, and a VsphereAgent status update. It installs minimal external
+CRD fixtures for watches; it does not run HyperShift, CAPI, or Assisted Installer.

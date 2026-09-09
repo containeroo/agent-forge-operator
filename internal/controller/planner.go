@@ -146,7 +146,7 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		if !needsPatch {
 			continue
 		}
-		if !agentPatchEligible(snapshot, agent) {
+		if !agentAssociatedWithOwnedVM(snapshot.OwnedVMs, agent) {
 			continue
 		}
 		agentsToPatch = append(agentsToPatch, agent)
@@ -235,10 +235,6 @@ func agentNeedsPatch(pool *agentforgev1alpha1.VsphereAgentPool, agent AgentInfo)
 
 func agentNeedsSelectionLabelPatch(agent AgentInfo) bool {
 	return agent.Hostname != "" && agent.SelectionLabel != agent.Hostname
-}
-
-func agentPatchEligible(snapshot PoolSnapshot, agent AgentInfo) bool {
-	return agentAssociatedWithOwnedVM(snapshot.OwnedVMs, agent)
 }
 
 func agentAssociatedWithActiveOwnedVM(vms []agentforgev1alpha1.OwnedVMStatus, agent AgentInfo) bool {

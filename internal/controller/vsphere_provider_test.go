@@ -432,7 +432,7 @@ exit 0
 		},
 	}
 
-	result, err := provider.EnsureISO(ctx, providerTestPool(), ISOEnsureRequest{DownloadURL: isoServer.URL})
+	result, err := provider.EnsureISO(ctx, providerTestPool(), isoServer.URL)
 	if err != nil {
 		t.Fatalf("EnsureISO returned error: %v", err)
 	}
@@ -496,7 +496,7 @@ exit 0
 		},
 	}
 
-	if _, err := provider.EnsureISO(ctx, providerTestPool(), ISOEnsureRequest{DownloadURL: isoServer.URL}); err == nil {
+	if _, err := provider.EnsureISO(ctx, providerTestPool(), isoServer.URL); err == nil {
 		t.Fatal("EnsureISO succeeded despite datastore lookup failure")
 	}
 	logBytes, err := os.ReadFile(commandLog)
@@ -536,14 +536,8 @@ exit 0
 			Insecure: "true",
 		},
 	}
-	sha := "9d8a03fda862703f60c30a0c83fae3cff00beb7e3d718ff78e0a791e6fe71048"
-	path := "agent-forge/demo/demo-worker/" + sha + ".iso"
 
-	result, err := provider.EnsureISO(ctx, providerTestPool(), ISOEnsureRequest{
-		DownloadURL:   isoServer.URL,
-		CurrentSHA256: sha,
-		CurrentPath:   path,
-	})
+	result, err := provider.EnsureISO(ctx, providerTestPool(), isoServer.URL)
 	if err != nil {
 		t.Fatalf("EnsureISO returned error: %v", err)
 	}
@@ -586,7 +580,7 @@ exit 0
 	defer isoServer.Close()
 	provider := &govcVMProvider{command: govcPath, config: govcConfig{}}
 
-	result, err := provider.EnsureISO(ctx, providerTestPool(), ISOEnsureRequest{DownloadURL: isoServer.URL})
+	result, err := provider.EnsureISO(ctx, providerTestPool(), isoServer.URL)
 	if err != nil {
 		t.Fatalf("EnsureISO returned error after another upload won the race: %v", err)
 	}

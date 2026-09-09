@@ -34,9 +34,8 @@ import (
 // with the code source changes to be tested.
 var projectImage = "ghcr.io/containeroo/agent-forge-operator:e2e"
 
-// TestE2E runs the end-to-end (e2e) test suite for the project. These tests execute in an isolated,
-// temporary environment to validate project changes with the purposed to be used in CI jobs.
-// The default setup requires Kind and builds/loads the Manager Docker image locally.
+// TestE2E verifies deployment, metrics access, and reconciliation on Kind.
+// External APIs use minimal CRD fixtures; vSphere operations are covered by vcsim tests.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting agent-forge-operator integration test suite\n")

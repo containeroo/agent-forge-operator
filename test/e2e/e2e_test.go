@@ -20,9 +20,14 @@ limitations under the License.
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
+
+	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/meta"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -42,7 +47,7 @@ const metricsServiceName = "agent-forge-operator-controller-manager-metrics-serv
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "agent-forge-operator-metrics-binding"
 
-var _ = Describe("Manager", Ordered, func() {
+var _ = Describe("Deployment and reconciliation", Ordered, func() {
 	var controllerPodName string
 
 	// Before running the tests, set up the environment by creating the namespace,
@@ -69,6 +74,45 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
+		By("installing minimal external CRDs for controller watches")
+		// These fixtures enable discovery and watches; they do not simulate external controllers.
+		for _, resource := range []struct{ group, kind, plural string }{
+			{"cluster.x-k8s.io", "Machine", "machines"},
+			{"capi-provider.agent-install.openshift.io", "AgentMachine", "agentmachines"},
+			{"agent-install.openshift.io", "Agent", "agents"},
+			{"agent-install.openshift.io", "InfraEnv", "infraenvs"},
+		} {
+			manifest := fmt.Sprintf(`apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: %[3]s.%[1]s
+  labels:
+    agent-forge-e2e: external-watch
+spec:
+  group: %[1]s
+  names:
+    kind: %[2]s
+    plural: %[3]s
+  scope: Namespaced
+  versions:
+  - name: v1beta1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
+`, resource.group, resource.kind, resource.plural)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "wait", "crd/"+resource.plural+"."+resource.group,
+				"--for=condition=Established", "--timeout=60s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
 		By("deploying the controller-manager")
 		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
 		_, err = utils.Run(cmd)
@@ -92,6 +136,10 @@ var _ = Describe("Manager", Ordered, func() {
 
 		By("uninstalling CRDs")
 		cmd = exec.Command("make", "uninstall")
+		_, _ = utils.Run(cmd)
+
+		By("removing external watch CRDs")
+		cmd = exec.Command("kubectl", "delete", "crd", "-l", "agent-forge-e2e=external-watch")
 		_, _ = utils.Run(cmd)
 
 		By("removing manager namespace")
@@ -178,6 +226,36 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyControllerUp).Should(Succeed())
 		})
 
+		It("should report a missing pool on a VsphereAgent", func() {
+			cmd := exec.Command("kubectl", "apply", "-n", namespace, "-f", "-")
+			cmd.Stdin = strings.NewReader(`apiVersion: agent-forge.containeroo.ch/v1alpha1
+kind: VsphereAgent
+metadata:
+  name: missing-pool-agent
+spec:
+  poolRef:
+    name: missing-pool
+`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, err := utils.Run(exec.Command("kubectl", "delete", "vsphereagent", "missing-pool-agent", "-n", namespace))
+				Expect(err).NotTo(HaveOccurred())
+			})
+			Eventually(func(g Gomega) {
+				output, err := utils.Run(exec.Command("kubectl", "get", "vsphereagent", "missing-pool-agent",
+					"-n", namespace, "-o", "json"))
+				g.Expect(err).NotTo(HaveOccurred())
+				var agent agentforgev1alpha1.VsphereAgent
+				g.Expect(json.Unmarshal([]byte(output), &agent)).To(Succeed())
+				g.Expect(agent.Status.ObservedGeneration).To(Equal(agent.Generation))
+				ready := meta.FindStatusCondition(agent.Status.Conditions, "Ready")
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(string(ready.Status)).To(Equal("False"))
+				g.Expect(ready.Reason).To(Equal("PoolNotFound"))
+			}).Should(Succeed())
+		})
+
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("removing any stale metrics ClusterRoleBinding")
 			cmd := exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found=true")
@@ -206,17 +284,10 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyMetricsEndpointReady).Should(Succeed())
 
-			By("verifying that the controller manager is serving the metrics server")
-			verifyMetricsServerStarted := func(g Gomega) {
-				cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("Serving metrics server"),
-					"Metrics server not yet started")
-			}
-			Eventually(verifyMetricsServerStarted).Should(Succeed())
-
 			By("creating the curl-metrics pod to access the metrics endpoint")
+			curlCommand := "curl --fail-with-body --silent --show-error -k " +
+				`-H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" ` +
+				fmt.Sprintf("https://%s.%s.svc.cluster.local:8443/metrics", metricsServiceName, namespace)
 			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
 				"--namespace", namespace,
 				"--image=curlimages/curl:latest",
@@ -227,7 +298,7 @@ var _ = Describe("Manager", Ordered, func() {
 							"name": "curl",
 							"image": "curlimages/curl:latest",
 							"command": ["/bin/sh", "-c"],
-							"args": ["curl --fail-with-body --silent --show-error -k -H \"Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" https://%s.%s.svc.cluster.local:8443/metrics"],
+							"args": [%q],
 							"securityContext": {
 								"allowPrivilegeEscalation": false,
 								"capabilities": {
@@ -242,7 +313,7 @@ var _ = Describe("Manager", Ordered, func() {
 						}],
 						"serviceAccount": "%s"
 					}
-				}`, metricsServiceName, namespace, serviceAccountName))
+				}`, curlCommand, serviceAccountName))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
 
@@ -258,30 +329,12 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyCurlUp, 5*time.Minute).Should(Succeed())
 
 			By("getting the metrics by checking curl-metrics logs")
-			metricsOutput := getMetricsOutput()
+			metricsOutput, err := utils.Run(exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace))
+			Expect(err).NotTo(HaveOccurred())
 			Expect(metricsOutput).To(ContainSubstring(
 				"controller_runtime_reconcile_total",
 			))
 		})
 
-		// +kubebuilder:scaffold:e2e-webhooks-checks
-
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput := getMetricsOutput()
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
 	})
 })
-
-// getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
-func getMetricsOutput() string {
-	By("getting the curl-metrics logs")
-	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
-	metricsOutput, err := utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-	return metricsOutput
-}

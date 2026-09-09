@@ -63,7 +63,6 @@ $(LOCALBIN):
 KUBECTL ?= kubectl
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
-ENVTEST ?= $(LOCALBIN)/setup-envtest
 GEN_CRD_API_REFERENCE_DOCS ?= $(LOCALBIN)/gen-crd-api-reference-docs
 GEN_API_REF_DOCS_VERSION ?= v0.3.0
 GOVC ?= $(LOCALBIN)/govc
@@ -74,10 +73,7 @@ VCSIM_VERSIONED := $(VCSIM)-$(GOVC_VERSION)
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
 CONTROLLER_TOOLS_VERSION ?= v0.22.0
-ENVTEST_VERSION ?= v0.25.0
 
-# ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.34.1
 UNAME := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 UNAME_ARCH := $(shell uname -m)
 KIND_ARCH := $(if $(filter arm64 aarch64,$(UNAME_ARCH)),arm64,amd64)
@@ -127,8 +123,8 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+manifests: controller-gen ## Generate ClusterRole and CustomResourceDefinition objects.
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -143,8 +139,8 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: verify-govc-version manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+test: verify-govc-version manifests generate fmt vet ## Run tests.
+	go test ./... -coverprofile cover.out
 
 .PHONY: verify-govc-version
 verify-govc-version: ## Verify all shipped govc version pins match.
@@ -296,12 +292,6 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 .PHONY: gen-crd-api-reference-docs
 gen-crd-api-reference-docs: ## Download gen-crd-api-reference-docs locally if necessary
 	test -s $(GEN_CRD_API_REFERENCE_DOCS) || GOBIN=$(LOCALBIN) go install github.com/ahmetb/gen-crd-api-reference-docs@$(GEN_API_REF_DOCS_VERSION)
-
-.PHONY: envtest
-envtest: $(ENVTEST) ## Download the pinned setup-envtest version locally if necessary.
-$(ENVTEST): $(LOCALBIN)
-	test -s $(LOCALBIN)/setup-envtest && $(LOCALBIN)/setup-envtest version | grep -q $(ENVTEST_VERSION) || \
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
 
 .PHONY: govc
 govc: $(GOVC_VERSIONED) ## Download govc locally if necessary.
