@@ -405,14 +405,6 @@ func (p *govcVMProvider) DeleteISO(ctx context.Context, pool *agentforgev1alpha1
 	return err
 }
 
-func (p *govcVMProvider) datastorePathExists(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, isoPath string) (bool, error) {
-	err := p.run(ctx, "datastore.ls", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, isoPath)
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 func (p *govcVMProvider) run(ctx context.Context, args ...string) error {
 	_, err := p.runOutput(ctx, args...)
 	return err

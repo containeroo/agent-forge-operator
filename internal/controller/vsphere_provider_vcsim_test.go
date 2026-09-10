@@ -27,6 +27,14 @@ type vcsimTestEnv struct {
 	logPath  string
 }
 
+func (p *govcVMProvider) datastorePathExists(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, isoPath string) (bool, error) {
+	err := p.run(ctx, "datastore.ls", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore, isoPath)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func TestGovcProviderVcsimEnsureISOUploadsReusesAndDeletes(t *testing.T) {
 	env := startVcsim(t)
 	ctx := context.Background()
