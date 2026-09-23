@@ -66,10 +66,11 @@ type VMCreateRequest struct {
 
 // ISOEnsureResult records the ISO object that should be inserted into new VMs.
 type ISOEnsureResult struct {
-	Path      string
-	SHA256    string
-	SizeBytes int64
-	Uploaded  bool
+	LastModified string
+	Path         string
+	SHA256       string
+	SizeBytes    int64
+	Uploaded     bool
 }
 
 // VMProviderFactory builds a VMProvider from a pool and credentials Secret.
@@ -271,10 +272,36 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 	}()
 
 	tmpFile := filepath.Join(tmpDir, "discovery.iso")
-	sha, sizeBytes, err := downloadFileWithSHA256(ctx, downloadURL, tmpFile)
+	// Only revalidate the exact source and cache location that established this
+	// validator. An explicit refresh always fetches a new representation.
+	cached := pool.Status.ISO
+	validator := ""
+	forceToken := pool.Annotations[forceISORefreshAnnotation]
+	if cached.URLHash == downloadURLHash(downloadURL) && cached.SHA256 != "" &&
+		cached.Path == isoContentPath(pool, cached.SHA256) &&
+		(forceToken == "" || forceToken == cached.ForceRefreshToken) {
+		validator = validHTTPDate(cached.LastModified)
+	}
+	download, err := downloadISO(ctx, downloadURL, tmpFile, validator)
 	if err != nil {
 		return ISOEnsureResult{}, err
 	}
+	if download.NotModified {
+		valid, verifyErr := p.verifyISO(ctx, pool, cached.Path, filepath.Join(tmpDir, "cached.iso"), cached.SHA256)
+		if verifyErr != nil {
+			return ISOEnsureResult{}, verifyErr
+		}
+		if valid {
+			return ISOEnsureResult{Path: cached.Path, SHA256: cached.SHA256, SizeBytes: cached.SizeBytes, LastModified: validator}, nil
+		}
+		// A source-side 304 says nothing about the datastore copy. Repair a
+		// missing or corrupt copy with an unconditional, fully verified download.
+		download, err = downloadISO(ctx, downloadURL, tmpFile, "")
+	}
+	if err != nil {
+		return ISOEnsureResult{}, err
+	}
+	sha, sizeBytes := download.SHA256, download.SizeBytes
 	isoPath := isoContentPath(pool, sha)
 
 	valid, err := p.verifyISO(ctx, pool, isoPath, filepath.Join(tmpDir, "cached.iso"), sha)
@@ -282,7 +309,7 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 		return ISOEnsureResult{}, err
 	}
 	if valid {
-		return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes}, nil
+		return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, LastModified: download.LastModified}, nil
 	}
 	if err := p.ensureDatastoreDirectory(ctx, pool, path.Dir(isoPath)); err != nil {
 		return ISOEnsureResult{}, err
@@ -307,7 +334,7 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 		return ISOEnsureResult{}, err
 	}
 
-	return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, Uploaded: true}, nil
+	return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, LastModified: download.LastModified, Uploaded: true}, nil
 }
 
 func (p *govcVMProvider) verifyISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, remote, local, digest string) (bool, error) {
@@ -711,38 +738,59 @@ func isGovcDatastorePathAlreadyExists(err error) bool {
 		strings.Contains(message, "file exists")
 }
 
-func downloadFileWithSHA256(ctx context.Context, rawURL, path string) (string, int64, error) {
+type isoDownloadResult struct {
+	SHA256       string
+	SizeBytes    int64
+	LastModified string
+	NotModified  bool
+}
+
+func validHTTPDate(value string) string {
+	date, err := http.ParseTime(value)
+	if err != nil {
+		return ""
+	}
+	return date.UTC().Format(http.TimeFormat)
+}
+
+func downloadISO(ctx context.Context, rawURL, path, lastModified string) (isoDownloadResult, error) {
 	downloadCtx, cancel := contextWithDefaultTimeout(ctx, isoDownloadTimeout)
 	defer cancel()
 	safeURL := redactedDownloadURL(rawURL)
 
 	req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", 0, fmt.Errorf("invalid ISO download URL %q", safeURL)
+		return isoDownloadResult{}, fmt.Errorf("invalid ISO download URL %q", safeURL)
+	}
+	if lastModified = validHTTPDate(lastModified); lastModified != "" {
+		req.Header.Set("If-Modified-Since", lastModified)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		if downloadCtx.Err() != nil {
-			return "", 0, fmt.Errorf("download %s failed: %w", safeURL, downloadCtx.Err())
+			return isoDownloadResult{}, fmt.Errorf("download %s failed: %w", safeURL, downloadCtx.Err())
 		}
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err
 		}
-		return "", 0, fmt.Errorf("download %s failed: %w", safeURL, err)
+		return isoDownloadResult{}, fmt.Errorf("download %s failed: %w", safeURL, err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return "", 0, fmt.Errorf("download %s returned HTTP %d", safeURL, resp.StatusCode)
+	if resp.StatusCode == http.StatusNotModified && lastModified != "" {
+		return isoDownloadResult{NotModified: true}, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return isoDownloadResult{}, fmt.Errorf("download %s returned HTTP %d", safeURL, resp.StatusCode)
 	}
 	if resp.ContentLength > maxISODownloadSize {
-		return "", 0, fmt.Errorf("download %s is %d bytes, exceeding the %d-byte limit", safeURL, resp.ContentLength, maxISODownloadSize)
+		return isoDownloadResult{}, fmt.Errorf("download %s is %d bytes, exceeding the %d-byte limit", safeURL, resp.ContentLength, maxISODownloadSize)
 	}
 	out, err := os.Create(path)
 	if err != nil {
-		return "", 0, err
+		return isoDownloadResult{}, err
 	}
 	defer func() {
 		_ = out.Close()
@@ -751,14 +799,14 @@ func downloadFileWithSHA256(ctx context.Context, rawURL, path string) (string, i
 	sizeBytes, err := io.Copy(io.MultiWriter(out, hash), io.LimitReader(resp.Body, maxISODownloadSize+1))
 	if err != nil {
 		if downloadCtx.Err() != nil {
-			return "", 0, fmt.Errorf("download %s failed: %w", safeURL, downloadCtx.Err())
+			return isoDownloadResult{}, fmt.Errorf("download %s failed: %w", safeURL, downloadCtx.Err())
 		}
-		return "", 0, err
+		return isoDownloadResult{}, err
 	}
 	if sizeBytes > maxISODownloadSize {
-		return "", 0, fmt.Errorf("download %s exceeds the %d-byte limit", safeURL, maxISODownloadSize)
+		return isoDownloadResult{}, fmt.Errorf("download %s exceeds the %d-byte limit", safeURL, maxISODownloadSize)
 	}
-	return hex.EncodeToString(hash.Sum(nil)), sizeBytes, nil
+	return isoDownloadResult{SHA256: hex.EncodeToString(hash.Sum(nil)), SizeBytes: sizeBytes, LastModified: validHTTPDate(resp.Header.Get("Last-Modified"))}, nil
 }
 
 func redactedDownloadURL(rawURL string) string {

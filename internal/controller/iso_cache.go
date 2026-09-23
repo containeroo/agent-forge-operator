@@ -59,6 +59,7 @@ func (r *VsphereAgentReconciler) ensureISOCache(ctx context.Context, pool *agent
 	pool.Status.ISO.Path = result.Path
 	pool.Status.ISO.SHA256 = result.SHA256
 	pool.Status.ISO.SizeBytes = result.SizeBytes
+	pool.Status.ISO.LastModified = result.LastModified
 	pool.Status.ISO.CheckedAt = now
 	pool.Status.ISO.UploadedAt = uploadedAt
 	pool.Status.ISO.ForceRefreshToken = token

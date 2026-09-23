@@ -2901,6 +2901,7 @@ type fakeVMProvider struct {
 	deletedVMNames   []string
 	deletedVMs       []agentforgev1alpha1.OwnedVMStatus
 	deletedISOPaths  []string
+	isoResult        *ISOEnsureResult
 	isoPath          string
 	vmStatusErr      error
 	vmStatusOwnerUID string
@@ -2910,6 +2911,9 @@ type fakeVMProvider struct {
 
 func (p *fakeVMProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (ISOEnsureResult, error) {
 	p.ensureISOCalls++
+	if p.isoResult != nil {
+		return *p.isoResult, nil
+	}
 	if p.isoPath == "" {
 		p.isoPath = "agent-forge/demo/demo-worker/abc.iso"
 	}

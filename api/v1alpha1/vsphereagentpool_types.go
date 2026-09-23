@@ -197,8 +197,8 @@ type ISOCacheSpec struct {
 	// +optional
 	EjectAfterInstall bool `json:"ejectAfterInstall,omitempty"`
 
-	// CheckInterval controls how often the operator downloads and hashes the
-	// InfraEnv ISO to detect content changes when the URL remains stable.
+	// CheckInterval controls how often the operator revalidates the InfraEnv ISO
+	// with the image service and verifies the cached file.
 	// +optional
 	CheckInterval metav1.Duration `json:"checkInterval,omitempty"`
 
@@ -381,7 +381,12 @@ type ISOCacheStatus struct {
 	// +optional
 	SizeBytes int64 `json:"sizeBytes,omitempty"`
 
-	// CheckedAt is when the operator last downloaded and hashed the ISO.
+	// LastModified is the image service HTTP modification date used for conditional
+	// downloads. SHA256 still identifies and verifies the cached ISO bytes.
+	// +optional
+	LastModified string `json:"lastModified,omitempty"`
+
+	// CheckedAt is when the operator last revalidated the source and cached ISO.
 	// +optional
 	CheckedAt metav1.Time `json:"checkedAt,omitempty"`
 

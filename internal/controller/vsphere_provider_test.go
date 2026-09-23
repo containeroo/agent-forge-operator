@@ -297,7 +297,7 @@ func TestDownloadFileWithSHA256RejectsOversizedResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, _, err := downloadFileWithSHA256(context.Background(), server.URL, filepath.Join(t.TempDir(), "discovery.iso"))
+	_, err := downloadISO(context.Background(), server.URL, filepath.Join(t.TempDir(), "discovery.iso"), "")
 	if err == nil || !strings.Contains(err.Error(), "exceeding the") {
 		t.Fatalf("download error = %v, want size-limit rejection", err)
 	}
@@ -310,7 +310,7 @@ func TestDownloadFileWithSHA256RedactsURLCredentials(t *testing.T) {
 	defer server.Close()
 
 	rawURL := strings.Replace(server.URL, "http://", "http://user:password@", 1) + "/discovery.iso?token=super-secret"
-	_, _, err := downloadFileWithSHA256(context.Background(), rawURL, filepath.Join(t.TempDir(), "discovery.iso"))
+	_, err := downloadISO(context.Background(), rawURL, filepath.Join(t.TempDir(), "discovery.iso"), "")
 	if err == nil {
 		t.Fatal("download unexpectedly succeeded")
 	}

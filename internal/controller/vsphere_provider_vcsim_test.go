@@ -378,3 +378,46 @@ func TestGovcProviderVcsimEjectISO(t *testing.T) {
 		}
 	}
 }
+
+func TestGovcProviderVcsimConditionalISORevalidation(t *testing.T) {
+	env := startVcsim(t)
+	ctx := context.Background()
+	modified := time.Date(2026, 9, 23, 1, 24, 34, 0, time.UTC)
+	requests := make(chan string, 8)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Header.Get("If-Modified-Since")
+		// Each request can produce new signed bytes even with the same source revision.
+		http.ServeContent(w, r, "discovery.iso", modified, strings.NewReader(fmt.Sprintf("ISO-signature-%d", time.Now().UnixNano())))
+	}))
+	defer server.Close()
+	pool := vcsimProviderTestPool()
+	provider := env.provider()
+	first, err := provider.EnsureISO(ctx, pool, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Status.ISO = agentforgev1alpha1.ISOCacheStatus{Path: first.Path, SHA256: first.SHA256, SizeBytes: first.SizeBytes, LastModified: first.LastModified, URLHash: downloadURLHash(server.URL)}
+	reused, err := provider.EnsureISO(ctx, pool, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.Uploaded || reused.Path != first.Path || reused.SHA256 != first.SHA256 {
+		t.Fatalf("source revalidation rotated cache: %+v", reused)
+	}
+	if <-requests != "" || <-requests != modified.Format(http.TimeFormat) {
+		t.Fatal("expected initial download followed by conditional request")
+	}
+	if err := provider.DeleteISO(ctx, pool, first.Path); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := provider.EnsureISO(ctx, pool, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repaired.Uploaded {
+		t.Fatal("missing cache was not repaired after 304")
+	}
+	if <-requests != modified.Format(http.TimeFormat) || <-requests != "" {
+		t.Fatal("expected conditional check followed by unconditional repair")
+	}
+}
