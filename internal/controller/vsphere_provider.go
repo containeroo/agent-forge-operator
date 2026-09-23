@@ -66,11 +66,12 @@ type VMCreateRequest struct {
 
 // ISOEnsureResult records the ISO object that should be inserted into new VMs.
 type ISOEnsureResult struct {
-	LastModified string
-	Path         string
-	SHA256       string
-	SizeBytes    int64
-	Uploaded     bool
+	VerificationDeferred bool
+	LastModified         string
+	Path                 string
+	SHA256               string
+	SizeBytes            int64
+	Uploaded             bool
 }
 
 // VMProviderFactory builds a VMProvider from a pool and credentials Secret.
@@ -287,9 +288,20 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 		return ISOEnsureResult{}, err
 	}
 	if download.NotModified {
+		// Mounted media can be locked against datastore downloads. Reuse only
+		// the previously verified identity after the source confirms it is unchanged.
+		// Do not advance CheckedAt: verification must resume after the last ejection.
+		inUse, inspectErr := p.cachedISOInUse(ctx, pool, cached.Path)
+		if inspectErr != nil {
+			return ISOEnsureResult{}, fmt.Errorf("inspect cached ISO references: %w", inspectErr)
+		}
+		if inUse {
+			return ISOEnsureResult{Path: cached.Path, SHA256: cached.SHA256, SizeBytes: cached.SizeBytes,
+				LastModified: validator, VerificationDeferred: true}, nil
+		}
 		valid, verifyErr := p.verifyISO(ctx, pool, cached.Path, filepath.Join(tmpDir, "cached.iso"), cached.SHA256)
 		if verifyErr != nil {
-			return ISOEnsureResult{}, verifyErr
+			return ISOEnsureResult{}, fmt.Errorf("verify cached ISO: %w", verifyErr)
 		}
 		if valid {
 			return ISOEnsureResult{Path: cached.Path, SHA256: cached.SHA256, SizeBytes: cached.SizeBytes, LastModified: validator}, nil
@@ -335,6 +347,35 @@ func (p *govcVMProvider) EnsureISO(ctx context.Context, pool *agentforgev1alpha1
 	}
 
 	return ISOEnsureResult{Path: isoPath, SHA256: sha, SizeBytes: sizeBytes, LastModified: download.LastModified, Uploaded: true}, nil
+}
+
+// cachedISOInUse uses live device backing, not installation or ejection status.
+// A reference is conservatively treated as in-use even if disconnected or powered off.
+func (p *govcVMProvider) cachedISOInUse(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, remote string) (bool, error) {
+	backing := "[" + pool.Spec.VSphere.ISODatastore + "] " + remote
+	for _, vm := range pool.Status.OwnedVMs {
+		var details govcVirtualMachine
+		var err error
+		if vm.BIOSUUID != "" {
+			details, err = p.vmDetailsByUUID(ctx, pool, vm.BIOSUUID)
+		} else if vm.Name != "" {
+			details, err = p.vmDetails(ctx, pool, vm.Name)
+		} else {
+			return false, fmt.Errorf("cannot inspect ISO reference for VM without identity")
+		}
+		if errors.Is(err, errVMNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		for _, device := range details.Config.Hardware.Device {
+			if device.Backing.FileName == backing {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (p *govcVMProvider) verifyISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, remote, local, digest string) (bool, error) {

@@ -6,15 +6,24 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -28,9 +37,15 @@ func TestISOConditionalRevalidation(t *testing.T) {
 	for _, tc := range []struct {
 		name                                                                                                                string
 		corrupt, missing, denied, changed, changedURL, changedPath, force, noValidator, invalidValidator, noServerValidator bool
+		mounted, inspectDenied, otherISO, wantDeferred                                                                      bool
 		wantConditional, wantReuse, wantErr                                                                                 bool
 		wantRequests                                                                                                        int
 	}{
+		{name: "mounted unchanged ISO defers verification", mounted: true, wantDeferred: true, wantConditional: true, wantReuse: true, wantRequests: 1},
+		{name: "other ISO attached still verifies", mounted: true, otherISO: true, wantConditional: true, wantReuse: true, wantRequests: 1},
+		{name: "inventory failure remains error", inspectDenied: true, wantConditional: true, wantErr: true, wantRequests: 1},
+		{name: "changed source with old ISO mounted", mounted: true, changed: true, wantConditional: true, wantRequests: 1},
+		{name: "force refresh bypasses mounted reuse", mounted: true, force: true, wantRequests: 1},
 		{name: "signature churn reuses verified bytes", wantConditional: true, wantReuse: true, wantRequests: 1},
 		{name: "source configuration changed", changed: true, wantConditional: true, wantRequests: 1},
 		{name: "missing cached file repaired", missing: true, wantConditional: true, wantRequests: 2},
@@ -49,6 +64,9 @@ func TestISOConditionalRevalidation(t *testing.T) {
 			script := `#!/bin/sh
 printf '%s\n' "$*" >> "$REVALIDATION_DIR/calls"
 case "$1" in
+ vm.info)
+  if test -f "$REVALIDATION_DIR/inspect-denied"; then echo 'permission denied' >&2; exit 1; fi
+  cat "$REVALIDATION_DIR/vm.json";;
  datastore.download)
   if test -f "$REVALIDATION_DIR/denied"; then echo 'permission denied' >&2; exit 1; fi
   case "$6" in
@@ -109,6 +127,7 @@ esac
 			if tc.invalidValidator {
 				pool.Status.ISO.LastModified = "invalid date"
 			}
+			configureMountedISOFixture(t, pool, dir, tc.mounted, tc.inspectDenied, tc.otherISO)
 			provider := &govcVMProvider{command: command}
 			result, err := provider.EnsureISO(context.Background(), pool, server.URL)
 			if (err != nil) != tc.wantErr {
@@ -139,6 +158,12 @@ esac
 				if result.SHA256 != hex.EncodeToString(expected[:]) || result.SizeBytes != int64(len(regenerated)) {
 					t.Fatalf("download identity=%+v", result)
 				}
+			}
+			if result.VerificationDeferred != tc.wantDeferred {
+				t.Fatalf("deferred=%v", result.VerificationDeferred)
+			}
+			if tc.wantDeferred {
+				result = resumeDeferredISOFixture(t, dir, provider, pool, server.URL)
 			}
 			checkRevalidationMetadata(t, result, modified, tc.changed, tc.noServerValidator, tc.wantReuse, dir)
 		})
@@ -196,4 +221,97 @@ func checkRevalidationMetadata(t *testing.T, result ISOEnsureResult, modified ti
 	if wantReuse && strings.Contains(string(calls), "datastore.upload") {
 		t.Fatal("unchanged source uploaded")
 	}
+}
+
+func TestDeferredISOVerificationPreservesCacheStatus(t *testing.T) {
+	pool := reconcileTestPool()
+	old := metav1.NewTime(time.Now().Add(-time.Hour))
+	pool.Status.ISO = agentforgev1alpha1.ISOCacheStatus{Path: "cache/current.iso", SHA256: "digest", CheckedAt: old, UploadedAt: old}
+	before := pool.DeepCopy().Status.ISO
+	provider := &fakeVMProvider{isoResult: &ISOEnsureResult{Path: pool.Status.ISO.Path, VerificationDeferred: true}}
+	r := &VsphereAgentReconciler{}
+	if _, err := r.ensureISOCache(context.Background(), pool, provider, "https://example.invalid/iso"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, pool.Status.ISO) {
+		t.Fatal("deferral changed cache identity or verification timestamps")
+	}
+	condition := meta.FindStatusCondition(pool.Status.Conditions, conditionISOReady)
+	if condition == nil || condition.Reason != "VerificationDeferred" || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("condition=%+v", condition)
+	}
+	if !isoCacheDue(pool, "https://example.invalid/iso", "", time.Now()) {
+		t.Fatal("verification no longer due after deferral")
+	}
+}
+
+type failingISOProvider struct{ fakeVMProvider }
+
+func (*failingISOProvider) EnsureISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (ISOEnsureResult, error) {
+	return ISOEnsureResult{}, errors.New("verify cached ISO: permission denied")
+}
+
+func TestISOFailureRemainsObservableAfterRecovery(t *testing.T) {
+	pool := reconcileTestPool()
+	recorder := events.NewFakeRecorder(10)
+	var logs []string
+	ctx := log.IntoContext(context.Background(), funcr.New(func(_, message string) { logs = append(logs, message) }, funcr.Options{}))
+	r := &VsphereAgentReconciler{Recorder: recorder}
+	if _, err := r.ensureISOCache(ctx, pool, &failingISOProvider{}, "https://example.invalid/iso"); err == nil {
+		t.Fatal("failure suppressed")
+	}
+	if _, err := r.ensureISOCache(ctx, pool, &fakeVMProvider{}, "https://example.invalid/iso"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "Warning ISORefreshFailed") || !strings.Contains(event, "permission denied") {
+			t.Fatalf("event=%s", event)
+		}
+	default:
+		t.Fatal("no failure event recorded")
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "permission denied") || !strings.Contains(logs[0], pool.Name) {
+		t.Fatalf("logs=%v", logs)
+	}
+}
+
+func configureMountedISOFixture(t *testing.T, pool *agentforgev1alpha1.VsphereAgentPool, dir string, mounted, inspectDenied, otherISO bool) {
+	t.Helper()
+	if mounted || inspectDenied {
+		pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{{Name: "installer", BIOSUUID: "vm-uuid"}}
+		backing := "[" + pool.Spec.VSphere.ISODatastore + "] " + pool.Status.ISO.Path
+		if otherISO {
+			backing += ".other"
+		}
+		vm := govcVirtualMachine{}
+		device := govcDevice{}
+		device.Backing.FileName = backing
+		vm.Config.Hardware.Device = []govcDevice{device}
+		data, _ := json.Marshal(govcVMInfo{VirtualMachines: []govcVirtualMachine{vm}})
+		if err := os.WriteFile(filepath.Join(dir, "vm.json"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if inspectDenied {
+			if err := os.WriteFile(filepath.Join(dir, "inspect-denied"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func resumeDeferredISOFixture(t *testing.T, dir string, provider *govcVMProvider, pool *agentforgev1alpha1.VsphereAgentPool, url string) ISOEnsureResult {
+	t.Helper()
+	calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+	if strings.Contains(string(calls), "datastore.") {
+		t.Fatalf("accessed mounted datastore file: %s", calls)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "vm.json"), []byte(`{"virtualMachines":[{}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := provider.EnsureISO(context.Background(), pool, url)
+	if err != nil || result.VerificationDeferred {
+		t.Fatalf("verification did not resume: %+v %v", result, err)
+	}
+	return result
 }

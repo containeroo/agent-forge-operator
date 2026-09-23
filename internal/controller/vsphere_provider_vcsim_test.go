@@ -421,3 +421,45 @@ func TestGovcProviderVcsimConditionalISORevalidation(t *testing.T) {
 		t.Fatal("expected conditional check followed by unconditional repair")
 	}
 }
+
+func TestGovcProviderVcsimDefersMountedISOVerification(t *testing.T) {
+	env := startVcsim(t)
+	ctx := context.Background()
+	pool := vcsimProviderTestPool()
+	provider := env.provider()
+	modified := time.Date(2026, 9, 23, 1, 24, 34, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "discovery.iso", modified, strings.NewReader("discovery"))
+	}))
+	defer server.Close()
+	iso, err := provider.EnsureISO(ctx, pool, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Status.ISO = agentforgev1alpha1.ISOCacheStatus{Path: iso.Path, SHA256: iso.SHA256, SizeBytes: iso.SizeBytes, LastModified: iso.LastModified, URLHash: downloadURLHash(server.URL)}
+	name := "demo-worker-deferred"
+	env.runGovc(t, "vm.create", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore,
+		"-pool", "/DC0/host/DC0_C0/Resources", "-net", pool.Spec.VSphere.Network, "-on=false", name)
+	env.runGovc(t, "device.cdrom.add", "-dc", pool.Spec.VSphere.Datacenter, "-vm", name)
+	env.runGovc(t, "device.cdrom.insert", "-dc", pool.Spec.VSphere.Datacenter, "-vm", name, "-ds", pool.Spec.VSphere.ISODatastore, iso.Path)
+	vm, err := provider.VMStatus(ctx, pool, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{vm}
+	result, err := provider.EnsureISO(ctx, pool, server.URL)
+	if err != nil || !result.VerificationDeferred || result.Path != iso.Path || result.Uploaded {
+		t.Fatalf("mounted verification: %+v %v", result, err)
+	}
+	op, err := provider.PrepareISOEjection(ctx, pool, vm)
+	if err != nil || op == nil {
+		t.Fatalf("prepare: %+v %v", op, err)
+	}
+	if err := provider.EjectISO(ctx, pool, op, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	result, err = provider.EnsureISO(ctx, pool, server.URL)
+	if err != nil || result.VerificationDeferred || result.Path != iso.Path || result.Uploaded {
+		t.Fatalf("verification after eject: %+v %v", result, err)
+	}
+}

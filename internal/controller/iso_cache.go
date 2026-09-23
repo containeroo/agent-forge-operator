@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentforgev1alpha1 "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 )
@@ -37,7 +38,20 @@ func (r *VsphereAgentReconciler) ensureISOCache(ctx context.Context, pool *agent
 	result, err := provider.EnsureISO(ctx, pool, isoDownloadURL)
 	if err != nil {
 		recordISOOperation("ensure", err)
+		message := stableErrorMessage(err)
+		log.FromContext(ctx).Error(fmt.Errorf("%s", message), "ISO cache verification failed", "poolNamespace", pool.Namespace, "pool", pool.Name, "isoPath", pool.Status.ISO.Path)
+		if r.Recorder != nil {
+			recordEvent(r.Recorder, pool, corev1.EventTypeWarning, "ISORefreshFailed", message)
+		}
 		return "", err
+	}
+	if result.VerificationDeferred {
+		isoOperationsTotal.WithLabelValues("ensure", "deferred").Inc()
+		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+			Type: conditionISOReady, Status: metav1.ConditionTrue, ObservedGeneration: pool.Generation,
+			Reason: "VerificationDeferred", Message: "Source unchanged; cached ISO is attached to a VM, checksum verification will resume after ejection",
+		})
+		return result.Path, nil
 	}
 	recordISOOperation("ensure", nil)
 
