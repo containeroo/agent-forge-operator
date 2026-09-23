@@ -566,7 +566,10 @@ func cdromLockAnswer(q *govcVMQuestion) string {
 		return ""
 	}
 	for _, choice := range q.Choice.ChoiceInfo {
-		if strings.EqualFold(strings.TrimSpace(choice.Label), "Yes") {
+		// vSphere exposes the stable button identifier as the label; "Yes"
+		// is also accepted for responses that use the rendered label.
+		label := strings.TrimSpace(choice.Label)
+		if strings.EqualFold(label, "button.yes") || strings.EqualFold(label, "Yes") {
 			return choice.Key
 		}
 	}

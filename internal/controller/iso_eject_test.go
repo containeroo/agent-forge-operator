@@ -167,7 +167,7 @@ func TestGovcEjectISO(t *testing.T) {
 			info := map[string]any{"virtualMachines": []any{map[string]any{"config": map[string]any{"uuid": uuid, "annotation": vmOwnerAnnotationPrefix + tc.owner, "hardware": map[string]any{"device": []any{map[string]any{"key": 3000, "backing": map[string]any{"fileName": tc.path}}}}}}}}
 			data, _ := json.Marshal(info)
 			_ = os.WriteFile(filepath.Join(dir, "info.json"), data, 0600)
-			question := `{"virtualMachines":[{"runtime":{"question":{"id":"question-1","message":[{"id":"msg.cdromdisconnect.locked"}],"choice":{"choiceInfo":[{"key":"0","label":"No"},{"key":"1","label":"Yes"}]}}}}]}`
+			question := `{"virtualMachines":[{"runtime":{"question":{"id":"question-1","message":[{"id":"msg.cdromdisconnect.locked"}],"choice":{"choiceInfo":[{"key":"0","label":"button.yes","summary":"Yes"},{"key":"1","label":"button.no","summary":"No"}]}}}}]}`
 			if tc.unrelatedQuestion {
 				question = strings.ReplaceAll(question, "msg.cdromdisconnect.locked", "msg.unrelated")
 			}
@@ -205,7 +205,7 @@ esac
 			if strings.Contains(out, "device.cdrom.eject") != tc.wantCalls {
 				t.Fatalf("unexpected calls:\n%s", out)
 			}
-			if tc.locked && !strings.Contains(out, "vm.question -dc dc1 -vm.uuid "+uuid+" -answer 1") {
+			if tc.locked && !strings.Contains(out, "vm.question -dc dc1 -vm.uuid "+uuid+" -answer 0") {
 				t.Fatalf("lock not answered: %s", out)
 			}
 			if tc.unrelatedQuestion && strings.Contains(out, "vm.question") {
@@ -372,7 +372,7 @@ func TestGovcISOEjectionRecovery(t *testing.T) {
 			if tc.unrelated {
 				messageID = "msg.other"
 			}
-			question := map[string]any{"id": "question-1", "message": []any{map[string]any{"id": messageID}}, "choice": map[string]any{"choiceInfo": []any{map[string]any{"key": "1", "label": "Yes"}}}}
+			question := map[string]any{"id": "question-1", "message": []any{map[string]any{"id": messageID}}, "choice": map[string]any{"choiceInfo": []any{map[string]any{"key": "1", "label": "button.yes"}}}}
 			vm := map[string]any{"config": map[string]any{"uuid": uuid, "annotation": vmOwnerAnnotationPrefix + "owner", "hardware": map[string]any{"device": []any{map[string]any{"key": 3000, "backing": map[string]any{"fileName": filename}}}}}, "runtime": map[string]any{"question": question}}
 			if tc.noQuestion {
 				delete(vm, "runtime")
@@ -429,6 +429,30 @@ esac
 				if err := p.EjectISO(context.Background(), providerTestPool(), op, func() error { return nil }); err != nil {
 					t.Fatalf("idempotent recovery: %v", err)
 				}
+			}
+		})
+	}
+}
+
+func TestCDROMLockAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name, messageID, choices, want string
+	}{
+		{"vSphere button identifier", "msg.cdromdisconnect.locked", `[{"key":"0","label":"button.yes","summary":"Yes"},{"key":"1","label":"button.no","summary":"No"}]`, "0"},
+		{"rendered label", "msg.cdromdisconnect.locked", `[{"key":"7","label":"Yes"}]`, "7"},
+		{"localized summary", "msg.cdromdisconnect.locked", `[{"key":"9","label":"button.yes","summary":"Ja"}]`, "9"},
+		{"unrelated question", "msg.other", `[{"key":"0","label":"button.yes"}]`, ""},
+		{"negative choice", "msg.cdromdisconnect.locked", `[{"key":"0","label":"button.no","summary":"Yes"}]`, ""},
+		{"unknown choice", "msg.cdromdisconnect.locked", `[{"key":"0","label":"button.ok","summary":"Yes"}]`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var question govcVMQuestion
+			data := `{"id":"11574734","message":[{"id":"` + tc.messageID + `"}],"choice":{"defaultIndex":1,"choiceInfo":` + tc.choices + `}}`
+			if err := json.Unmarshal([]byte(data), &question); err != nil {
+				t.Fatal(err)
+			}
+			if got := cdromLockAnswer(&question); got != tc.want {
+				t.Fatalf("answer=%q, want %q", got, tc.want)
 			}
 		})
 	}
