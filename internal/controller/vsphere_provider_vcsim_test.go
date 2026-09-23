@@ -319,3 +319,62 @@ func TestRegressionVcsimRejectsTruncatedCachedISO(t *testing.T) {
 		t.Fatalf("published ISO contents = %q, want %q", repaired, content)
 	}
 }
+
+func TestGovcProviderVcsimEjectISO(t *testing.T) {
+	env := startVcsim(t)
+	ctx := context.Background()
+	pool := vcsimProviderTestPool()
+	provider := env.provider()
+	isoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("discovery")) }))
+	defer isoServer.Close()
+	iso, err := provider.EnsureISO(ctx, pool, isoServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "demo-worker-eject"
+	env.runGovc(t, "vm.create", "-dc", pool.Spec.VSphere.Datacenter, "-ds", pool.Spec.VSphere.ISODatastore,
+		"-pool", "/DC0/host/DC0_C0/Resources", "-net", pool.Spec.VSphere.Network, "-on=false", name)
+	env.runGovc(t, "device.cdrom.add", "-dc", pool.Spec.VSphere.Datacenter, "-vm", name)
+	env.runGovc(t, "device.cdrom.insert", "-dc", pool.Spec.VSphere.Datacenter, "-vm", name, "-ds", pool.Spec.VSphere.ISODatastore, iso.Path)
+	before, err := provider.vmDetails(ctx, pool, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, device := range before.Config.Hardware.Device {
+		if strings.HasSuffix(device.Backing.FileName, iso.Path) {
+			env.runGovc(t, "device.connect", "-dc", pool.Spec.VSphere.Datacenter, "-vm", name, fmt.Sprintf("cdrom-%d", device.Key))
+		}
+	}
+	env.runGovc(t, "vm.power", "-on", "-dc", pool.Spec.VSphere.Datacenter, name)
+	vm, err := provider.VMStatus(ctx, pool, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err := provider.PrepareISOEjection(ctx, pool, vm)
+	if err != nil || op == nil {
+		t.Fatalf("prepare: %v, operation: %v", err, op)
+	}
+	if err := provider.EjectISO(ctx, pool, op, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.EjectISO(ctx, pool, op, func() error { return nil }); err != nil {
+		t.Fatalf("repeat eject: %v", err)
+	}
+	details, err := provider.vmDetailsByUUID(ctx, pool, vm.BIOSUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.Runtime.PowerState != "poweredOn" {
+		t.Fatal("ISO ejection changed VM power state")
+	}
+	for _, device := range details.Config.Hardware.Device {
+		if strings.Contains(device.Backing.FileName, iso.Path) {
+			t.Fatal("ISO still referenced after eject")
+		}
+		for _, original := range before.Config.Hardware.Device {
+			if strings.HasSuffix(original.Backing.FileName, iso.Path) && device.Key == original.Key && (device.Connectable.Connected || device.Connectable.StartConnected) {
+				t.Fatal("CD-ROM remains connected or set to reconnect at boot")
+			}
+		}
+	}
+}

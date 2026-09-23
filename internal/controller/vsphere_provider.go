@@ -82,6 +82,8 @@ type VMProvider interface {
 	CreateVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, VMCreateRequest) (agentforgev1alpha1.OwnedVMStatus, error)
 	VMStatus(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) (agentforgev1alpha1.OwnedVMStatus, error)
 	DeleteVM(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) error
+	PrepareISOEjection(context.Context, *agentforgev1alpha1.VsphereAgentPool, agentforgev1alpha1.OwnedVMStatus) (*agentforgev1alpha1.ISOEjectionStatus, error)
+	EjectISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, *agentforgev1alpha1.ISOEjectionStatus, func() error) error
 	DeleteISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, string) error
 }
 
@@ -394,6 +396,183 @@ func (p *govcVMProvider) DeleteVM(ctx context.Context, pool *agentforgev1alpha1.
 	return err
 }
 
+// PrepareISOEjection is read-only. The controller must persist its result before
+// calling EjectISO. Existing questions must not be adopted as our own operation.
+func (p *govcVMProvider) PrepareISOEjection(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) (*agentforgev1alpha1.ISOEjectionStatus, error) {
+	if vm.BIOSUUID == "" {
+		return nil, fmt.Errorf("cannot eject ISO without a VM UUID")
+	}
+	details, err := p.vmDetailsByUUID(ctx, pool, vm.BIOSUUID)
+	if err != nil {
+		return nil, err
+	}
+	if normalizeVMwareSerialUUID(details.Config.UUID) != vm.BIOSUUID ||
+		(vm.OwnerUID != "" && details.Config.Annotation != vmOwnerAnnotationPrefix+vm.OwnerUID) {
+		return nil, fmt.Errorf("%w: refusing ISO ejection for VM %q", errVMOwnershipMismatch, vm.Name)
+	}
+	if details.Runtime.Question != nil {
+		return nil, fmt.Errorf("VM %q has a pending question; refusing new ISO ejection", vm.Name)
+	}
+	prefix := "[" + pool.Spec.VSphere.ISODatastore + "] " + isoPathPrefix(pool) + "/"
+	for _, device := range details.Config.Hardware.Device {
+		filename := device.Backing.FileName
+		if !strings.HasPrefix(filename, prefix) {
+			continue
+		}
+		digest := strings.TrimSuffix(strings.TrimPrefix(filename, prefix), ".iso")
+		decoded, decodeErr := hex.DecodeString(digest)
+		if !strings.HasSuffix(filename, ".iso") || decodeErr != nil || len(decoded) != sha256.Size {
+			continue
+		}
+		return &agentforgev1alpha1.ISOEjectionStatus{VMName: vm.Name, BIOSUUID: vm.BIOSUUID, OwnerUID: vm.OwnerUID,
+			Datacenter: pool.Spec.VSphere.Datacenter, DeviceKey: device.Key, ISOPath: filename, StartedAt: metav1.Now()}, nil
+	}
+	return nil, nil
+}
+
+// EjectISO completes only the persisted target, independently of current opt-in
+// and pool media settings. A retry also handles a disconnect's pending CD lock.
+func (p *govcVMProvider) EjectISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, op *agentforgev1alpha1.ISOEjectionStatus, checkpoint func() error) error {
+	if op.BIOSUUID == "" || op.ISOPath == "" {
+		return fmt.Errorf("incomplete persisted ISO ejection identity")
+	}
+	pool = pool.DeepCopy()
+	pool.Spec.VSphere.Datacenter = op.Datacenter
+	details, err := p.vmDetailsByUUID(ctx, pool, op.BIOSUUID)
+	if errors.Is(err, errVMNotFound) {
+		// The original VM is gone; never look up its name.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if normalizeVMwareSerialUUID(details.Config.UUID) != op.BIOSUUID ||
+		(op.OwnerUID != "" && details.Config.Annotation != vmOwnerAnnotationPrefix+op.OwnerUID) {
+		return fmt.Errorf("%w: refusing ISO ejection for VM %q", errVMOwnershipMismatch, op.VMName)
+	}
+	var target *govcDevice
+	for i := range details.Config.Hardware.Device {
+		if details.Config.Hardware.Device[i].Key == op.DeviceKey {
+			target = &details.Config.Hardware.Device[i]
+			break
+		}
+	}
+	if target == nil || target.Backing.FileName == "" {
+		return nil
+	}
+	if target.Backing.FileName != op.ISOPath {
+		return fmt.Errorf("VM %q media changed during ISO ejection", op.VMName)
+	}
+	if details.Runtime.Question != nil {
+		if !op.DisconnectStarted {
+			return fmt.Errorf("VM %q has a question before disconnect started", op.VMName)
+		}
+		if err := p.answerISOLock(ctx, pool, op, details.Runtime.Question, checkpoint); err != nil {
+			return err
+		}
+	}
+	if !op.DisconnectStarted {
+		op.DisconnectStarted = true
+		if err := checkpoint(); err != nil {
+			return err
+		}
+	}
+	device := fmt.Sprintf("cdrom-%d", op.DeviceKey)
+	if err := p.disconnectInstallationMedia(ctx, pool, op, device, checkpoint); err != nil {
+		return err
+	}
+	if err := p.run(ctx, "device.cdrom.eject", "-dc", pool.Spec.VSphere.Datacenter, "-vm.uuid", op.BIOSUUID, "-device", device); err != nil {
+		return err
+	}
+	observed, err := p.vmDetailsByUUID(ctx, pool, op.BIOSUUID)
+	if err != nil {
+		return err
+	}
+	for _, current := range observed.Config.Hardware.Device {
+		if current.Key == op.DeviceKey && current.Backing.FileName == op.ISOPath {
+			return fmt.Errorf("VM %q still references discovery ISO after ejection", op.VMName)
+		}
+	}
+	return nil
+}
+
+func (p *govcVMProvider) answerISOLock(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, op *agentforgev1alpha1.ISOEjectionStatus, question *govcVMQuestion, checkpoint func() error) error {
+	answer := cdromLockAnswer(question)
+	if answer == "" || question.ID == "" || (op.QuestionID != "" && op.QuestionID != question.ID) {
+		return fmt.Errorf("unexpected VM question during ISO disconnect: %s", question.ID)
+	}
+	if op.QuestionID == "" {
+		op.QuestionID = question.ID
+		if err := checkpoint(); err != nil {
+			return err
+		}
+	}
+	return p.run(ctx, "vm.question", "-dc", pool.Spec.VSphere.Datacenter, "-vm.uuid", op.BIOSUUID, "-answer", answer)
+}
+
+// A guest CD lock can block the reconfiguration task pending a VM question.
+// Only answer the CD-lock question for our persisted operation; never enable
+// global msg.autoanswer. The record remains available on timeout or restart.
+func (p *govcVMProvider) disconnectInstallationMedia(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, op *agentforgev1alpha1.ISOEjectionStatus, device string, checkpoint func() error) error {
+	ctx, cancel := context.WithTimeout(ctx, govcCommandTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- p.run(ctx, "device.disconnect", "-dc", pool.Spec.VSphere.Datacenter, "-vm.uuid", op.BIOSUUID, device)
+	}()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			details, err := p.vmDetailsByUUID(ctx, pool, op.BIOSUUID)
+			if err != nil {
+				return err
+			}
+			if details.Runtime.Question != nil {
+				if err := p.answerISOLock(ctx, pool, op, details.Runtime.Question, checkpoint); err != nil {
+					return err
+				}
+			}
+		}
+	}
+}
+
+type govcVMQuestion struct {
+	ID      string `json:"id"`
+	Message []struct {
+		ID string `json:"id"`
+	} `json:"message"`
+	Choice struct {
+		ChoiceInfo []struct {
+			Key   string `json:"key"`
+			Label string `json:"label"`
+		} `json:"choiceInfo"`
+	} `json:"choice"`
+}
+
+func cdromLockAnswer(q *govcVMQuestion) string {
+	locked := false
+	for _, message := range q.Message {
+		if message.ID == "msg.cdromdisconnect.locked" {
+			locked = true
+		}
+	}
+	if !locked {
+		return ""
+	}
+	for _, choice := range q.Choice.ChoiceInfo {
+		if strings.EqualFold(strings.TrimSpace(choice.Label), "Yes") {
+			return choice.Key
+		}
+	}
+	return ""
+}
+
 func (p *govcVMProvider) DeleteISO(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, isoPath string) error {
 	if strings.TrimSpace(isoPath) == "" {
 		return nil
@@ -652,7 +831,11 @@ type govcVMInfo struct {
 }
 
 type govcVirtualMachine struct {
-	Config govcVMConfig `json:"config"`
+	Config  govcVMConfig `json:"config"`
+	Runtime struct {
+		Question   *govcVMQuestion `json:"question"`
+		PowerState string          `json:"powerState"`
+	} `json:"runtime"`
 }
 
 type govcVMConfig struct {
@@ -666,6 +849,14 @@ type govcHardware struct {
 }
 
 type govcDevice struct {
+	Connectable struct {
+		Connected      bool `json:"connected"`
+		StartConnected bool `json:"startConnected"`
+	} `json:"connectable"`
+	Key     int `json:"key"`
+	Backing struct {
+		FileName string `json:"fileName"`
+	} `json:"backing"`
 	MACAddress string `json:"macAddress"`
 }
 

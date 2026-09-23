@@ -2890,6 +2890,9 @@ func TestVsphereAgentDeleteCleansUpVMWhenStatusWasNeverPersisted(t *testing.T) {
 }
 
 type fakeVMProvider struct {
+	prepareISOCalls  int
+	ejectISOCalls    int
+	ejectISOErr      error
 	ensureISOCalls   int
 	createVMCalls    int
 	deleteVMCalls    int
@@ -3534,4 +3537,14 @@ func TestReplacementVMDoesNotInheritExpiredDiscovery(t *testing.T) {
 	if len(merged) != 1 || merged[0].Phase == phaseOrphaned || merged[0].Reason == old.Reason {
 		t.Fatalf("replacement inherited expired state: %#v", merged)
 	}
+}
+
+func (p *fakeVMProvider) EjectISO(context.Context, *agentforgev1alpha1.VsphereAgentPool, *agentforgev1alpha1.ISOEjectionStatus, func() error) error {
+	p.ejectISOCalls++
+	return p.ejectISOErr
+}
+
+func (p *fakeVMProvider) PrepareISOEjection(_ context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus) (*agentforgev1alpha1.ISOEjectionStatus, error) {
+	p.prepareISOCalls++
+	return &agentforgev1alpha1.ISOEjectionStatus{VMName: vm.Name, BIOSUUID: vm.BIOSUUID, Datacenter: pool.Spec.VSphere.Datacenter, DeviceKey: 3000, ISOPath: "[datastore] discovery.iso", StartedAt: metav1.Now()}, nil
 }

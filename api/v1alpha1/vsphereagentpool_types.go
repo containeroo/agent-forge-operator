@@ -189,6 +189,14 @@ type AgentBindingSpec struct {
 
 // ISOCacheSpec controls how the InfraEnv discovery ISO is cached in vSphere.
 type ISOCacheSpec struct {
+	// EjectAfterInstall opts this pool into disconnecting and ejecting cached
+	// discovery media after the matching Agent reports Installed=True. Includes
+	// existing installed workers and overriding the guest CD-ROM lock. Disabling
+	// stops new ejections; a persisted in-flight ejection is still completed.
+	// +kubebuilder:default=false
+	// +optional
+	EjectAfterInstall bool `json:"ejectAfterInstall,omitempty"`
+
 	// CheckInterval controls how often the operator downloads and hashes the
 	// InfraEnv ISO to detect content changes when the URL remains stable.
 	// +optional

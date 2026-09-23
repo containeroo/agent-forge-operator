@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
@@ -53,6 +54,7 @@ type VsphereAgentReconciler struct {
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agent-forge.containeroo.ch,resources=vsphereagentpools/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=agent-install.openshift.io,resources=agents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agent-install.openshift.io,resources=infraenvs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -89,6 +91,19 @@ func (r *VsphereAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 	applySpecDefaults(&pool)
+
+	// Finish authorized operations before checking opt-in, installation, or deletion
+	// again. A vSphere question must not be stranded by a restart or pool edit.
+	if agent.Status.ISOEjection != nil {
+		err := r.finishISOEjection(ctx, &agent, &pool)
+		if err != nil {
+			setISOEjectionCondition(&agent, metav1.ConditionFalse, "EjectionFailed", stableErrorMessage(err))
+		}
+		if statusErr := r.updateStatus(ctx, &agent); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
 
 	if agent.DeletionTimestamp.IsZero() {
 		if controllerutil.AddFinalizer(&agent, vsphereAgentFinalizerName) {
@@ -250,6 +265,16 @@ func (r *VsphereAgentReconciler) reconcileExistingVM(ctx context.Context, agent 
 	if vm.OwnerUID != "" {
 		agent.Status.VM.OwnerUID = vm.OwnerUID
 	}
+	if err := r.ejectInstalledAgentISO(ctx, agent, pool); err != nil {
+		meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+			Type: "ISOEjected", Status: metav1.ConditionFalse, ObservedGeneration: agent.Generation,
+			Reason: "EjectionFailed", Message: stableErrorMessage(err),
+		})
+		if statusErr := r.updateStatus(ctx, agent); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, err
+	}
 	readyReason := "VMCreated"
 	readyMessage := "vSphere VM has been created"
 	if agent.Labels[vsphereAgentCreatedForLabel] == vsphereAgentCreatedForAdopted {
@@ -263,7 +288,103 @@ func (r *VsphereAgentReconciler) reconcileExistingVM(ctx context.Context, agent 
 		Reason:             readyReason,
 		Message:            readyMessage,
 	})
+	if agent.Status.ISOEjection != nil {
+		return ctrl.Result{RequeueAfter: time.Second}, r.updateStatus(ctx, agent)
+	}
 	return ctrl.Result{RequeueAfter: time.Minute}, r.updateStatus(ctx, agent)
+}
+
+// Installed=True is emitted by Assisted Service for both installed and
+// added-to-existing-cluster hosts. Bound only indicates assignment and is too early.
+func (r *VsphereAgentReconciler) ejectInstalledAgentISO(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool) error {
+	if !pool.Spec.ISO.EjectAfterInstall {
+		if !meta.IsStatusConditionTrue(agent.Status.Conditions, "ISOEjected") {
+			setISOEjectionCondition(agent, metav1.ConditionFalse, "Disabled", "Automatic discovery ISO ejection is disabled for this pool")
+		}
+		return nil
+	}
+	if !meta.IsStatusConditionTrue(agent.Status.Conditions, "ISOEjected") {
+		setISOEjectionCondition(agent, metav1.ConditionFalse, "WaitingForInstallation", "Waiting for a matching installed Agent outside deletion or reclaim")
+	}
+	// CAPI's pre-terminate hook may be reclaiming this host into discovery.
+	// Do not change its media once deletion has started, even if Installed is stale.
+	if !pool.DeletionTimestamp.IsZero() || agent.Status.VM.Phase == phaseReleased {
+		return nil
+	}
+	if machineRef := agent.Status.VM.MachineRef; machineRef != nil && machineRef.Name != "" {
+		machine := machineWatchObject()
+		namespace := machineRef.Namespace
+		if namespace == "" {
+			namespace = pool.Spec.ControlPlaneNamespace
+		}
+		if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: machineRef.Name}, machine); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if !machine.GetDeletionTimestamp().IsZero() {
+			return nil
+		}
+	}
+	ref := agent.Status.VM.AgentRef
+	if ref == nil || ref.Name == "" {
+		return nil
+	}
+	if ref.Namespace != "" && ref.Namespace != agent.Namespace {
+		return nil
+	}
+	host := agentWatchObject()
+	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: ref.Name}, host); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if host.GetAnnotations()[agentCleanupAnnotation] != "" || !host.GetDeletionTimestamp().IsZero() || objectConditionStatus(host, "Installed") != metav1.ConditionTrue {
+		return nil
+	}
+	if ref.UID != "" && ref.UID != host.GetUID() {
+		return nil
+	}
+	serial, _, _ := unstructured.NestedString(host.Object, "status", "inventory", "systemVendor", "serialNumber")
+	// Require positive hardware identity, not just a potentially stale Agent name.
+	identity := AgentInfo{BIOSUUID: normalizeVMwareSerialUUID(serial), MAC: normalizeMAC(agentPrimaryMAC(host))}
+	if !vmMatchesAgentIdentity(agent.Status.VM, identity) {
+		return nil
+	}
+	provider, err := r.provider(ctx, pool)
+	if err != nil {
+		return err
+	}
+	op, err := provider.PrepareISOEjection(ctx, pool, agent.Status.VM)
+	if err != nil {
+		return err
+	}
+	if op == nil {
+		setISOEjectionCondition(agent, metav1.ConditionTrue, "Ejected", "No cached discovery media remains attached")
+		return nil
+	}
+	agent.Status.ISOEjection = op
+	setISOEjectionCondition(agent, metav1.ConditionFalse, "EjectionInProgress", "Discovery media ejection is recorded; disconnect will resume on reconciliation")
+	// Return to the reconciler to persist the operation. No mutation occurs until
+	// a subsequent reconciliation reads the operation back from the API server.
+	return nil
+}
+
+func setISOEjectionCondition(agent *agentforgev1alpha1.VsphereAgent, status metav1.ConditionStatus, reason, message string) {
+	meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+		Type: "ISOEjected", Status: status, ObservedGeneration: agent.Generation, Reason: reason, Message: message,
+	})
+}
+
+func (r *VsphereAgentReconciler) finishISOEjection(ctx context.Context, agent *agentforgev1alpha1.VsphereAgent, pool *agentforgev1alpha1.VsphereAgentPool) error {
+	provider, err := r.provider(ctx, pool)
+	if err != nil {
+		return err
+	}
+	err = provider.EjectISO(ctx, pool, agent.Status.ISOEjection, func() error { return r.updateStatus(ctx, agent) })
+	recordISOOperation("eject", err)
+	if err != nil {
+		return err
+	}
+	agent.Status.ISOEjection = nil
+	setISOEjectionCondition(agent, metav1.ConditionTrue, "Ejected", "Recorded discovery media was disconnected and ejected")
+	return nil
 }
 
 func (r *VsphereAgentReconciler) refreshVMIdentity(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, vm agentforgev1alpha1.OwnedVMStatus, expectedOwnerUID string) (agentforgev1alpha1.OwnedVMStatus, error) {

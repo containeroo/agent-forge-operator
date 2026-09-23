@@ -43,5 +43,7 @@ spec:
   iso:
     checkInterval: 10m
     retainVersions: 2
+    # Opt in only after validating installation and scale-down on a canary pool.
+    ejectAfterInstall: false
     pathPrefix: agent-forge/demo/demo-worker
   cleanupPolicy: Delete

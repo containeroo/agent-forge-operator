@@ -38,6 +38,11 @@ type VsphereAgentStatus struct {
 	// +optional
 	VM OwnedVMStatus `json:"vm,omitempty"`
 
+	// ISOEjection records a single authorized media operation before vSphere is
+	// changed. It survives restarts and is completed even if opt-in is disabled.
+	// +optional
+	ISOEjection *ISOEjectionStatus `json:"isoEjection,omitempty"`
+
 	// Conditions summarizes readiness and provider errors.
 	// +patchMergeKey=type
 	// +patchStrategy=merge
@@ -45,6 +50,28 @@ type VsphereAgentStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
+}
+
+// ISOEjectionStatus identifies the exact VM and media authorized for ejection.
+// These values are captured before the disconnect begins, so recovery cannot
+// act on a replacement VM or newly attached media.
+type ISOEjectionStatus struct {
+	VMName   string `json:"vmName"`
+	BIOSUUID string `json:"biosUUID"`
+	// +optional
+	OwnerUID   string      `json:"ownerUID,omitempty"`
+	Datacenter string      `json:"datacenter"`
+	DeviceKey  int         `json:"deviceKey"`
+	ISOPath    string      `json:"isoPath"`
+	StartedAt  metav1.Time `json:"startedAt"`
+	// DisconnectStarted is persisted immediately before issuing the disconnect.
+	// A pre-existing question is never answered for an operation not yet started.
+	// +optional
+	DisconnectStarted bool `json:"disconnectStarted,omitempty"`
+	// QuestionID is persisted before answering a CD-lock question. A different
+	// question on retry is never automatically answered.
+	// +optional
+	QuestionID string `json:"questionID,omitempty"`
 }
 
 // +kubebuilder:object:root=true
