@@ -31,7 +31,7 @@ resources:
 images:
   - name: controller
     newName: ghcr.io/containeroo/agent-forge-operator
-    newTag: v1.1.4
+    newTag: v1.2.3
 
 # Uncomment the patches line if you enable Metrics
 patches:
