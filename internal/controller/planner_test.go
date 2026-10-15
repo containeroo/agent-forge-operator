@@ -502,3 +502,44 @@ func testPool() *agentforgev1alpha1.VsphereAgentPool {
 func testAgentRef(name string) *corev1.ObjectReference {
 	return &corev1.ObjectReference{Name: name}
 }
+
+func TestBuildPlanRecoversStrandedReleasedSurplus(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		waiting      int32
+		withoutAgent int32
+		bound        bool
+		retain       bool
+		discovered   bool
+		wantDelete   bool
+	}{
+		{name: "stranded surplus", wantDelete: true},
+		{name: "waiting for agent", waiting: 1},
+		{name: "assignment in progress", withoutAgent: 1},
+		{name: "agent rebound", bound: true},
+		{name: "retain policy", retain: true},
+		{name: "unmanaged discovered host", discovered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := testPool()
+			if tc.retain {
+				pool.Spec.CleanupPolicy = agentforgev1alpha1.CleanupPolicyRetain
+			}
+			vm := newOwnedVMStatus("returned-worker")
+			vm.Phase, vm.Reason = phaseReleased, reasonAgentReleased
+			vm.AgentRef = testAgentRef("returned-agent")
+			if tc.discovered {
+				vm.Source = vmSourceDiscoveredAgent
+			}
+			plan := buildPlan(pool, PoolSnapshot{
+				WaitingAgentMachines: tc.waiting, AgentMachinesWithoutAgent: tc.withoutAgent,
+				MatchingAgents: []AgentInfo{{Name: "returned-agent", Bound: tc.bound, Approved: true,
+					SpecRole: testWorkerRole, RoleLabel: testWorkerRole, Hostname: vm.Name}},
+				OwnedVMs: []agentforgev1alpha1.OwnedVMStatus{vm},
+			})
+			if deleting := len(plan.VMsToDelete) == 1 && len(plan.AgentsToDelete) == 1; deleting != tc.wantDelete {
+				t.Fatalf("delete targets = VMs %#v Agents %#v, wantDelete = %v", plan.VMsToDelete, plan.AgentsToDelete, tc.wantDelete)
+			}
+		})
+	}
+}

@@ -1795,6 +1795,88 @@ func TestRefreshOwnedVMStatusesRequiresObservedMachineDeletingBeforeMachineDelet
 	}
 }
 
+func TestRefreshOwnedVMStatusesRecoversMissedMachineDeletion(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		machines   []MachineInfo
+		bound      bool
+		wantPhase  string
+		wantReason string
+	}{
+		{name: "machine already gone", wantPhase: phaseReleased, wantReason: reasonMachineDeleted},
+		{name: "machine still running", machines: []MachineInfo{{Name: "original-machine"}}, wantPhase: phaseReleased, wantReason: reasonAgentReleased},
+		{name: "machine still deleting", machines: []MachineInfo{{Name: "original-machine", Deleting: true}}, wantPhase: phaseReleased, wantReason: reasonMachineDeleting},
+		{name: "agent still bound", bound: true, wantPhase: phaseBound, wantReason: "AgentBound"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := reconcileTestPool()
+			pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{{
+				Name: "worker", Phase: phaseBound, Reason: "AgentBound",
+				AgentRef: testAgentRef("agent"), MachineRef: testMachineRef("original-machine"),
+			}}
+			agent := AgentInfo{Name: "agent", Bound: tc.bound, Hostname: "worker"}
+			if tc.bound {
+				agent.MachineName = "original-machine"
+			}
+			vms := refreshOwnedVMStatuses(pool, []AgentInfo{agent}, tc.machines)
+			vm := vms[0]
+			if vm.Phase != tc.wantPhase || vm.Reason != tc.wantReason {
+				t.Fatalf("phase/reason = %s/%s, want %s/%s", vm.Phase, vm.Reason, tc.wantPhase, tc.wantReason)
+			}
+			if vm.MachineRef == nil || vm.MachineRef.Name != "original-machine" {
+				t.Fatalf("lost original Machine reference: %#v", vm.MachineRef)
+			}
+		})
+	}
+}
+
+func TestReconcileCleansUpReleasedSurplusAfterMissedMachineDeletion(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		machineExists bool
+	}{
+		{name: "already stranded without machine reference"},
+		{name: "original machine still exists", machineExists: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			if err := agentforgev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			pool := reconcileTestPool()
+			vm := newOwnedVMStatus("released-worker")
+			vm.Phase, vm.Reason = phaseReleased, reasonAgentReleased
+			vm.AgentRef = testAgentRef("returned-agent")
+			if tc.machineExists {
+				vm.MachineRef = testMachineRef("original-machine")
+			}
+			pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{vm}
+			va := testVsphereAgentForVM(pool, vm)
+			va.Finalizers = []string{vsphereAgentFinalizerName}
+			agent := testAgent(testNamespace, "returned-agent", false, true)
+			infraEnv := testInfraEnv(testNamespace, testInfraEnvName, "https://example.invalid/discovery.iso")
+			builder := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(pool, va, agent, infraEnv).WithStatusSubresource(pool, va)
+			if tc.machineExists {
+				builder.WithObjects(testMachine(testControlPlaneNamespace, "original-machine", "demo/demo-worker", false))
+			}
+			c := builder.Build()
+			r := &VsphereAgentPoolReconciler{Client: c, Recorder: events.NewFakeRecorder(10)}
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil {
+				t.Fatal(err)
+			}
+			var updated agentforgev1alpha1.VsphereAgent
+			if err := c.Get(ctx, client.ObjectKeyFromObject(va), &updated); err != nil {
+				t.Fatal(err)
+			}
+			if deleting := updated.DeletionTimestamp != nil; deleting == tc.machineExists {
+				t.Fatalf("VsphereAgent deleting = %v, machineExists = %v", deleting, tc.machineExists)
+			}
+		})
+	}
+}
+
 func TestRefreshOwnedVMStatusesPreservesDeletingMachineRefUntilMachineGone(t *testing.T) {
 	pool := reconcileTestPool()
 	pool.Status.OwnedVMs = []agentforgev1alpha1.OwnedVMStatus{
@@ -2098,7 +2180,7 @@ func TestReconcileMarksReturnedAgentReleased(t *testing.T) {
 		t.Fatalf("ownedVMs = %d, want 1", len(updated.Status.OwnedVMs))
 	}
 	vm := updated.Status.OwnedVMs[0]
-	if vm.Phase != phaseReleased || vm.Reason != "AgentReleased" {
+	if vm.Phase != phaseReleased || vm.Reason != reasonAgentReleased {
 		t.Fatalf("owned VM phase/reason = %s/%s, want Released/AgentReleased", vm.Phase, vm.Reason)
 	}
 }

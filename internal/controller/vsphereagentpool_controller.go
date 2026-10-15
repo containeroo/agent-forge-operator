@@ -876,6 +876,11 @@ func refreshOwnedVMStatuses(pool *agentforgev1alpha1.VsphereAgentPool, agents []
 		wasMachineDeleting := vm.Phase == phaseReleased && vm.Reason == reasonMachineDeleting
 		previousMachineRef := vm.MachineRef
 		applyAgentToOwnedVMStatus(pool, &vm, agent)
+		// Unbinding may happen before we observe the Machine's deletion. Keep
+		// its identity so cleanup can check that it is actually gone.
+		if !agent.Bound && vm.MachineRef == nil && previousMachineRef != nil {
+			vm.MachineRef = previousMachineRef
+		}
 		if wasMachineDeleting {
 			if (vm.MachineRef == nil || vm.MachineRef.Name == "") && previousMachineRef != nil && previousMachineRef.Name != "" {
 				vm.MachineRef = previousMachineRef
@@ -1050,7 +1055,7 @@ func applyMachineStateToOwnedVMStatus(vm *agentforgev1alpha1.OwnedVMStatus, mach
 	}
 	machine, exists := machines[vm.MachineRef.Name]
 	if !exists {
-		if vm.Phase == phaseReleased && vm.Reason == reasonMachineDeleting {
+		if vm.Phase == phaseReleased && (vm.Reason == reasonMachineDeleting || vm.Reason == reasonAgentReleased) {
 			setOwnedVMPhase(vm, phaseReleased, reasonMachineDeleted)
 		}
 		return
@@ -1158,7 +1163,7 @@ func applyAgentToOwnedVMStatus(pool *agentforgev1alpha1.VsphereAgentPool, vm *ag
 	if agent.Bound {
 		setOwnedVMPhase(vm, phaseBound, "AgentBound")
 	} else if vm.Phase == phaseBound || vm.Phase == phaseReleased {
-		setOwnedVMPhase(vm, phaseReleased, "AgentReleased")
+		setOwnedVMPhase(vm, phaseReleased, reasonAgentReleased)
 	} else {
 		setOwnedVMPhase(vm, phaseAvailable, "AgentAvailable")
 	}

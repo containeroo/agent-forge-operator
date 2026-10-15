@@ -39,6 +39,7 @@ const (
 	defaultDatacenter = "dc1"
 	poolLabelKey      = "agent-forge.containeroo.ch/nodepool"
 
+	reasonAgentReleased        = "AgentReleased"
 	reasonAgentNotDiscovered   = "AgentNotDiscovered"
 	reasonInfraEnvUnavailable  = "InfraEnvUnavailable"
 	reasonVMAdopted            = "VMAdopted"
@@ -177,6 +178,10 @@ func buildPlan(pool *agentforgev1alpha1.VsphereAgentPool, snapshot PoolSnapshot)
 		switch vm.Phase {
 		case phaseAvailable:
 			reason = "Owned available Agent exceeds current AgentMachine demand"
+		case phaseReleased:
+			if vm.Reason != reasonMachineDeleted {
+				reason = "Owned released Agent exceeds current AgentMachine demand"
+			}
 		case phaseOrphaned:
 			reason = "Owned VM no longer has a matching Agent and is eligible for cleanup"
 		}
@@ -325,7 +330,11 @@ func surplusAvailableDeletionTargets(vms []agentforgev1alpha1.OwnedVMStatus, age
 		if int32(len(selectedVMs)) >= surplus { //nolint:gosec // slice length is bounded by observed Kubernetes objects.
 			break
 		}
-		if vm.Name == "" || !vmEligibleForCleanup(vm) || vm.Phase != phaseAvailable {
+		// Older reconciliations may already have lost the Machine reference.
+		// Reclaim these returned hosts as surplus once demand is satisfied;
+		// prepareVMDeletion still checks fresh Machine and Agent state.
+		released := vm.Phase == phaseReleased && vm.Reason == reasonAgentReleased
+		if vm.Name == "" || !vmEligibleForCleanup(vm) || (vm.Phase != phaseAvailable && !released) {
 			continue
 		}
 		if _, exists := selected[vm.Name]; exists {
@@ -355,6 +364,12 @@ func agentDeletionReasonsByName(vms []agentforgev1alpha1.OwnedVMStatus) map[stri
 		switch vm.Phase {
 		case phaseAvailable:
 			reasons[agentName] = "Owned available Agent exceeds current AgentMachine demand"
+		case phaseReleased:
+			if vm.Reason == reasonAgentReleased {
+				reasons[agentName] = "Owned released Agent exceeds current AgentMachine demand"
+			} else {
+				reasons[agentName] = reasonMachineDeletedPolicy
+			}
 		default:
 			reasons[agentName] = reasonMachineDeletedPolicy
 		}
