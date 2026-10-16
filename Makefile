@@ -72,7 +72,7 @@ VCSIM_VERSIONED := $(VCSIM)-$(GOVC_VERSION)
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
-CONTROLLER_TOOLS_VERSION ?= v0.22.0
+CONTROLLER_TOOLS_VERSION ?= v0.23.0
 
 UNAME := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 UNAME_ARCH := $(shell uname -m)
