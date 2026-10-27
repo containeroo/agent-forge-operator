@@ -3,7 +3,7 @@ FROM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG LDFLAGS
-ARG GOVC_VERSION=v0.56.1
+ARG GOVC_VERSION=v0.56.2
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
