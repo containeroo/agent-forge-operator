@@ -81,7 +81,7 @@ cleanup; it never authorizes deleting a same-named resource in a different proje
 
 ## Deployment and example
 
-Use operator image `v1.3.1` or newer for HTTP opt-in and safe error diagnostics.
+Use operator image `v1.3.2` or newer for ISO snapshot recovery, HTTP opt-in, and safe error diagnostics.
 For development, build an image from this working tree and make it available to your test cluster.
 Apply all four CRDs before upgrading the controller. The Helm chart upgrade
 instructions cover the separate CRD update required by Helm.
@@ -206,7 +206,9 @@ was recognized; there is no raw-error logging switch.
 | Category `EndpointNotFound`, `ServiceNotFound` | Check the configured region and public service endpoints in the authenticated catalog. |
 | `CreateOutcomeUnknown` | A POST may have succeeded. Inspect the recorded resource kind and exact UID-derived ownership. Do not blindly retry creation. |
 | `InfrastructureResourceFailed`, `DiscoveryImageFailed` | Inspect the failed resource. No installed disk or instance is automatically replaced. |
-| `DiscoveryImageChangedBeforeUpload` | Source bytes changed after pinning. Replace the uninstalled worker through CAPI so it obtains the new image identity. |
+| `DiscoveryImageChangedBeforeUpload` (v1.3.0–v1.3.1) | Upgrade to v1.3.2. Before discovery-volume or instance creation, the worker automatically releases its obsolete image-cache reference and retries with one fresh snapshot, preserving its port and OS volume. Do not delete the OS volume or remove finalizers. |
+| `RefreshingDiscoveryImage` | Pre-upload snapshot recovery is releasing the old cache reference; wait for owned-image cleanup to finish. Shared images remain while other references exist. |
+| `DiscoveryImageRefreshBlocked` | A discovery volume, instance, Agent, or unresolved create exists. Investigate the recorded identities; do not clear status or bypass the guard. |
 | `InstallationDiskNotVerified` | Check guest disk path, eligibility, and Cinder serial exposure. Approval stays blocked. |
 | `AmbiguousAgentIdentity`, `AgentIdentityChanged`, `AgentBindingConflict` | Resolve duplicate/stale Agent records or an unexpected reservation; identities are not silently reassigned. |
 | `AgentDiscoveryTimeout`, `AgentInstallationFailed` | Verify discovery boot and installation. Resources remain for diagnosis. |

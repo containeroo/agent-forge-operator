@@ -32,6 +32,8 @@ CRDs before upgrading the controller, including when upgrading through Helm.
 Operator `v1.3.1` adds safe service/operation diagnostics in worker conditions and
 logs, plus explicit HTTP opt-in through the credentials Secret. HTTPS remains the
 default; see the setup guide for the plaintext transport trade-off.
+Operator `v1.3.2` uploads the exact ISO snapshot it hashed and automatically recovers
+workers stuck before image upload without replacing their OS volumes.
 
 ## vSphere discovery ISO lifecycle
 

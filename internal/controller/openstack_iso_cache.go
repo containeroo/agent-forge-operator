@@ -18,6 +18,10 @@ import (
 
 const imageCacheOwnedValue = "true"
 
+// This phase is a durable cleanup journal, not just a progress label. A restart
+// must finish releasing the old reference before acquiring a new image identity.
+const openStackPhaseRefreshingImage = "RefreshingDiscoveryImage"
+
 const imageCacheLabel = "agent-forge.containeroo.ch/openstack-image-cache"
 const imageCachePhase = "agent-forge.containeroo.ch/cache-phase"
 
@@ -95,12 +99,15 @@ func (r *OpenStackAgentReconciler) acquireCache(ctx context.Context, a *api.Open
 }
 
 func (r *OpenStackAgentReconciler) prepareDiscoveryImage(ctx context.Context, p osapi.Client, a *api.OpenStackAgent) (bool, error) {
+	var path string
 	if a.Status.ImageCacheName == "" {
 		infra := infraEnvWatchObject()
 		if err := r.reader().Get(ctx, client.ObjectKey{Namespace: a.Namespace, Name: a.Spec.Configuration.InfraEnvRef.Name}, infra); err != nil {
 			return false, err
 		}
-		path, result, err := r.downloadDiscovery(ctx, a)
+		var result isoDownloadResult
+		var err error
+		path, result, err = r.downloadDiscovery(ctx, a)
 		if err != nil {
 			return false, err
 		}
@@ -109,8 +116,16 @@ func (r *OpenStackAgentReconciler) prepareDiscoveryImage(ctx context.Context, p 
 		a.Status.ISOSHA256 = result.SHA256
 		a.Status.ISOSizeBytes = result.SizeBytes
 		a.Status.ImageCacheName = imageCacheKey(p.Scope(), a.Status.InfraEnvUID, result.SHA256)
-		return false, nil // persist identity before registering a reference or creating an image
+		// Checkpoint before acquiring any external resources, but keep this exact file
+		// alive until upload. Independent downloads need not be byte-identical.
+		if err := r.status(ctx, a); err != nil {
+			return false, err
+		}
 	}
+	return r.ensureDiscoveryImage(ctx, p, a, path)
+}
+
+func (r *OpenStackAgentReconciler) ensureDiscoveryImage(ctx context.Context, p osapi.Client, a *api.OpenStackAgent, path string) (bool, error) {
 	cache, err := r.acquireCache(ctx, a)
 	if err != nil {
 		return false, err
@@ -118,7 +133,9 @@ func (r *OpenStackAgentReconciler) prepareDiscoveryImage(ctx context.Context, p 
 	id := imageIDForCache(cache)
 	if a.Status.ImageID == "" {
 		a.Status.ImageID = id
-		return false, nil
+		if err := r.status(ctx, a); err != nil {
+			return false, err
+		}
 	}
 	if a.Status.ImageID != id {
 		return false, &osapi.Error{Reason: "ImageCacheIdentityChanged", Rejected: true}
@@ -142,25 +159,62 @@ func (r *OpenStackAgentReconciler) prepareDiscoveryImage(ctx context.Context, p 
 	case "saving", "importing":
 		return false, nil
 	case "queued":
-		path, result, err := r.downloadDiscovery(ctx, a)
-		if err != nil {
-			return false, err
-		}
-		defer func() { _ = os.Remove(path) }()
-		if result.SHA256 != a.Status.ISOSHA256 {
-			// Never upload new bytes into a pinned identity. Failed pre-upload workers
-			// require explicit deletion/recreation to use the newly generated ISO.
-			return false, &osapi.Error{Reason: "DiscoveryImageChangedBeforeUpload", Rejected: true}
-		}
-		file, err := os.Open(path)
-		if err != nil {
-			return false, err
-		}
-		defer func() { _ = file.Close() }()
-		return false, p.UploadImage(ctx, id, owner, file)
+		return false, r.uploadDiscoverySnapshot(ctx, p, a, path, owner)
+
 	default:
 		return false, &osapi.Error{Reason: "DiscoveryImageFailed", Rejected: true}
 	}
+}
+
+// uploadDiscoverySnapshot uploads the hashed file from this reconcile. If a
+// restart lost that file, observe Glance first; only queued images need a new
+// download. Different bytes get a fresh identity, never an upload to the old ID.
+func (r *OpenStackAgentReconciler) uploadDiscoverySnapshot(ctx context.Context, p osapi.Client, a *api.OpenStackAgent, path, owner string) error {
+	if path == "" {
+		downloaded, result, err := r.downloadDiscovery(ctx, a)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = os.Remove(downloaded) }()
+		path = downloaded
+		if result.SHA256 != a.Status.ISOSHA256 {
+			if !canRefreshDiscoveryImage(a) {
+				return &osapi.Error{Reason: "DiscoveryImageRefreshBlocked", Rejected: true}
+			}
+			a.Status.Phase = openStackPhaseRefreshingImage
+			return r.status(ctx, a) // journal before releasing the old reference
+		}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	return p.UploadImage(ctx, a.Status.ImageID, owner, file)
+}
+
+func canRefreshDiscoveryImage(a *api.OpenStackAgent) bool {
+	return a.Status.ServerID == "" && a.Status.DiscoveryVolumeID == "" && a.Status.PendingCreate == "" && a.Status.AgentRef == nil && a.Status.InstanceCreatedAt == nil
+}
+
+func (r *OpenStackAgentReconciler) refreshDiscoveryImage(ctx context.Context, p osapi.Client, a *api.OpenStackAgent) error {
+	if !canRefreshDiscoveryImage(a) {
+		return &osapi.Error{Reason: "DiscoveryImageRefreshBlocked", Rejected: true}
+	}
+	done, err := r.releaseDiscoveryImage(ctx, p, a)
+	if err != nil || !done {
+		return err
+	}
+	// The old reference is gone (and last-reference GC has completed). Clearing
+	// the journal and identity together is crash-safe; the next reconcile downloads
+	// a fresh snapshot. The port and blank OS volume remain unchanged.
+	a.Status.ImageCacheName = ""
+	a.Status.ImageID = ""
+	a.Status.ISOSHA256 = ""
+	a.Status.ISOSizeBytes = 0
+	a.Status.InfraEnvUID = ""
+	a.Status.Phase = "PreparingDiscoveryImage"
+	return nil
 }
 
 func (r *OpenStackAgentReconciler) releaseDiscoveryImage(ctx context.Context, p osapi.Client, a *api.OpenStackAgent) (bool, error) {
@@ -182,7 +236,19 @@ func (r *OpenStackAgentReconciler) releaseDiscoveryImage(ctx context.Context, p 
 		}
 		return false, err
 	}
-	if cache.Labels[imageCacheLabel] != imageCacheOwnedValue || (a.Status.ImageID != "" && a.Status.ImageID != imageIDForCache(cache)) {
+	if cache.Labels[imageCacheLabel] != imageCacheOwnedValue {
+		return false, osapi.ErrOwnership
+	}
+	if a.Status.ImageID != "" && a.Status.ImageID != imageIDForCache(cache) {
+		// A previous release may have completed before its status checkpoint. If a
+		// new cache now occupies this key, never delete it or any of its references.
+		_, err := p.Get(ctx, osapi.Image, a.Status.ImageID, "missing-cache-owner")
+		if errors.Is(err, osapi.ErrNotFound) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
 		return false, osapi.ErrOwnership
 	}
 	if cache.Annotations[imageCachePhase] != openStackPhaseDeleting {

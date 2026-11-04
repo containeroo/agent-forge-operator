@@ -75,7 +75,9 @@ progress and failure; no credentials, ISO contents, or signed download URLs appe
 
 Typical phases: CreatingNetwork, CreatingOSVolume, PreparingDiscoveryImage,
 CreatingDiscoveryVolume, CreatingInstance, WaitingForDiscovery, WaitingForAgent,
-WaitingForInstallation, Ready, Failed, RecoveringResource, Deleting. Ready requires
+WaitingForInstallation, Ready, Failed, RecoveringResource, RefreshingDiscoveryImage,
+Deleting. `RefreshingDiscoveryImage` journals pre-upload cache cleanup across
+restarts and errors; it never rotates attached media. Ready requires
 installation and correct binding, **not** media removal.
 
 Both pool and worker use the `agent-forge.containeroo.ch/openstack` finalizer.

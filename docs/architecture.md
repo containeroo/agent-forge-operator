@@ -77,10 +77,22 @@ A namespace-scoped ConfigMap tracks worker UID references; its own UID owns the
 Glance image. All acquisition/release changes use resourceVersion checks.
 The final releaser first persists a `Deleting` tombstone, excluding new references,
 then deletes the owned image and the ConfigMap. A finalizer retry resumes collection.
-Worker references remain until their discovery volumes have been removed.
+Worker references remain until their discovery volumes have been removed. Before
+any discovery-volume or instance creation, an obsolete queued image reference may
+also be released during snapshot recovery.
 Images are not shared across unrelated InfraEnvs, namespaces, or cloud scopes.
 Every new worker hashes the source ISO, but existing active images avoid repeated
-Glance uploads. There is no credential-bearing URL in cache status or ConfigMaps.
+Glance uploads. The downloaded file is kept through the identity checkpoints and
+uploaded in the same reconciliation, so the hashed and uploaded bytes are identical.
+If a restart loses the file, the controller observes Glance before downloading:
+active images are reused and saving/importing images are left to finish. A queued
+image whose replacement download differs triggers `RefreshingDiscoveryImage`.
+That phase is a durable journal: release the obsolete reference, finish any last
+reference GC, clear the old identity, then download and upload one fresh snapshot.
+The journal survives errors and restarts, and blocks refresh if a discovery volume,
+instance, Agent, or unresolved resource-creation request exists. The port and OS
+volume are preserved. Running workers never enter this recovery path.
+There is no credential-bearing URL in cache status or ConfigMaps.
 
 Use the shipped deployment's leader election. Independent workers can progress
 concurrently; shared cache updates and demand claims use Kubernetes optimistic

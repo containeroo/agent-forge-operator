@@ -116,7 +116,7 @@ func (r *OpenStackAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		changed := previous == nil || previous.Reason != reason || previous.Message != safe.Error()
 		meta.SetStatusCondition(&a.Status.Conditions, metav1.Condition{Type: conditionReady, Status: metav1.ConditionFalse,
 			ObservedGeneration: a.Generation, Reason: reason, Message: safe.Error()})
-		if !safe.Retryable {
+		if !safe.Retryable && a.Status.Phase != openStackPhaseRefreshingImage {
 			a.Status.Phase = "Failed"
 		}
 		if statusErr := r.status(ctx, a); statusErr != nil {
@@ -208,6 +208,10 @@ func resourceFailed(resource *osapi.Resource) error {
 }
 
 func (r *OpenStackAgentReconciler) provision(ctx context.Context, p osapi.Client, a *api.OpenStackAgent) error {
+	// Preserve and complete the cache-release journal before other phase updates.
+	if a.Status.Phase == openStackPhaseRefreshingImage {
+		return r.refreshDiscoveryImage(ctx, p, a)
+	}
 	if a.Status.PendingCreate != "" {
 		kind := osapi.Kind(a.Status.PendingCreate)
 		found, err := p.Find(ctx, kind, resourceName(a, kind), string(a.UID))
