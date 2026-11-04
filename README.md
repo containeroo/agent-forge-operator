@@ -1,14 +1,36 @@
 # agent-forge-operator
 
 Agent Forge Operator bridges hosted-cluster autoscaling to VM capacity for
-HyperShift Agent platform clusters on vSphere.
+HyperShift Agent platform clusters on vSphere and OpenStack.
 
 HyperShift and CAPI remain the source of truth. Agent Forge watches the
 `AgentMachine` objects rendered for a HyperShift `NodePool`; when they report
-`Ready=False` with `Reason=NoSuitableAgents`, it creates vSphere VMs so matching
+`Ready=False` with `Reason=NoSuitableAgents`, it creates provider-managed VMs so matching
 Assisted Installer `Agent` objects can appear.
 
-## Discovery ISO lifecycle
+## OpenStack
+
+`OpenStackAgentPool` follows the same AgentMachine demand as `VsphereAgentPool`.
+Each `OpenStackAgent` owns a Neutron port, a bootable persistent Cinder OS volume,
+a Cinder discovery ISO volume, and a Nova instance. Glance images are shared through
+an ownership-scoped content cache.
+
+**OpenStack discovery media stays attached for the worker's entire lifetime.**
+The OS volume has boot index 0; the ISO CD-ROM has boot index 1. Firmware must
+support falling back to the CD-ROM while the OS disk is blank, then booting RHCOS
+from the OS disk after installation. Validate this before production use.
+The attached ISO can contain sensitive bootstrap material; restrict image and
+volume access. There is no OpenStack ISO ejection option.
+
+- [OpenStack setup, authentication, security, and troubleshooting](docs/openstack.md)
+- [OpenStack CRD reference](docs/openstack-api.md)
+- [Provider architecture and cleanup](docs/architecture.md)
+- [Example OpenStackAgentPool](config/samples/agentforge_v1alpha1_openstackagentpool.yaml)
+
+OpenStack support is available starting with operator `v1.3.0`. Apply all four
+CRDs before upgrading the controller, including when upgrading through Helm.
+
+## vSphere discovery ISO lifecycle
 
 Automatic ejection is **disabled by default**. Opt in each `VsphereAgentPool`
 explicitly, starting with a canary pool:

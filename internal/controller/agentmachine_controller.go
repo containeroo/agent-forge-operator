@@ -85,6 +85,16 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		matchingPools = append(matchingPools, pool)
 	}
+	openStackPools, err := r.matchingOpenStackPools(ctx, &agentMachine)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(openStackPools) > 0 && len(matchingPools)+len(openStackPools) > 1 {
+		return ctrl.Result{}, fmt.Errorf("AgentMachine matches multiple infrastructure pools")
+	}
+	if len(openStackPools) == 1 {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, r.ensureOpenStackAgent(ctx, openStackPools[0], &agentMachine)
+	}
 	if len(matchingPools) == 0 {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -92,6 +102,9 @@ func (r *AgentMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("AgentMachine %s/%s matches multiple VsphereAgentPools: %s", agentMachine.GetNamespace(), agentMachine.GetName(), matchingPoolNames(matchingPools))
 	}
 	pool := matchingPools[0]
+	if err := claimDemand(ctx, r.Client, &agentMachine, "VsphereAgentPool", pool.UID); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := ensureAgentMachineSelectorPinned(ctx, r.Client, &agentMachine); err != nil {
 		return ctrl.Result{}, err
 	}

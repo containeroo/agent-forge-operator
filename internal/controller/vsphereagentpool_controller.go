@@ -523,9 +523,13 @@ func (r *VsphereAgentPoolReconciler) listNodePoolMachines(ctx context.Context, p
 }
 
 func infraEnvAvailable(ctx context.Context, reader client.Reader, pool *agentforgev1alpha1.VsphereAgentPool) (bool, string, string) {
+	return discoveryISOAvailable(ctx, reader, pool.Namespace, pool.Spec.InfraEnvRef.Name)
+}
+
+func discoveryISOAvailable(ctx context.Context, reader client.Reader, namespace, name string) (bool, string, string) {
 	infraEnv := &unstructured.Unstructured{}
 	infraEnv.SetGroupVersionKind(infraEnvGVK)
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Spec.InfraEnvRef.Name}, infraEnv); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, infraEnv); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, "", err.Error()
 		}
@@ -617,9 +621,16 @@ func (r *VsphereAgentPoolReconciler) listMatchingAgents(ctx context.Context, poo
 		return nil, err
 	}
 
+	var openStackAgents agentforgev1alpha1.OpenStackAgentList
+	if err := r.apiReader().List(ctx, &openStackAgents, client.InNamespace(pool.Namespace)); err != nil {
+		return nil, err
+	}
 	agents := make([]AgentInfo, 0, len(list.Items))
 	for i := range list.Items {
 		obj := &list.Items[i]
+		if openStackOwnsHost(obj, openStackAgents.Items) {
+			continue
+		}
 
 		labels := obj.GetLabels()
 		approved, _, _ := unstructured.NestedBool(obj.Object, "spec", "approved")
@@ -1170,10 +1181,23 @@ func applyAgentToOwnedVMStatus(pool *agentforgev1alpha1.VsphereAgentPool, vm *ag
 }
 
 func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agentforgev1alpha1.VsphereAgentPool, name, hostname string) error {
+	return patchDiscoveredAgent(ctx, r.Client, r.apiReader(), pool.Namespace, pool.Spec.Agent, name, hostname)
+}
+
+type agentPatchSafety struct {
+	UID                types.UID
+	ResourceVersion    string
+	InstallationDiskID string
+}
+
+func patchDiscoveredAgent(ctx context.Context, c client.Client, reader client.Reader, namespace string, binding agentforgev1alpha1.AgentBindingSpec, name, hostname string, checks ...agentPatchSafety) error {
 	agent := &unstructured.Unstructured{}
 	agent.SetGroupVersionKind(agentGVK)
-	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, agent); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, agent); err != nil {
 		return err
+	}
+	if len(checks) > 0 && (agent.GetUID() != checks[0].UID || agent.GetResourceVersion() != checks[0].ResourceVersion) {
+		return fmt.Errorf("agent changed before approval")
 	}
 	if agent.GetAnnotations()[agentCleanupAnnotation] != "" || agentDeletionBlocker(agent) != "" {
 		return nil
@@ -1184,18 +1208,18 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 	if labels == nil {
 		labels = map[string]string{}
 	}
-	for key, value := range pool.Spec.Agent.Labels {
+	for key, value := range binding.Labels {
 		if key == roleLabelKey || key == agentMachineSelectionLabel || key == agentMachineRefKey {
 			continue
 		}
 		labels[key] = value
 	}
-	labels[roleLabelKey] = pool.Spec.Agent.Role
-	if err := unstructured.SetNestedField(agent.Object, pool.Spec.Agent.Role, "spec", "role"); err != nil {
+	labels[roleLabelKey] = binding.Role
+	if err := unstructured.SetNestedField(agent.Object, binding.Role, "spec", "role"); err != nil {
 		return err
 	}
 	if hostname == "" {
-		return fmt.Errorf("cannot patch Agent %s/%s without an owned VM hostname", pool.Namespace, name)
+		return fmt.Errorf("cannot patch Agent %s/%s without an owned VM hostname", namespace, name)
 	}
 	labels[agentMachineSelectionLabel] = hostname
 	agent.SetLabels(labels)
@@ -1204,13 +1228,18 @@ func (r *VsphereAgentPoolReconciler) patchAgent(ctx context.Context, pool *agent
 			return err
 		}
 	}
-	if approveAgents(pool) {
+	if len(checks) > 0 {
+		if err := unstructured.SetNestedField(agent.Object, checks[0].InstallationDiskID, "spec", "installation_disk_id"); err != nil {
+			return err
+		}
+	}
+	if binding.Approve == nil || *binding.Approve {
 		if err := unstructured.SetNestedField(agent.Object, true, "spec", "approved"); err != nil {
 			return err
 		}
 	}
 
-	return r.Patch(ctx, agent, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+	return c.Patch(ctx, agent, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
 func agentDeletionBlocker(agent *unstructured.Unstructured) string {

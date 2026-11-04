@@ -38,6 +38,10 @@ var (
 
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(GroupVersion,
+		&OpenStackAgent{},
+		&OpenStackAgentList{},
+		&OpenStackAgentPool{},
+		&OpenStackAgentPoolList{},
 		&VsphereAgent{},
 		&VsphereAgentList{},
 		&VsphereAgentPool{},

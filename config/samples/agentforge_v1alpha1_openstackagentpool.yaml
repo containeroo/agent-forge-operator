@@ -1,0 +1,35 @@
+apiVersion: agent-forge.containeroo.ch/v1alpha1
+kind: OpenStackAgentPool
+metadata:
+  name: example-workers
+  namespace: example-cluster
+spec:
+  hostedClusterRef:
+    name: example-cluster
+  nodePoolRef:
+    name: example-workers
+  infraEnvRef:
+    name: example-infraenv
+  controlPlaneNamespace: example-control-plane
+  openstack:
+    credentialsSecretRef:
+      name: example-openstack-credentials
+    region: example-region
+    networkName: worker-network
+    flavorName: worker-flavor
+    portSecurityEnabled: true
+    apiTimeoutSeconds: 60
+  template:
+    diskGiB: 120
+    discoveryVolumeMinGiB: 2
+    osDiskBus: virtio
+    discoveryDiskBus: ide
+    installationDisk: /dev/vda
+    osVolumePolicy: Delete
+  agent:
+    role: worker
+    labels:
+      example-pool: workers
+    approve: true
+  cleanupPolicy: Delete
+  discoveryTimeoutSeconds: 1800

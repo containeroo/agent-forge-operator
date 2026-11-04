@@ -1,4 +1,6 @@
 resources:
 - bases/agent-forge.containeroo.ch_vsphereagentpools.yaml
 - bases/agent-forge.containeroo.ch_vsphereagents.yaml
+- bases/agent-forge.containeroo.ch_openstackagentpools.yaml
+- bases/agent-forge.containeroo.ch_openstackagents.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
