@@ -9,12 +9,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	api "github.com/containeroo/agent-forge-operator/api/v1alpha1"
 	osapi "github.com/containeroo/agent-forge-operator/internal/openstack"
+	"github.com/go-logr/logr/funcr"
+	"github.com/gophercloud/gophercloud/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -747,5 +750,61 @@ func TestOpenStackApprovalRejectsInventoryChange(t *testing.T) {
 	}
 	if err := patchDiscoveredAgent(ctx, f.c, f.c, a.Namespace, a.Spec.Configuration.Agent, host.GetName(), a.Spec.AgentMachineRef.Name, check); err == nil {
 		t.Fatal("approved an Agent changed since disk verification")
+	}
+}
+
+func TestOpenStackErrorDiagnosticsReachStatusAndLogs(t *testing.T) {
+	for _, code := range []int{401, 429, 503} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			f := newOpenStackFixture(t)
+			r := f.reconciler()
+			const requestID = "req-00000000-0000-4000-8000-000000000001"
+			const secret = "synthetic-sensitive-value"
+			safe := osapi.SafeError(gophercloud.ErrUnexpectedResponseCode{Actual: code, URL: "https://example.invalid/?token=" + secret,
+				Body: []byte(secret), ResponseHeader: http.Header{"X-Openstack-Request-Id": {requestID}, "X-Auth-Token": {secret}}})
+			r.ProviderFactory = func(context.Context, api.OpenStackPlacementSpec, *corev1.Secret) (osapi.Client, error) {
+				// Even an unsafe outer wrapper must not reach status or logs.
+				return nil, fmt.Errorf("%s: %w", secret, safe)
+			}
+			var logs []string
+			ctx := ctrl.LoggerInto(context.Background(), funcr.New(func(_, message string) { logs = append(logs, message) }, funcr.Options{}))
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.a)})
+			condition := meta.FindStatusCondition(f.current().Status.Conditions, conditionReady)
+			if condition == nil || condition.Message != safe.Error() || !strings.Contains(condition.Message, requestID) {
+				t.Fatalf("diagnostic not persisted: %#v", condition)
+			}
+			if strings.Contains(condition.Message, secret) || strings.Contains(strings.Join(logs, " "), secret) {
+				t.Fatal("secret reached status or logs")
+			}
+			if code == 401 {
+				if err != nil || result.RequeueAfter != time.Minute || f.current().Status.Phase != "Failed" {
+					t.Fatalf("permanent error behavior changed: %v %v", result, err)
+				}
+				if len(logs) != 1 || !strings.Contains(logs[0], requestID) {
+					t.Fatalf("permanent error not logged: %v", logs)
+				}
+				if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.a)}); err != nil {
+					t.Fatal(err)
+				}
+				if len(logs) != 1 {
+					t.Fatal("unchanged permanent error logged repeatedly")
+				}
+			} else if err == nil || err.Error() != safe.Error() || len(logs) != 0 {
+				t.Fatalf("retryable error not returned for controller-runtime logging/backoff: %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenStackUnknownErrorStillRedacted(t *testing.T) {
+	f := newOpenStackFixture(t)
+	r := f.reconciler()
+	r.ProviderFactory = func(context.Context, api.OpenStackPlacementSpec, *corev1.Secret) (osapi.Client, error) {
+		return nil, errors.New("synthetic-sensitive-value")
+	}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.a)})
+	condition := meta.FindStatusCondition(f.current().Status.Conditions, conditionReady)
+	if err == nil || err.Error() != "ReconcileFailed" || condition == nil || condition.Message != "ReconcileFailed" {
+		t.Fatalf("unsafe non-provider error: %v, %#v", err, condition)
 	}
 }

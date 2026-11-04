@@ -34,7 +34,18 @@ import (
 )
 
 // Kind distinguishes resources with separate OpenStack APIs.
-const reasonInvalidResourceKind = "InvalidResourceKind"
+const (
+	reasonInvalidResourceKind = "InvalidResourceKind"
+	reasonHTTPSRequired       = "HTTPSRequired"
+	schemeHTTP                = "http"
+	schemeHTTPS               = "https"
+	serviceKeystone           = "keystone"
+	serviceNova               = "nova"
+	serviceNeutron            = "neutron"
+	serviceCinder             = "cinder"
+	serviceGlance             = "glance"
+	operationDiscoverEndpoint = "discover-endpoint"
+)
 
 type Kind string
 
@@ -46,44 +57,6 @@ const (
 	Image           Kind = "image"
 	OwnerKey             = "agent_forge_owner"
 )
-
-// Error deliberately excludes API response bodies, URLs, and request headers.
-// Rejected means the request is known not to have created a resource.
-type Error struct {
-	Reason              string
-	Retryable, Rejected bool
-}
-
-func (e *Error) Error() string { return e.Reason }
-
-var (
-	ErrNotFound  = &Error{Reason: "ResourceNotFound", Rejected: true}
-	ErrOwnership = &Error{Reason: "ResourceOwnershipMismatch", Rejected: true}
-	ErrThrottle  = &Error{Reason: "RateLimited", Retryable: true, Rejected: true}
-)
-
-// SafeError converts SDK errors at the boundary before controllers can log them.
-func SafeError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var safe *Error
-	if errors.As(err, &safe) {
-		return safe
-	}
-	if gophercloud.ResponseCodeIs(err, 404) {
-		return ErrNotFound
-	}
-	for _, code := range []int{400, 401, 403, 405, 413, 422} {
-		if gophercloud.ResponseCodeIs(err, code) {
-			return &Error{Reason: "ConfigurationRejected", Rejected: true}
-		}
-	}
-	if gophercloud.ResponseCodeIs(err, 429) {
-		return ErrThrottle
-	}
-	return &Error{Reason: "OpenStackRequestFailed", Retryable: true}
-}
 
 // Resource is the minimum observation needed by the declarative reconciler.
 type Resource struct {
@@ -113,11 +86,14 @@ type cloud struct {
 
 var apiLimiter = rate.NewLimiter(20, 40)
 
-type secureTransport struct{ base http.RoundTripper }
+type secureTransport struct {
+	base              http.RoundTripper
+	allowInsecureHTTP bool
+}
 
 func (t secureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.URL.Scheme != "https" {
-		return nil, &Error{Reason: "HTTPSRequired", Rejected: true}
+	if r.URL.Scheme != schemeHTTPS && (r.URL.Scheme != schemeHTTP || !t.allowInsecureHTTP) {
+		return nil, &Error{Reason: reasonHTTPSRequired, Rejected: true}
 	}
 	if !apiLimiter.Allow() {
 		return nil, ErrThrottle
@@ -125,13 +101,38 @@ func (t secureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(r)
 }
 
+func insecureHTTPPolicy(secret *corev1.Secret) (bool, error) {
+	value, exists := secret.Data["allow-insecure-http"]
+	if !exists {
+		return false, nil
+	}
+	switch string(value) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, &Error{Reason: "InvalidHTTPPolicy", Rejected: true}
+	}
+}
+
 // New authenticates with application credentials and verifies the resulting project.
-// TLS verification is mandatory. ca.crt augments system trust for private CAs.
-func New(ctx context.Context, cfg api.OpenStackPlacementSpec, secret *corev1.Secret) (Client, error) {
+// HTTPS is required unless the Secret explicitly permits plaintext HTTP.
+// HTTPS certificates are always verified; ca.crt augments system trust.
+func New(ctx context.Context, cfg api.OpenStackPlacementSpec, secret *corev1.Secret) (_ Client, err error) {
+	service, operation := serviceKeystone, "initialize-client"
+	defer func() { err = safeErrorAt(err, service, operation) }()
+	allowInsecureHTTP, err := insecureHTTPPolicy(secret)
+	if err != nil {
+		return nil, err
+	}
 	authURL := string(secret.Data["auth-url"])
 	parsed, err := url.Parse(authURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" {
+	if err != nil || (parsed.Scheme != schemeHTTPS && parsed.Scheme != schemeHTTP) || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, &Error{Reason: "InvalidAuthenticationURL", Rejected: true}
+	}
+	if parsed.Scheme == schemeHTTP && !allowInsecureHTTP {
+		return nil, &Error{Reason: reasonHTTPSRequired, Rejected: true}
 	}
 	for _, key := range []string{"application-credential-id", "application-credential-secret", "project-id"} {
 		if len(secret.Data[key]) == 0 {
@@ -155,8 +156,9 @@ func New(ctx context.Context, cfg api.OpenStackPlacementSpec, secret *corev1.Sec
 	if timeout == 0 {
 		timeout = time.Minute
 	}
-	provider.HTTPClient = http.Client{Transport: secureTransport{transport}, Timeout: timeout,
+	provider.HTTPClient = http.Client{Transport: secureTransport{base: transport, allowInsecureHTTP: allowInsecureHTTP}, Timeout: timeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	operation = "authenticate"
 	// No SDK retries: mutations with ambiguous responses must not be replayed.
 	err = sdk.AuthenticateV3(ctx, provider, &gophercloud.AuthOptions{
 		IdentityEndpoint: authURL, ApplicationCredentialID: string(secret.Data["application-credential-id"]),
@@ -165,6 +167,7 @@ func New(ctx context.Context, cfg api.OpenStackPlacementSpec, secret *corev1.Sec
 	if err != nil {
 		return nil, SafeError(err)
 	}
+	operation = "validate-project-scope"
 	result, ok := provider.GetAuthResult().(interface {
 		ExtractProject() (*tokens.Project, error)
 	})
@@ -186,18 +189,22 @@ func New(ctx context.Context, cfg api.OpenStackPlacementSpec, secret *corev1.Sec
 		}
 	}
 	eo := gophercloud.EndpointOpts{Region: cfg.Region, Availability: gophercloud.AvailabilityPublic}
+	service, operation = serviceNova, operationDiscoverEndpoint
 	c.compute, err = sdk.NewComputeV2(provider, eo)
 	if err != nil {
 		return nil, SafeError(err)
 	}
+	service, operation = serviceNeutron, operationDiscoverEndpoint
 	c.network, err = sdk.NewNetworkV2(provider, eo)
 	if err != nil {
 		return nil, SafeError(err)
 	}
+	service, operation = serviceCinder, operationDiscoverEndpoint
 	c.storage, err = sdk.NewBlockStorageV3(provider, eo)
 	if err != nil {
 		return nil, SafeError(err)
 	}
+	service, operation = serviceGlance, operationDiscoverEndpoint
 	c.image, err = sdk.NewImageV2(provider, eo)
 	if err != nil {
 		return nil, SafeError(err)
@@ -232,7 +239,8 @@ func owned(r *Resource, owner string) (*Resource, error) {
 	return r, nil
 }
 
-func (c *cloud) Get(ctx context.Context, kind Kind, id, owner string) (*Resource, error) {
+func (c *cloud) Get(ctx context.Context, kind Kind, id, owner string) (_ *Resource, err error) {
+	defer func() { err = safeResourceError(err, kind, "get") }()
 	var r *Resource
 	switch kind {
 	case Port:
@@ -278,7 +286,8 @@ func (c *cloud) Get(ctx context.Context, kind Kind, id, owner string) (*Resource
 }
 
 // Find only adopts an exact, unique name AND owner match. Collisions fail closed.
-func (c *cloud) Find(ctx context.Context, kind Kind, name, owner string) (*Resource, error) {
+func (c *cloud) Find(ctx context.Context, kind Kind, name, owner string) (_ *Resource, err error) {
+	defer func() { err = safeResourceError(err, kind, "find") }()
 	var found []*Resource
 	switch kind {
 	case Port:
@@ -335,7 +344,8 @@ func (c *cloud) Find(ctx context.Context, kind Kind, name, owner string) (*Resou
 	return owned(found[0], owner)
 }
 
-func (c *cloud) networkID(ctx context.Context, cfg api.OpenStackPlacementSpec) (string, error) {
+func (c *cloud) networkID(ctx context.Context, cfg api.OpenStackPlacementSpec) (_ string, err error) {
+	defer func() { err = safeErrorAt(err, serviceNeutron, "resolve-network") }()
 	if cfg.NetworkID != "" {
 		return cfg.NetworkID, nil
 	}
@@ -352,7 +362,8 @@ func (c *cloud) networkID(ctx context.Context, cfg api.OpenStackPlacementSpec) (
 	}
 	return list[0].ID, nil
 }
-func (c *cloud) flavorID(ctx context.Context, cfg api.OpenStackPlacementSpec) (string, error) {
+func (c *cloud) flavorID(ctx context.Context, cfg api.OpenStackPlacementSpec) (_ string, err error) {
+	defer func() { err = safeErrorAt(err, serviceNova, "resolve-flavor") }()
 	if cfg.FlavorID != "" {
 		return cfg.FlavorID, nil
 	}
@@ -404,7 +415,8 @@ func BlockDevices(a *api.OpenStackAgent) []servers.BlockDevice {
 	}
 }
 
-func (c *cloud) Create(ctx context.Context, kind Kind, name, owner string, a *api.OpenStackAgent) (*Resource, error) {
+func (c *cloud) Create(ctx context.Context, kind Kind, name, owner string, a *api.OpenStackAgent) (_ *Resource, err error) {
+	defer func() { err = safeResourceError(err, kind, "create") }()
 	cfg, t := a.Spec.Configuration.OpenStack, a.Spec.Configuration.Template
 	switch kind {
 	case Port:
@@ -415,7 +427,7 @@ func (c *cloud) Create(ctx context.Context, kind Kind, name, owner string, a *ap
 		if cfg.DHCPEnabled != nil {
 			subnet, err := subnets.Get(ctx, c.network, cfg.SubnetID).Extract()
 			if err != nil {
-				return nil, SafeError(err)
+				return nil, safeErrorAt(err, serviceNeutron, "get-subnet")
 			}
 			if subnet.NetworkID != network || subnet.EnableDHCP != *cfg.DHCPEnabled {
 				return nil, &Error{Reason: "SubnetDHCPMismatch", Rejected: true}
@@ -475,19 +487,22 @@ func (c *cloud) Create(ctx context.Context, kind Kind, name, owner string, a *ap
 		return nil, &Error{Reason: reasonInvalidResourceKind, Rejected: true}
 	}
 }
-func (c *cloud) SetBootable(ctx context.Context, id, owner string) error {
+func (c *cloud) SetBootable(ctx context.Context, id, owner string) (err error) {
+	defer func() { err = safeErrorAt(err, serviceCinder, "set-bootable") }()
 	if _, err := c.Get(ctx, OSVolume, id, owner); err != nil {
 		return err
 	}
 	return SafeError(volumes.SetBootable(ctx, c.storage, id, volumes.BootableOpts{Bootable: true}).ExtractErr())
 }
-func (c *cloud) UploadImage(ctx context.Context, id, owner string, data io.Reader) error {
+func (c *cloud) UploadImage(ctx context.Context, id, owner string, data io.Reader) (err error) {
+	defer func() { err = safeErrorAt(err, serviceGlance, "upload-image") }()
 	if _, err := c.Get(ctx, Image, id, owner); err != nil {
 		return err
 	}
 	return SafeError(imagedata.Upload(ctx, c.image, id, data).ExtractErr())
 }
-func (c *cloud) Delete(ctx context.Context, kind Kind, id, owner string) error {
+func (c *cloud) Delete(ctx context.Context, kind Kind, id, owner string) (err error) {
+	defer func() { err = safeResourceError(err, kind, "delete") }()
 	r, err := c.Get(ctx, kind, id, owner)
 	if errors.Is(err, ErrNotFound) {
 		return nil

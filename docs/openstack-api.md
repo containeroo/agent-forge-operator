@@ -3,7 +3,11 @@
 API group/version: `agent-forge.containeroo.ch/v1alpha1`. Both resources are
 namespace-scoped and have status subresources. Generated structural CRDs are in
 `config/crd/bases`; `make manifests generate` regenerates them and DeepCopy code.
-The existing vSphere API remains unchanged.
+The existing vSphere API remains unchanged. Transport policy is configured in
+the referenced credentials Secret, not in a pool field: optional
+`allow-insecure-http: "true"` permits plaintext HTTP starting with `v1.3.1`.
+HTTPS remains the default and HTTPS certificate verification is always enabled.
+See [authentication and TLS](openstack.md#authentication-and-tls).
 
 ## OpenStackAgentPool (`osap`)
 

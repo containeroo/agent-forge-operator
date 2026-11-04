@@ -276,7 +276,7 @@ func TestAuthenticationCustomCAAndProjectScope(t *testing.T) {
 		t.Fatalf("authentication failed: %v", err)
 	}
 	secret.Data["project-id"] = []byte("other-project")
-	if _, err := New(context.Background(), cfg, secret); err == nil || err.Error() != "ProjectScopeMismatch" {
+	if _, err := New(context.Background(), cfg, secret); err == nil || !strings.HasPrefix(err.Error(), "ProjectScopeMismatch;") {
 		t.Fatalf("scope mismatch: %v", err)
 	}
 	secret.Data["auth-url"] = []byte("http://cloud.example.invalid/v3")

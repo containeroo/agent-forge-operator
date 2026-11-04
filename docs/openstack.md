@@ -28,19 +28,41 @@ Existing pools can use different Secrets, projects, regions, networks, and Infra
 ## Authentication and TLS
 
 Create a Kubernetes Secret through your normal secret-management system in the
-pool namespace. Required keys are:
+pool namespace. Configure these keys:
 
 | Key | Meaning |
 | --- | --- |
-| `auth-url` | HTTPS Keystone v3 authentication URL |
+| `auth-url` | Keystone v3 authentication URL; HTTPS required by default |
 | `project-id` | Expected authenticated project ID; checked against the token |
 | `application-credential-id` | Project-scoped application credential ID |
 | `application-credential-secret` | Application credential secret |
 | `ca.crt` | Optional PEM CA bundle added to system roots |
+| `allow-insecure-http` | Optional string `"true"` to permit plaintext HTTP; absent or `"false"` requires HTTPS |
 
 No credential values belong in pool manifests, Git, status, events, or logs.
-The operator requires HTTPS for catalog endpoints as well as authentication,
-verifies server certificates, and does not follow authenticated HTTP redirects.
+By default the operator requires HTTPS for catalog endpoints as well as
+authentication. Starting with `v1.3.1`, an HTTP-only deployment may explicitly set
+`allow-insecure-http: "true"` in the referenced credentials Secret. This allows
+HTTP for Keystone and all catalog service endpoints using that Secret. **HTTP
+transmits application credentials, tokens, and API data without TLS protection.**
+Opt in only where that transport is acceptable. This does not disable certificate
+verification on HTTPS endpoints. Authenticated redirects remain disabled.
+Only the exact strings `"true"` and `"false"` are accepted; invalid values fail closed.
+
+For an existing Secret, this patch changes only the transport opt-in:
+
+```sh
+kubectl -n example-cluster patch secret example-openstack-credentials \
+  --type=merge -p '{"stringData":{"allow-insecure-http":"true"}}'
+```
+
+Keep `auth-url` set to the actual scheme served by Keystone. Upgrading and changing
+this Secret applies to existing workers on their next reconciliation; no worker
+replacement or pool-spec change is needed. The client cache is invalidated by the
+Secret resource version. To require HTTPS again, set the key to `"false"` or remove
+it. Switching endpoint scheme after resources exist may change cloud scope; the
+existing `CloudScopeChanged` guard still applies.
+
 There is no insecure-TLS option. ISO download uses system certificate trust;
 install a private InfraEnv image-service CA into the operator's system trust store
 when needed. The Secret's `ca.crt` configures OpenStack API trust only.
@@ -59,8 +81,8 @@ cleanup; it never authorizes deleting a same-named resource in a different proje
 
 ## Deployment and example
 
-Use operator image `v1.3.0` or newer for OpenStack support. For development, build
-an image from this working tree and make it available to your test cluster.
+Use operator image `v1.3.1` or newer for HTTP opt-in and safe error diagnostics.
+For development, build an image from this working tree and make it available to your test cluster.
 Apply all four CRDs before upgrading the controller. The Helm chart upgrade
 instructions cover the separate CRD update required by Helm.
 
@@ -143,20 +165,45 @@ replacement through the normal CAPI lifecycle.
 
 ## Troubleshooting and recovery
 
-Inspect `OpenStackAgent.status.phase`, its Ready condition, and recorded resource
-IDs. Provider errors deliberately omit raw response bodies and URLs. Investigate
-request failures using your cloud's authorized audit facilities rather than
-expecting credentials or signed download URLs in operator logs.
+Inspect `OpenStackAgent.status.phase` and its Ready condition **message**. Starting
+with `v1.3.1`, the message and controller error logs include the service, operation,
+safe error category, HTTP status (when available), and validated OpenStack request
+ID (when provided). The condition reason remains a stable machine-readable code.
+
+```sh
+kubectl -n example-cluster get openstackagent example-worker \
+  -o jsonpath='{.status.phase}{"\n"}{range .status.conditions[*]}{.type}{": "}{.reason}{"\n"}{.message}{"\n"}{end}'
+kubectl -n agent-forge-operator-system logs deployment/agent-forge-operator --since=15m
+```
+
+For example, a failed Nova create may report
+`OpenStackRequestFailed; service=nova; operation=create-server; category=HTTPResponse; HTTP 503 Service Unavailable`.
+Retryable errors are logged with controller-runtime backoff; permanent errors are
+logged when the diagnostic changes. Read status for the current diagnostic.
+
+Raw errors, response bodies, URLs, certificate names, IP addresses, credential
+values, and arbitrary headers are never forwarded. Only a request ID matching
+`req-` followed by a UUID is accepted from `X-Openstack-Request-Id` or
+`X-Compute-Request-Id`; malformed values are omitted. Use that ID to correlate
+with authorized cloud service logs for any server-side detail that cannot safely
+be exposed by the operator. `UnclassifiedClientError` means no safe typed category
+was recognized; there is no raw-error logging switch.
 
 | Condition/reason | Action |
 | --- | --- |
 | `CredentialsUnavailable`, `MissingCredentialKey` | Check the referenced Secret and required key names. |
-| `InvalidCACertificate`, `InvalidAuthenticationURL` | Supply a valid PEM bundle and HTTPS Keystone endpoint. |
+| `InvalidCACertificate`, `InvalidAuthenticationURL` | Supply a valid PEM bundle and absolute HTTP(S) Keystone URL without user information, query, or fragment. |
+| `HTTPSRequired` | Use HTTPS, or explicitly permit plaintext transport with the Secret's `allow-insecure-http: "true"` key. |
+| `InvalidHTTPPolicy` | Set the Secret's `allow-insecure-http` key to exactly `"true"` or `"false"`, or remove it. |
 | `ProjectScopeMismatch`, `CloudScopeChanged` | Restore credentials for the expected project and original cloud scope. |
 | `NetworkNotUnique`, `FlavorNotUnique` | Use an exact unique name or an explicit ID. |
 | `SubnetDHCPMismatch` | Select a subnet with the requested network/DHCP configuration. |
 | `ConfigurationRejected` | Check cloud policy, quotas, supported mappings, and requested placement. |
-| `RateLimited`, `OpenStackRequestFailed` | Transient failures back off and retry; inspect service health. |
+| `RateLimited`, `OpenStackRequestFailed` | Read the message for service, operation, category, HTTP status, and request ID; requests back off and retry. |
+| Category `HTTPResponseToHTTPSClient` | The endpoint serves HTTP but was addressed with HTTPS. Correct the scheme and, if using HTTP, explicitly opt in. |
+| Category `TLSUnknownAuthority`, `TLSHostnameMismatch`, `TLSCertificateInvalid` | Check `ca.crt`, endpoint hostname, and certificate validity; HTTP opt-in does not disable HTTPS verification. |
+| Category `DNSResolutionFailed`, `ConnectionRefused`, `NetworkUnreachable`, `RequestTimeout` | Check operator connectivity to the indicated service and timeout settings. |
+| Category `EndpointNotFound`, `ServiceNotFound` | Check the configured region and public service endpoints in the authenticated catalog. |
 | `CreateOutcomeUnknown` | A POST may have succeeded. Inspect the recorded resource kind and exact UID-derived ownership. Do not blindly retry creation. |
 | `InfrastructureResourceFailed`, `DiscoveryImageFailed` | Inspect the failed resource. No installed disk or instance is automatically replaced. |
 | `DiscoveryImageChangedBeforeUpload` | Source bytes changed after pinning. Replace the uninstalled worker through CAPI so it obtains the new image identity. |

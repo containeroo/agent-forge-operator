@@ -29,6 +29,9 @@ volume access. There is no OpenStack ISO ejection option.
 
 OpenStack support is available starting with operator `v1.3.0`. Apply all four
 CRDs before upgrading the controller, including when upgrading through Helm.
+Operator `v1.3.1` adds safe service/operation diagnostics in worker conditions and
+logs, plus explicit HTTP opt-in through the credentials Secret. HTTPS remains the
+default; see the setup guide for the plaintext transport trade-off.
 
 ## vSphere discovery ISO lifecycle
 

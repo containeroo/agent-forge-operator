@@ -107,13 +107,15 @@ func (r *OpenStackAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 	if err != nil {
-		// Only fixed, sanitized reasons leave the provider boundary. Kubernetes and
+		// Only sanitized diagnostics leave the provider boundary. Kubernetes and
 		// ISO errors are also replaced rather than exposing arbitrary response text.
 		safe := &osapi.Error{Reason: "ReconcileFailed", Retryable: true}
 		_ = errors.As(err, &safe)
 		reason := safe.Reason
+		previous := meta.FindStatusCondition(a.Status.Conditions, conditionReady)
+		changed := previous == nil || previous.Reason != reason || previous.Message != safe.Error()
 		meta.SetStatusCondition(&a.Status.Conditions, metav1.Condition{Type: conditionReady, Status: metav1.ConditionFalse,
-			ObservedGeneration: a.Generation, Reason: reason, Message: reason})
+			ObservedGeneration: a.Generation, Reason: reason, Message: safe.Error()})
 		if !safe.Retryable {
 			a.Status.Phase = "Failed"
 		}
@@ -123,6 +125,9 @@ func (r *OpenStackAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if safe.Retryable {
 			return ctrl.Result{}, safe
 		} // controller-runtime exponential backoff
+		if changed {
+			ctrl.LoggerFrom(ctx).Error(safe, "OpenStack reconciliation failed")
+		}
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 	if !controllerutil.ContainsFinalizer(a, openStackFinalizer) {
